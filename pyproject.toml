@@ -64,7 +64,6 @@ scheduler = [  # TODO Better name
 ]
 sqs = [
     "aiobotocore ~=2.15",
-    "types-aiobotocore[sqs] ~=2.15",
 #    "aws-lambda-powertools",  # To migrate from Lambda
 ]
 kafka = [
@@ -97,6 +96,7 @@ dev-types = [
     "types-protobuf",
 #    "grpc-stubs",  # Hasn't been updated for 2+ years...
     "types-boto3[sqs]",
+    "types-aiobotocore[sqs] ~=2.15",
 ]
 examples = [
     "fast-depends ~=2.4",

@@ -5,7 +5,7 @@
 groups = ["default", "cron", "dev", "dev-otel", "dev-types", "examples", "grpc", "http", "integration-tests", "kafka", "nats", "rabbitmq", "scheduler", "sqs", "unit-tests"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:6fd61a5f423c857845fbcce4637546d38c9134d57dbc115d70433b8fd9646a65"
+content_hash = "sha256:97248a3095b0b0d390b3d870e4e44ee2942cc3a91813bc06e8d52456f57c33d1"
 
 [[metadata.targets]]
 requires_python = ">=3.10"
@@ -347,7 +347,7 @@ name = "botocore-stubs"
 version = "1.37.10"
 requires_python = ">=3.8"
 summary = "Type annotations and code completion for botocore"
-groups = ["dev-types", "sqs"]
+groups = ["dev-types"]
 dependencies = [
     "types-awscrt",
 ]
@@ -1117,7 +1117,7 @@ files = [
 
 [[package]]
 name = "hypothesis"
-version = "6.128.2"
+version = "6.128.3"
 requires_python = ">=3.9"
 summary = "A library for property-based testing"
 groups = ["unit-tests"]
@@ -1127,8 +1127,8 @@ dependencies = [
     "sortedcontainers<3.0.0,>=2.1.0",
 ]
 files = [
-    {file = "hypothesis-6.128.2-py3-none-any.whl", hash = "sha256:a4815dfb8bccfe26ccffa26e4c50d2f07adb45b1b4c66f4dd23ffbfb8cbf8ed3"},
-    {file = "hypothesis-6.128.2.tar.gz", hash = "sha256:a6e0e61bdb9ee6d1459687e4169e76a7bce830bb88f7e9948c2c1c4c39dd74b3"},
+    {file = "hypothesis-6.128.3-py3-none-any.whl", hash = "sha256:7eb4ac204fafcadf27f59ece9637b7437d232c8e371e930c2e54d1f649deb535"},
+    {file = "hypothesis-6.128.3.tar.gz", hash = "sha256:6b2d5d7b149eeb71abf6fa1c27003234dfaea054729ea5f1438d4390eb691472"},
 ]
 
 [[package]]
@@ -1907,7 +1907,7 @@ files = [
 
 [[package]]
 name = "structlog"
-version = "25.1.0"
+version = "25.2.0"
 requires_python = ">=3.8"
 summary = "Structured Logging for Python"
 groups = ["dev"]
@@ -1915,8 +1915,8 @@ dependencies = [
     "typing-extensions; python_version < \"3.11\"",
 ]
 files = [
-    {file = "structlog-25.1.0-py3-none-any.whl", hash = "sha256:843fe4f254540329f380812cbe612e1af5ec5b8172205ae634679cd35a6d6321"},
-    {file = "structlog-25.1.0.tar.gz", hash = "sha256:2ef2a572e0e27f09664965d31a576afe64e46ac6084ef5cec3c2b8cd6e4e3ad3"},
+    {file = "structlog-25.2.0-py3-none-any.whl", hash = "sha256:0fecea2e345d5d491b72f3db2e5fcd6393abfc8cd06a4851f21fcd4d1a99f437"},
+    {file = "structlog-25.2.0.tar.gz", hash = "sha256:d9f9776944207d1035b8b26072b9b140c63702fd7aa57c2f85d28ab701bd8e92"},
 ]
 
 [[package]]
@@ -2048,7 +2048,7 @@ name = "types-aiobotocore"
 version = "2.21.1"
 requires_python = ">=3.8"
 summary = "Type annotations for aiobotocore 2.21.1 generated with mypy-boto3-builder 8.10.0"
-groups = ["sqs"]
+groups = ["dev-types"]
 dependencies = [
     "botocore-stubs",
     "typing-extensions>=4.1.0; python_version < \"3.12\"",
@@ -2063,7 +2063,7 @@ name = "types-aiobotocore-sqs"
 version = "2.21.1"
 requires_python = ">=3.8"
 summary = "Type annotations for aiobotocore SQS 2.21.1 service generated with mypy-boto3-builder 8.10.0"
-groups = ["sqs"]
+groups = ["dev-types"]
 dependencies = [
     "typing-extensions; python_version < \"3.12\"",
 ]
@@ -2078,7 +2078,7 @@ version = "2.21.1"
 extras = ["sqs"]
 requires_python = ">=3.8"
 summary = "Type annotations for aiobotocore 2.21.1 generated with mypy-boto3-builder 8.10.0"
-groups = ["sqs"]
+groups = ["dev-types"]
 dependencies = [
     "types-aiobotocore-sqs<2.22.0,>=2.21.0",
     "types-aiobotocore==2.21.1",
@@ -2093,7 +2093,7 @@ name = "types-awscrt"
 version = "0.24.1"
 requires_python = ">=3.8"
 summary = "Type annotations and code completion for awscrt"
-groups = ["dev-types", "sqs"]
+groups = ["dev-types"]
 files = [
     {file = "types_awscrt-0.24.1-py3-none-any.whl", hash = "sha256:f3f2578ff74a254a79882b95961fb493ba217cebc350b3eb239d1cd948d4d7fa"},
     {file = "types_awscrt-0.24.1.tar.gz", hash = "sha256:fc6eae56f8dc5a3f8cc93cc2c7c332fa82909f8284fbe25e014c575757af397d"},

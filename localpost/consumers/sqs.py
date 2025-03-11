@@ -4,17 +4,19 @@ import dataclasses as dc
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from typing import TypeAlias, cast, final
+from typing import TypeAlias, cast, final, TYPE_CHECKING
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group, to_thread
-from types_aiobotocore_sqs import SQSClient
-from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestRequestTypeDef
 from typing_extensions import TypedDict
 
 from localpost import flow
 from localpost.flow import Handler, HandlerManager
 from localpost.hosting import ServiceLifetimeManager
+
+if TYPE_CHECKING:
+    from types_aiobotocore_sqs import SQSClient
+    from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef
 
 __all__ = [
     "delete_messages",
@@ -24,7 +26,7 @@ __all__ = [
     "lambda_handler",
 ]
 
-ClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager[SQSClient]]
+ClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager["SQSClient"]]
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ async def delete_messages(messages: Sequence[SqsMessage]):
 @final
 @dc.dataclass(frozen=True, slots=True)
 class SqsMessage(AbstractAsyncContextManager[str, None]):
-    payload: MessageTypeDef
+    payload: "MessageTypeDef"
     """
     Raw message data from the SQS queue.
 
@@ -79,7 +81,7 @@ class SqsMessage(AbstractAsyncContextManager[str, None]):
     """
 
     _consumer: SqsQueueConsumer
-    _client: SQSClient
+    _client: "SQSClient"
 
     def __repr__(self):
         return f"<SqsMessage(queue_name={self._consumer.queue_name})>"
@@ -169,7 +171,7 @@ def _queue_name_from_url(url: str) -> str:
     return parse_result.path.split("/")[-1]
 
 
-def create_client() -> AbstractAsyncContextManager[SQSClient]:
+def create_client() -> AbstractAsyncContextManager["SQSClient"]:
     """
     Default SQS client factory.
     """
@@ -195,7 +197,7 @@ class SqsQueueConsumer:
         self.handler = handler
         self.client_factory: ClientFactory = client_factory or create_client
         self.consumers = consumers
-        self.receive_req_template: ReceiveMessageRequestRequestTypeDef = {
+        self.receive_req_template: "ReceiveMessageRequestTypeDef" = {
             "QueueUrl": "",  # Will be filled in later
             "MessageAttributeNames": ["All"],
             "MaxNumberOfMessages": 10,
@@ -204,16 +206,16 @@ class SqsQueueConsumer:
 
     async def _run_consumer(
         self,
-        client: SQSClient,
+        client: "SQSClient",
         message_handler: Handler[SqsMessage],
         shutdown_scope: CancelScope,
     ):
         queue_url = cast(str, self.queue_url)
-        receive_req = cast(ReceiveMessageRequestRequestTypeDef, self.receive_req_template | {"QueueUrl": queue_url})
-        no_messages: Sequence[MessageTypeDef] = []
+        receive_req: "ReceiveMessageRequestTypeDef" = self.receive_req_template | {"QueueUrl": queue_url}
+        no_messages: Sequence["MessageTypeDef"] = []
 
         # TODO Check HTTP status and retry on errors (exponential backoff)
-        async def pull_messages() -> Sequence[MessageTypeDef]:
+        async def pull_messages() -> Sequence["MessageTypeDef"]:
             pull_resp = await client.receive_message(**receive_req)
             return pull_resp.get("Messages", no_messages)
 
