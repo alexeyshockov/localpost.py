@@ -1,0 +1,24 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [ published ]
+
+jobs:
+  # https://pdm-project.org/latest/usage/publish/#publish-with-trusted-publishers
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # Required for PyPI trusted publishing
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+      - uses: pdm-project/setup-pdm@v4
+        with:
+          python-version-file: ".python-version"
+          cache: true
+      - run: pdm install --no-lock --no-editable
+      - run: pdm build
+      - run: pdm publish --no-build

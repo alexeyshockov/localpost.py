@@ -1,0 +1,163 @@
+[build-system]
+requires = ["pdm-backend", "pdm-build-locked"]
+build-backend = "pdm.backend"
+
+# See also https://daniel.feldroy.com/posts/2023-08-pypi-project-urls-cheatsheet
+[project.urls]
+homepage = 'https://github.com/alexeyshockov/localpost.py'
+docs = 'https://alexeyshockov.github.io/localpost.py/'
+changelog = 'https://github.com/alexeyshockov/localpost.py/blob/main/CHANGELOG.md'
+
+[project]
+name = "localpost"
+description = "Consumers framework for different message brokers & simple in-process task scheduler"
+requires-python = ">=3.10"
+dynamic = ["version"]
+readme = "pypi_readme.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Alexey Shokov" },
+]
+keywords = [
+    "scheduler", "cron",
+    "message brokers", "sqs", "kafka", "nats", "rabbitmq",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+    "Framework :: AsyncIO",
+    "Framework :: AnyIO",
+    "Framework :: Trio",
+    "Topic :: System",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Office/Business :: Scheduling",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "typing_extensions ~=4.10",
+    "anyio >=3.6,<5.0",
+]
+
+[project.optional-dependencies]
+http = [  # Hosting service
+    "uvicorn ~=0.30",
+]
+grpc = [  # Hosting service
+    "grpcio ~=1.68",
+]
+cron = [
+    "croniter >=2.0,<4.0",
+]
+scheduler = [  # TODO Better name
+#    "localpost[cron]",
+    "humanize >=3.0,<5.0",
+    "pytimeparse2 ~=1.6",
+]
+sqs = [
+    "aiobotocore ~=2.15",
+    "types-aiobotocore[sqs] ~=2.15",
+#    "aws-lambda-powertools",  # To migrate from Lambda
+]
+kafka = [
+    "confluent-kafka ~=2.4",
+#    "confluent-kafka[schemaregistry,protobuf] ~=2.4",
+]
+nats = [
+    "nats-py ~=2.8",
+]
+rabbitmq = [
+    "aio-pika >=9.1,<10.0",
+]
+
+# Yay, https://peps.python.org/pep-0735/ is finally here!
+#[tool.pdm.dev-dependencies]
+[dependency-groups]
+dev = [
+    "structlog ~=25.0",
+    "aws-lambda-powertools",
+    "confluent-kafka[schemaregistry,protobuf]",
+    "grpcio-tools ~=1.68",
+]
+dev-otel = [
+    "opentelemetry-exporter-otlp",  # Both gRPC and HTTP
+    "opentelemetry-instrumentation-confluent-kafka >=0.50b0",
+]
+dev-types = [
+    "types-croniter",
+#    "types-confluent-kafka",  # Many signatures do not match to the actual implementation
+    "types-protobuf",
+#    "grpc-stubs",  # Hasn't been updated for 2+ years...
+    "types-boto3[sqs]",
+]
+examples = [
+    "fast-depends ~=2.4",
+    "fastapi-slim ~=0.111",
+]
+unit-tests = [
+    "pytest ~=8.1",
+    "anyio[test]",
+    "pytest-mock ~=3.14",
+    "pytest-cov ~=6.0",
+    "coverage[toml] ~=7.6",
+]
+integration-tests = [
+    "pytest ~=8.1",
+    "testcontainers[kafka,localstack,nats] ~=4.8",
+]
+
+[tool.pyright]
+include = ["localpost"]
+
+[[tool.mypy.overrides]]
+module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]
+follow_untyped_imports = true
+
+[tool.ruff]
+line-length = 120
+format.docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+    "Q",  # flake8-quotes
+]
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.version]
+source = "scm"
+write_to = "localpost/_version.py"
+write_template = "__version__ = '{}'"
+
+[tool.pdm.build]
+excludes = ["./**/.git", "tests", "examples"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+#addopts = "-q -m 'not integration'"
+testpaths = [
+    "tests",
+]
+python_files = [
+    "*.py",
+]
+markers = [
+    "integration: Consumers (SQS, Kafka, NATS, RabbitMQ) integration tests",
+]

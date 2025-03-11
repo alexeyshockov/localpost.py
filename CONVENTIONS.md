@@ -1,0 +1,3 @@
+- Use AnyIO for async stuff, to follow structured concurrency patterns
+- For public API, use types everywhere (and validate it using Pyright, see `just check-type-coverage`)
+- For internals API, use types only where it makes sense, to make the code more readable
