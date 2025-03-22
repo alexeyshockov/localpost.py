@@ -41,7 +41,7 @@ class HostedService(Protocol):
     # @property
     # def func(self) -> HostedServiceFunc: ...
 
-    # TODO Support timeouts
+    # Maybe later, via middlewares
     # start_timeout: float | None = None
     # shutdown_timeout: float | None = None
 
@@ -120,41 +120,40 @@ class AppHost(Host):  # type: ignore
 
     @property
     def services(self) -> Sequence[HostedService]:
-        services: Sequence[HostedService] = self._services
-        return services
+        return self._services
 
-    async def _run(self, root_svc_lifetime: ServiceLifetimeManager) -> None:
+    async def _run(self, root_lifetime: ServiceLifetimeManager) -> None:
         services = self._services
         if not services:
             raise RuntimeError("No services to run")
 
         for hs in services:
-            hs.lifetime = root_svc_lifetime.start_child_service(hs.func, name=hs.name)
+            hs.lifetime = root_lifetime.start_child_service(hs.func, name=hs.name)
         foreground_services = [cs for cs in services if not cs.is_daemon]
 
         async def when_service_stopped(svc: _HostedService):
-            await svc.lifetime.stopped.wait()
+            await svc.lifetime.stopped
             if svc.lifetime.exception and not svc.is_daemon:
-                root_svc_lifetime.set_shutting_down(reason=svc.lifetime.exception)
+                root_lifetime.set_shutting_down(reason="Child service crashed")
             if svc.mode is ServiceMode.MAIN:
-                root_svc_lifetime.set_shutting_down()
+                root_lifetime.set_shutting_down()
 
         async def when_foreground_services_stopped():
             await wait_all(s.lifetime.stopped for s in foreground_services)
-            root_svc_lifetime.set_shutting_down()
+            root_lifetime.set_shutting_down()
 
         async def when_services_started():
             await wait_all(cs.lifetime.started for cs in services)
             # Consider the host started only when all services are started
-            root_svc_lifetime.set_started()
+            root_lifetime.set_started()
 
-        async with create_task_group() as tg:
+        async with create_task_group() as observers_tg:
             for hs in services:
-                tg.start_soon(when_service_stopped, hs)
-            start_task_soon(tg, when_foreground_services_stopped)
-            start_task_soon(tg, when_services_started)
-            await root_svc_lifetime.shutting_down.wait()
-            tg.cancel_scope.cancel()
+                observers_tg.start_soon(when_service_stopped, hs)
+            start_task_soon(observers_tg, when_foreground_services_stopped)
+            start_task_soon(observers_tg, when_services_started)
+            await root_lifetime.shutting_down
+            observers_tg.cancel_scope.cancel()
 
     def add_uniq_service(
         self, target: HostedServiceFunc, /, *, name: str | None = None, main=False, daemon=False
@@ -163,16 +162,14 @@ class AppHost(Host):  # type: ignore
         if hs.name in {s.name for s in self._services}:
             raise ValueError(f"Service with the same name has been already registered: {hs.name}")
         self._services.append(hs)
-        svc: HostedService = hs
-        return svc
+        return hs
 
     def add_service(
         self, target: HostedServiceFunc, /, *, name: str | None = None, main=False, daemon=False
     ) -> HostedService:
         hs = _HostedService.create(target, name=name, main=main, daemon=daemon)
         self._services.append(hs)
-        svc: HostedService = hs
-        return svc
+        return hs
 
     def register_service(
         self,

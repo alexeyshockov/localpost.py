@@ -252,7 +252,7 @@ TriggerFactoryMiddleware: TypeAlias = Callable[
         AbstractAsyncContextManager[AsyncIterator[T]],  # Trigger[T] (source)
         ScheduledTask,
     ],
-    AsyncIterable[T2],  # TODO AbstractAsyncContextManager[AsyncIterator[T]]
+    AsyncIterable[T2],  # TODO AbstractAsyncContextManager[AsyncIterator[T2]]
 ]
 TriggerFactoryDecorator: TypeAlias = Callable[
     [Callable[[ScheduledTask], AbstractAsyncContextManager[AsyncIterator[T]]]],  # TriggerFactory[T]
@@ -278,8 +278,7 @@ class Scheduler:
 
     @property
     def scheduled_tasks(self) -> Sequence[ScheduledTask]:
-        tasks: Sequence[ScheduledTask] = self._scheduled
-        return tasks
+        return self._scheduled
 
     @property
     def started(self) -> EventView:
@@ -324,6 +323,10 @@ class Scheduler:
         return _decorator
 
     def as_task(self, *, name: str | None = None):
+        """
+        Create a task from the given callable.
+        """
+
         def _decorator(func: TaskHandler[T, ResT]) -> Task[T, ResT]:
             t = Task(func, name=name)
             self._tasks.append(t)
@@ -332,6 +335,10 @@ class Scheduler:
         return _decorator
 
     def task(self, tpl: TriggerFactory[T], /, *, name: str | None = None):
+        """
+        Schedule a task with the given trigger.
+        """
+
         def _decorator(func: TaskHandler[T, ResT]) -> ScheduledTask[T, ResT]:
             t = self.as_task(name=name)(func)
             st = self.schedule(tpl)(t)
@@ -348,7 +355,7 @@ class Scheduler:
 
         services = [start_task(t) for t in self._scheduled]
         if not services:
-            logger.warning("Scheduler has no tasks")
+            logger.warning("No tasks to run")
             service_lifetime.set_started()
             return
 
@@ -358,13 +365,13 @@ class Scheduler:
 
         async def when_tasks_started():
             await wait_all(task_svc.started for task_svc in services)
-            # Consider the scheduler started only when all tasks are started
+            # Consider the scheduler started only when all the tasks are started
             service_lifetime.set_started()
 
         async with create_task_group() as tg:
             start_task_soon(tg, when_tasks_done)
             start_task_soon(tg, when_tasks_started)
-            await service_lifetime.shutting_down.wait()
+            await service_lifetime.shutting_down
             tg.cancel_scope.cancel()
 
 

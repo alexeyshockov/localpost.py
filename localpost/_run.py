@@ -25,7 +25,7 @@ async def arun(target: Host | Scheduler) -> int:
     async def handle_signals():
         with open_signal_receiver(*HANDLED_SIGNALS) as signals:
             async for _ in signals:
-                if not host.shutting_down.is_set():  # First Ctrl+C (or other termination method)
+                if not host.shutting_down:  # First Ctrl+C (or other termination method)
                     logger.info("Shutting down...")
                     host.shutdown()
                     continue

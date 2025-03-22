@@ -149,7 +149,7 @@ class KafkaTopicConsumer:
         shutting_down: EventView,
     ) -> None:
         is_async_handler = is_async_callable(message_handler)
-        while not shutting_down.is_set():
+        while not shutting_down:
             from_thread.check_cancelled()
             poll_res = client.poll(self.poll_timeout)  # Poll with a short timeout, so we can respect the cancellation
             if poll_res is None:

@@ -16,7 +16,7 @@ def a_sync_service(service_lifetime: ServiceLifetimeManager):
     service_lifetime.set_started()
     # Do not do infinite loops in a sync service function, as there is no way to interrupt it from the host.
     # Always check the service_lifetime.shutting_down event to see if the service should stop.
-    while not service_lifetime.shutting_down.is_set():
+    while not service_lifetime.shutting_down:
         print(f"{a_sync_service.name} running")
         time.sleep(1)
         raise RuntimeError("This is a test error from _sync_")

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import dataclasses as dc
 import inspect
+import itertools
 import logging
-import math
 import threading
-from collections.abc import AsyncGenerator, Generator, Iterable, Sequence
+from collections.abc import AsyncGenerator, Collection, Generator, Iterable, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from functools import cached_property, wraps
 from typing import (
@@ -26,9 +26,7 @@ from typing import (
 from anyio import (
     CancelScope,
     CapacityLimiter,
-    Event,
     create_task_group,
-    fail_after,
     get_cancelled_exc_class,
     to_thread,
 )
@@ -39,12 +37,14 @@ from typing_extensions import Self, TypeVarTuple, Unpack
 from localpost._utils import (
     NO_OP_TS,
     EventView,
+    _Event,
     choose_anyio_backend,
     def_full_name,
     is_async_callable,
     start_task_soon,
     unwrap_exc,
-    wait_any,
+    wait_all,
+    wait_any_from,
 )
 
 T = TypeVar("T")
@@ -105,9 +105,6 @@ class ServiceLifetime(Protocol):
     def name(self) -> str: ...
 
     @property
-    def shutdown_timeout(self) -> float: ...
-
-    @property
     def state(self) -> ServiceState: ...
 
     @property
@@ -146,9 +143,6 @@ class ServiceLifetimeManager(Protocol):
     def name(self) -> str: ...
 
     @property
-    def shutdown_timeout(self) -> float: ...
-
-    @property
     def state(self) -> ServiceState: ...
 
     @property
@@ -182,8 +176,6 @@ class ServiceLifetimeManager(Protocol):
         /,
         *,
         name: str | None = None,
-        start_timeout: float = math.inf,
-        stop_timeout: float = math.inf,
     ) -> ServiceLifetime: ...
 
     @overload
@@ -193,8 +185,6 @@ class ServiceLifetimeManager(Protocol):
         /,
         *func_args: Unpack[PosArgsT],
         name: str | None = None,
-        start_timeout: float = math.inf,
-        stop_timeout: float = math.inf,
     ) -> ServiceLifetime: ...
 
     # PyCharm has a bug when calling a TypeVarTuple-parameterized function with 0 arguments (see
@@ -205,8 +195,6 @@ class ServiceLifetimeManager(Protocol):
         /,
         *func_args,
         name: str | None = None,
-        start_timeout: float = math.inf,
-        stop_timeout: float = math.inf,
     ) -> ServiceLifetime: ...
 
 
@@ -221,6 +209,11 @@ ServiceFunc: TypeAlias = Union[
     Callable[[], Awaitable[Any]],  # SimpleService
     Callable[[ServiceLifetimeManager], Any],  # SyncService
     Callable[[], Any],  # SimpleSyncService
+]
+
+ServiceMiddleware: TypeAlias = Callable[
+    [Callable[[ServiceLifetimeManager], Awaitable[Any]]],  # [HostedServiceFunc]
+    Callable[[ServiceLifetimeManager], Awaitable[Any]],  # HostedServiceFunc
 ]
 
 
@@ -274,30 +267,30 @@ def hosted_service(target: ServiceFunc) -> HostedServiceFunc:
 
 
 class _ServiceLifetime:
-    def __init__(self, name: str, host: Host):
-        self.tg = create_task_group()
+    def __init__(self, name: str, host: Host, parent_tg: TaskGroup):
         self.name = name
         self.host = host
+        self.parent_tg = parent_tg
+        self.tg = create_task_group()
         self.child_services: list[ServiceLifetime] = []
-        self.shutdown_timeout = math.inf  # No timeout by default
 
-        self.started = Event()
+        self.started = _Event()
         self.value: Any = None
 
         self.graceful_shutdown_scope: CancelScope | None = None
-        self.shutting_down = Event()
+        self.shutting_down = _Event()
         self.shutdown_reason: BaseException | str | None = None
 
-        self.stopped = Event()
+        self.stopped = _Event()
         self.exception: BaseException | None = None
 
     @property
     def state(self) -> ServiceState:
-        if self.stopped.is_set():
+        if self.stopped:
             return Stopped(self.shutdown_reason, self.exception)
-        if self.shutting_down.is_set():
+        if self.shutting_down:
             return ShuttingDown(self.shutdown_reason)
-        if self.started.is_set():
+        if self.started:
             return Running(self.value)
         return Starting()
 
@@ -313,11 +306,11 @@ class _ServiceLifetime:
         }
 
     async def wait_started(self) -> Any:
-        await self.started.wait()
+        await self.started
         return self.value
 
     def set_started(self, value=None, /, *, graceful_shutdown_scope: CancelScope | None = None):
-        if self.stopped.is_set() or self.shutting_down.is_set() or self.started.is_set():
+        if self.stopped or self.shutting_down or self.started:
             return
 
         def _do():
@@ -332,7 +325,7 @@ class _ServiceLifetime:
         self.shutdown(reason=reason)
 
     def shutdown(self, *, reason: BaseException | str | None = None):
-        if self.stopped.is_set() or self.shutting_down.is_set():
+        if self.stopped or self.shutting_down:
             return
 
         def _do():
@@ -350,69 +343,30 @@ class _ServiceLifetime:
         /,
         *target_args,
         name: str | None = None,
-        start_timeout: float = math.inf,
     ) -> ServiceLifetime:
-        if self.stopped.is_set():
+        if self.stopped:
             raise RuntimeError(f"{self.name} is stopping or stopped")
 
         def start_service():
-            svc_lifetime = _ServiceLifetime(name or def_full_name(func), self.host)
+            svc_func, svc_name = _resolve_service(func, name)
+            svc_lifetime = _ServiceLifetime(svc_name, self.host, self.tg)
             child_lifetime = cast(ServiceLifetime, svc_lifetime)
             self.child_services.append(child_lifetime)
-            _start_service(self.tg, svc_lifetime, func, *target_args, start_timeout=start_timeout)
+            self.tg.start_soon(_run_service, svc_func, target_args, svc_lifetime)
             return child_lifetime
 
         return self.host.in_host_thread(start_service)
 
 
-def _start_service(
-    parent_tg: TaskGroup, svc_lifetime: _ServiceLifetime, func, *func_args, start_timeout: float = math.inf
-):
-    parent_tg.start_soon(_run_service, func, func_args, svc_lifetime, start_timeout)
-    if not math.isinf(svc_lifetime.shutdown_timeout):
-        parent_tg.start_soon(_observe_service_shutdown, svc_lifetime)
+def _resolve_service(func, name=None) -> tuple[Callable[..., Awaitable], str]:
+    return func, name or getattr(func, "name", def_full_name(func))
 
 
-async def _observe_service_shutdown(lifetime: _ServiceLifetime):
-    await wait_any(lifetime.shutting_down, lifetime.stopped)
-    if lifetime.stopped.is_set():
-        return
-    service_scope = lifetime.tg.cancel_scope
-    timeout = lifetime.shutdown_timeout
-    assert timeout is not None
-    assert timeout >= 0
-    if math.isinf(timeout):
-        return
-    if timeout == 0:
-        service_scope.cancel()
-        return
-    try:
-        with fail_after(timeout):
-            await lifetime.stopped.wait()
-    except TimeoutError as exc:
-        lifetime.exception = exc
-        logger.error(f"{lifetime.name} shutdown timeout")
-        service_scope.cancel()
-
-
-async def _observe_service_startup(lifetime: _ServiceLifetime, timeout: float):
-    if math.isinf(timeout):
-        return
-    assert timeout > 0
-    try:
-        with fail_after(timeout):
-            await lifetime.started.wait()
-    except TimeoutError as exc:
-        lifetime.exception = exc
-        logger.error(f"{lifetime.name} startup timeout")
-        lifetime.tg.cancel_scope.cancel()
-
-
-async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLifetime, start_timeout: float = math.inf):
+async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLifetime):
     async def _service():
         await func(cast(ServiceLifetimeManager, svc_lifetime), *func_args)
         if child_services := svc_lifetime.child_services:
-            await svc_lifetime.shutting_down.wait()
+            await svc_lifetime.shutting_down
             for child in child_services:
                 child.shutdown()
 
@@ -422,7 +376,6 @@ async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLif
         # service_tg will be used for the service itself and its child services
         async with svc_lifetime.tg as service_tg:
             start_task_soon(service_tg, _service)
-            service_tg.start_soon(_observe_service_startup, svc_lifetime, start_timeout)
         logger.debug(f"{svc_name} stopped")
     except get_cancelled_exc_class() as c_exc:  # Cancellation exception inherits directly from BaseException
         svc_lifetime.exception = c_exc
@@ -443,27 +396,98 @@ class _HostExecContext:
     thread_id: int
     run_scope: CancelScope
 
-    def __init__(self, host: Host, portal: BlockingPortal, run_scope: CancelScope):
+    def __init__(self, host: Host, portal: BlockingPortal, tg: TaskGroup):
         self.portal = portal
         self.thread_id = threading.get_ident()
-        self.run_scope = run_scope
+        self.run_scope = tg.cancel_scope
 
-        self.root_service_lifetime = svc_lifetime = _ServiceLifetime(host.name, host)
-        svc_lifetime.shutdown_timeout = host.shutdown_timeout
-        svc_lifetime.started = cast(Event, host.started)
-        svc_lifetime.shutting_down = cast(Event, host.shutting_down)
-        svc_lifetime.stopped = cast(Event, host.stopped)
+        self.root_service_lifetime = svc_lifetime = _ServiceLifetime(host.name, host, tg)
+        svc_lifetime.started = cast(_Event, host.started)
+        svc_lifetime.shutting_down = cast(_Event, host.shutting_down)
+        svc_lifetime.stopped = cast(_Event, host.stopped)
+
+
+def _services_from(target: HostedServiceFunc) -> Collection[HostedServiceFunc]:
+    if isinstance(target, MultiHost):
+        return target.services
+    return [target]
 
 
 @final
-class Host:
+class Host:  # HostedServiceFunc, see __call__ below
     def __init__(self, root_service: HostedServiceFunc, *, name: str | None = None):
-        self.name: str = name or "host"
+        self._name: str = name or def_full_name(root_service)
         self._root_service = root_service
-        self._shutdown_timeout = 10.0  # Seconds
-
         self._exec_context: _HostExecContext | None = None
         self._exit_code: int | None = None
+
+    def named(self, name: str) -> Host:
+        return Host(self._root_service, name=name)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def root_service(self) -> HostedServiceFunc:
+        return self._root_service
+
+    def __call__(self, lifetime: ServiceLifetimeManager) -> Awaitable[None]:
+        return self._root_service(lifetime)
+
+    def __add__(self, other: HostedServiceFunc) -> Host:
+        return MultiHost(_services_from(self), _services_from(other))
+
+    def __rshift__(self, wrapped: HostedServiceFunc | Collection[HostedServiceFunc]) -> Host:
+        """
+        Run `wrapped` service(s) inside this host, like in a context manager.
+        """
+        targets = _services_from(wrapped)
+        if not targets:
+            return self
+
+        async def _service(root_lifetime: ServiceLifetimeManager) -> None:
+            wrapper_lt = root_lifetime.start_child_service(self._root_service, name=self.name)
+            await wrapper_lt.started
+            wrapped_lts = [root_lifetime.start_child_service(s) for s in _services_from(wrapped)]
+
+            async def when_started():
+                await wait_all(lt.started for lt in wrapped_lts)
+                root_lifetime.set_started()
+
+            async def when_done():
+                await wait_any_from(lt.stopped for lt in wrapped_lts)
+                root_lifetime.set_shutting_down()
+
+            async def when_wrapper_done():
+                await wrapper_lt.stopped
+                root_lifetime.set_shutting_down(reason="Wrapper service stopped")
+
+            async with create_task_group() as observers_tg:
+                start_task_soon(observers_tg, when_started)
+                start_task_soon(observers_tg, when_done)
+                start_task_soon(observers_tg, when_wrapper_done)
+                await root_lifetime.shutting_down
+                observers_tg.cancel_scope.cancel()
+
+            for wrapped_lt in wrapped_lts:
+                wrapped_lt.shutdown()
+            await wait_all(wrapped_lt.stopped for wrapped_lt in wrapped_lts)
+            wrapper_lt.shutdown()
+
+        return Host(_service)
+
+    def __irshift__(self, wrapped: HostedServiceFunc | Iterable[HostedServiceFunc]) -> Host:
+        return self.__rshift__(wrapped)
+
+    def use(self, *middlewares: ServiceMiddleware) -> Host:
+        """
+        Apply a middleware to the hosted service (host's root service).
+        """
+        svc = self._root_service
+        for middleware in middlewares:
+            svc = middleware(svc)
+        return Host(svc, name=self.name)
 
     def __repr__(self):
         return f"<{self.__class__.__name__} {self.name!r}>"
@@ -482,15 +506,15 @@ class Host:
 
     @cached_property
     def started(self) -> EventView:
-        return Event()
+        return _Event()
 
     @cached_property
     def shutting_down(self) -> EventView:
-        return Event()
+        return _Event()
 
     @cached_property
     def stopped(self) -> EventView:
-        return Event()
+        return _Event()
 
     @property
     def _exec(self) -> _HostExecContext:
@@ -529,34 +553,20 @@ class Host:
     def stop(self) -> None:
         self.in_host_thread(self._exec.run_scope.cancel)
 
-    @property
-    def shutdown_timeout(self) -> float:
-        return self._shutdown_timeout
-
-    @shutdown_timeout.setter
-    def shutdown_timeout(self, value: float):
-        if value <= 0:
-            raise ValueError("Shutdown timeout must be positive")
-        self._shutdown_timeout = value
-        if self._exec_context:
-            self._exec_context.root_service_lifetime.shutdown_timeout = value
-
     @asynccontextmanager
     async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
         assert not self._exec_context
 
-        # A premature optimization
+        # A premature optimization, to save one task group nesting level
         tg: TaskGroup = exec_tg if exec_tg else portal._task_group  # noqa
-
-        self._exec_context = exec_context = _HostExecContext(self, portal, tg.cancel_scope)
-
-        _start_service(tg, exec_context.root_service_lifetime, self._root_service)
+        self._exec_context = exec_context = _HostExecContext(self, portal, tg)
+        tg.start_soon(_run_service, self._root_service, (), exec_context.root_service_lifetime)
         try:
             yield self
         finally:
-            if not self.stopped.is_set():
+            if not self.stopped:
                 # Wait till all services are stopped (act like a task group, not like a portal)
-                await self.stopped.wait()
+                await self.stopped
 
     @asynccontextmanager
     async def aserve(self, portal: BlockingPortal | None = None) -> AsyncGenerator[Self, Any]:
@@ -591,3 +601,34 @@ class Host:
         with start_blocking_portal(**choose_anyio_backend()) as thread:
             with thread.wrap_async_context_manager(self._aserve_in(thread)) as lifetime:
                 yield lifetime
+
+
+@final
+class MultiHost(Host):  # type: ignore[misc]
+    def __init__(self, *services: Iterable[HostedServiceFunc], name="multi_host"):
+        # TODO Better name by default
+        super().__init__(self._run, name=name)
+        self.services = tuple(itertools.chain(*services))
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} {self.name!r} with {len(self.services)} services>"
+
+    async def _run(self, root_lifetime: ServiceLifetimeManager) -> None:
+        svc_lifetimes = [root_lifetime.start_child_service(s) for s in self.services]
+        if not svc_lifetimes:
+            root_lifetime.set_started()
+            return
+
+        async def when_started():
+            await wait_all(lt.started for lt in svc_lifetimes)
+            root_lifetime.set_started()
+
+        async def when_done():
+            await wait_any_from(lt.stopped for lt in svc_lifetimes)
+            root_lifetime.set_shutting_down()
+
+        async with create_task_group() as observers_tg:
+            start_task_soon(observers_tg, when_started)
+            start_task_soon(observers_tg, when_done)
+            await root_lifetime.shutting_down
+            observers_tg.cancel_scope.cancel()

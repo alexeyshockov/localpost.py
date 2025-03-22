@@ -68,7 +68,13 @@ async def wait_trigger(time_spans: Iterable[timedelta], shutting_down: EventView
     # Order matters, the reader should be closed first (so the run loop can stop by itself)
     async with create_task_group() as main_tg, events_reader:
         start_task_soon(main_tg, generate)
-        yield events_reader
+        # yield events_reader
+        try:
+            yield events_reader
+        except GeneratorExit:
+            # Can happen, if a trigger is wrapped in a middleware, backed by a generator
+            # (otherwise, if we don't do that, it will be an unhandled exception in the task group)
+            pass
 
 
 @final

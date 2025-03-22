@@ -4,11 +4,10 @@ import dataclasses as dc
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from typing import TypeAlias, cast, final, TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias, TypedDict, cast, final
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group, to_thread
-from typing_extensions import TypedDict
 
 from localpost import flow
 from localpost.flow import Handler, HandlerManager
@@ -248,7 +247,7 @@ class SqsQueueConsumer:
                 tg.start_soon(self._run_consumer, client, message_handler, shutdown_scope)
 
             service_lifetime.set_started()
-            await service_lifetime.shutting_down.wait()
+            await service_lifetime.shutting_down
             for scope in consumer_scopes:
                 scope.cancel()
 

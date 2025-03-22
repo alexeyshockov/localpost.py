@@ -6,7 +6,7 @@ import inspect
 import random
 import signal
 import sys
-from collections.abc import Awaitable, Callable, Coroutine, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterable
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from datetime import timedelta
 from functools import wraps
@@ -24,7 +24,7 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, Event, create_task_group
+from anyio import CancelScope, create_task_group
 from anyio.abc import TaskGroup, TaskStatus
 from typing_extensions import NotRequired, Self
 
@@ -251,7 +251,32 @@ class EventView(Protocol):
 
     async def wait(self) -> None: ...
 
-    def is_set(self) -> bool: ...
+    def __await__(self) -> Generator[Any, Any, None]: ...
+
+    def __bool__(self) -> bool: ...
+
+
+@dc.dataclass(slots=True)
+class _Event(EventView):
+    _source: anyio.Event
+
+    def __init__(self) -> None:
+        self._source = anyio.Event()
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(is_set={self._source.is_set()})"
+
+    def set(self) -> None:
+        self._source.set()
+
+    def wait(self) -> Awaitable[None]:
+        return self._source.wait()
+
+    def __await__(self):
+        return self._source.wait().__await__()
+
+    def __bool__(self):
+        return self._source.is_set()
 
 
 @dc.dataclass(slots=True)
@@ -260,7 +285,7 @@ class EventViewProxy(EventView):
 
     def __init__(self) -> None:
         self.source = None
-        self._resolved = Event()
+        self._resolved = anyio.Event()
 
     def resolve(self, source: EventView) -> None:
         self.source = source.source if isinstance(source, EventViewProxy) else source
@@ -272,12 +297,15 @@ class EventViewProxy(EventView):
         assert self.source is not None
         await self.source.wait()
 
-    def is_set(self) -> bool:
-        return self.source.is_set() if self.source else False
+    def __await__(self):
+        return self.wait().__await__()
+
+    def __bool__(self):
+        return bool(self.source)
 
 
 async def _cancel_when(trigger: EventView | Callable[[], Awaitable[Any]], scope: CancelScope) -> None:
-    await (trigger() if callable(trigger) else trigger.wait())
+    await (trigger() if callable(trigger) else trigger)
     scope.cancel()
 
 
@@ -299,17 +327,16 @@ def cancellable_from(*events: EventView):
 
 
 async def wait_all(events: Iterable[EventView]) -> None:
-    assert events, "At least one event must be provided"
-
     async with create_task_group() as tg:
         for event in events:
             start_task_soon(tg, event.wait)
 
 
-async def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> None:
-    if not targets:
-        return
-
+async def wait_any_from(targets: Iterable[EventView | Callable[[], Awaitable[Any]]]) -> None:
     async with create_task_group() as tg:
         for t in targets:
             tg.start_soon(_cancel_when, t, tg.cancel_scope)
+
+
+def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> Awaitable[None]:
+    return wait_any_from(targets)

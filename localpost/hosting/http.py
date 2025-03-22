@@ -46,7 +46,7 @@ class UvicornService:
             await server.shutdown()
 
         async def _observe_shutdown():
-            await service_lifetime.shutting_down.wait()
+            await service_lifetime.shutting_down
             server.should_exit = True
 
         async with create_task_group() as tg:

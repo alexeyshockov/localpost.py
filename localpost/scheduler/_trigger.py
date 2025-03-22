@@ -58,7 +58,7 @@ def delay(value: DelayFactory, /) -> TriggerFactoryDecorator[T, T]:
                 item_jitter = delay_f()
                 logger.debug("Sleeping for %s (delay)", td_str(item_jitter))
                 await shutdown_aware_sleep(item_jitter)
-                if task.shutting_down.is_set():
+                if task.shutting_down:
                     break
                 yield event
 

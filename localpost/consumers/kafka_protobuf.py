@@ -27,7 +27,8 @@ Deserializer: TypeAlias = Callable[[KafkaMessage | bytes], T]
 
 # See also https://github.com/confluentinc/confluent-kafka-python/blob/master/examples/protobuf_consumer.py
 def protobuf_deserializer_for(message_type: type[T]) -> Deserializer[T]:
-    # Confluent SDK uses one the deprecated Protobuf methods, just skip it
+    # Confluent SDK uses some deprecated Protobuf methods, just skip it
+    # (Already fixed in confluent-kafka 2.6+?..)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # "MessageFactory class is deprecated. Please use GetMessageClass() instead of MessageFactory.GetPrototype."

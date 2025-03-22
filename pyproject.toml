@@ -4,9 +4,9 @@ build-backend = "pdm.backend"
 
 # See also https://daniel.feldroy.com/posts/2023-08-pypi-project-urls-cheatsheet
 [project.urls]
-homepage = 'https://github.com/alexeyshockov/localpost.py'
-docs = 'https://alexeyshockov.github.io/localpost.py/'
-changelog = 'https://github.com/alexeyshockov/localpost.py/blob/main/CHANGELOG.md'
+Homepage = 'https://github.com/alexeyshockov/localpost.py'
+Changelog = 'https://github.com/alexeyshockov/localpost.py/blob/main/CHANGELOG.md'
+Docs = 'https://alexeyshockov.github.io/localpost.py/'
 
 [project]
 name = "localpost"

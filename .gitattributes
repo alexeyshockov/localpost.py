@@ -1,5 +1,5 @@
 * text=auto eol=lf
 
-poetry.lock binary
-pdm.lock binary
-uv.lock binary
+poetry.lock linguist-generated -diff merge=binary
+pdm.lock linguist-generated -diff merge=binary
+uv.lock linguist-generated -diff merge=binary
