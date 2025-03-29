@@ -15,16 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-## [0.4.0] - 2025-03-23
+## [0.4.0] - 2025-03-30
 
 ### Added
 
-- `Host.use()` to apply middlewares
-- Ability to combine multiple hosts (`+` operator)
+- `HostedService` class, to represent a named hosted service
+- Hosted service middlewares: start_timeout, stop_timeout, and lifespan
+- Ability to combine multiple hosted services (`+` operator)
+- Ability to wrap a hosted service (or a set of services) by another one (`>>` operator)
+- `Host.state` (similar to `ServiceLifetime.state`)
 
 ### Changed
 
-- `EventView.__bool__()` instead of `EventView.is_set()` 
+- `EventView.__bool__()` instead of `EventView.is_set()`
+- `app_host.AppService` instead of `app_host.HostedService`
 
 ## [0.3.1] - 2025-03-13
 

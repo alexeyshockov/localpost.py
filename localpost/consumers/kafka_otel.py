@@ -9,6 +9,7 @@ from opentelemetry.semconv._incubating.metrics.messaging_metrics import (  # noq
     create_messaging_client_operation_duration,
 )
 from opentelemetry.trace import SpanKind, TracerProvider, get_tracer_provider
+from opentelemetry.util.types import AttributeValue
 
 from localpost import __version__
 from localpost.consumers.kafka import KafkaMessage
@@ -27,7 +28,7 @@ def trace(tracer_provider: TracerProvider | None = None, meter_provider: MeterPr
         messages_consumed = create_messaging_client_consumed_messages(meter)
 
         async def _handle(message: KafkaMessage):
-            attrs = {
+            attrs: dict[str, AttributeValue] = {
                 "messaging.operation.type": "process",
                 "messaging.system": "kafka",
                 "messaging.destination.name": message.payload.topic(),

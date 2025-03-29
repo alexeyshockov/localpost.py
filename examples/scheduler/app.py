@@ -26,6 +26,7 @@ async def task2(task1_result: str):
     """
     A task that runs after task1 and prints its result.
     """
+    task1.shutdown()
     print(f"task2 here! task1 result: {task1_result}")
 
 

@@ -14,7 +14,7 @@ description = "Consumers framework for different message brokers & simple in-pro
 requires-python = ">=3.10"
 dynamic = ["version"]
 readme = "pypi_readme.md"
-license = { text = "MIT" }
+license = "MIT" # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#pep-639-license-declaration
 authors = [
     { name = "Alexey Shokov" },
 ]
@@ -40,7 +40,6 @@ classifiers = [
     "Topic :: Office/Business :: Scheduling",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
-    "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
     "typing_extensions ~=4.10",
@@ -81,6 +80,7 @@ rabbitmq = [
 #[tool.pdm.dev-dependencies]
 [dependency-groups]
 dev = [
+    "icecream ~=2.1",
     "structlog ~=25.0",
     "aws-lambda-powertools",
     "confluent-kafka[schemaregistry,protobuf]",

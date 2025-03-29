@@ -6,12 +6,14 @@ import inspect
 import random
 import signal
 import sys
+import typing
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterable
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from datetime import timedelta
 from functools import wraps
 from typing import (
     Any,
+    Final,
     Generic,
     ParamSpec,
     Protocol,
@@ -37,11 +39,17 @@ T = TypeVar("T")
 P = ParamSpec("P")
 R = TypeVar("R")
 
+# Sentinel object, to indicate that a value is not set (see https://python-patterns.guide/python/sentinel-object)
+NOT_SET: Final = object()
 
-# PyCharm has a bug when calling a TypeVarTuple-parameterized function with 0 arguments,
-# see https://youtrack.jetbrains.com/issue/PY-63820
-def start_task_soon(tg: TaskGroup, func: Callable[[], Awaitable[Any]], name: object = None) -> None:
-    tg.start_soon(func, name=name)  # type: ignore
+TD_ZERO: Final = timedelta(0)
+
+HANDLED_SIGNALS = (
+    signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.
+    signal.SIGTERM,  # Unix signal 15. Sent by `kill <pid>`.
+)
+if sys.platform == "win32":
+    HANDLED_SIGNALS += (signal.SIGBREAK,)  # Windows signal 21. Sent by Ctrl+Break.
 
 
 class _IgnoredTaskStatus(TaskStatus[Any]):
@@ -49,16 +57,13 @@ class _IgnoredTaskStatus(TaskStatus[Any]):
         pass
 
 
-NO_OP_TS = _IgnoredTaskStatus()
+NO_OP_TS: Final = _IgnoredTaskStatus()
 
-TD_ZERO = timedelta(0)
 
-HANDLED_SIGNALS = (
-    signal.SIGINT,  # Unix signal 2. Sent by Ctrl+C.
-    signal.SIGTERM,  # Unix signal 15. Sent by `kill <pid>`.
-)
-if sys.platform == "win32":  # pragma: py-not-win32
-    HANDLED_SIGNALS += (signal.SIGBREAK,)  # Windows signal 21. Sent by Ctrl+Break.
+# PyCharm has a bug when calling a TypeVarTuple-parameterized function with 0 arguments,
+# see https://youtrack.jetbrains.com/issue/PY-63820
+def start_task_soon(tg: TaskGroup, func: Callable[[], Awaitable[Any]], name: object = None) -> None:
+    tg.start_soon(func, name=name)  # type: ignore
 
 
 def unwrap_exc(exc: Exception) -> Exception:
@@ -97,10 +102,6 @@ class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncC
             cast(_SupportsClose, t).close()
 
 
-# Sentinel object, to indicate that a value is not set (see https://python-patterns.guide/python/sentinel-object)
-NO_VALUE = object()
-
-
 @final
 # Actually immutable, but frozen=True has noticeable performance impact
 @dc.dataclass(slots=True, eq=True)
@@ -114,14 +115,27 @@ class Result(Generic[T]):
 
     @classmethod
     def failure(cls, error: BaseException) -> Result[T]:
-        return cls(cast(T, NO_VALUE), error)
+        return cls(cast(T, NOT_SET), error)
+
+
+def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
+    try:
+        desc = typing.get_type_hints(func)
+    except TypeError:  # <object> is not a module, class, method, or function
+        desc = typing.get_type_hints(func.__call__)  # type: ignore
+    if ret_type := desc.get("return", None):
+        return typing.get_origin(ret_type) or ret_type
+    return type(None)
 
 
 # Inspired by Starlette, see https://github.com/encode/starlette/issues/886
 def is_async_callable(obj: Callable[..., Any], /) -> bool:
     while isinstance(obj, functools.partial):
         obj = obj.func
-    return inspect.iscoroutinefunction(obj) or (callable(obj) and inspect.iscoroutinefunction(obj.__call__))  # type: ignore
+    assert callable(obj)
+    return (inspect.iscoroutinefunction(obj)
+            or inspect.iscoroutinefunction(obj.__call__)  # type: ignore
+            or issubclass(get_callable_return_type(obj), Awaitable))
 
 
 def def_full_name(func: Any, /) -> str:
@@ -140,12 +154,11 @@ def def_full_name(func: Any, /) -> str:
 def ensure_td(value: timedelta | str, /) -> timedelta:
     if isinstance(value, timedelta):
         return value
-    elif isinstance(value, str):
+    if isinstance(value, str):
         try:
             import pytimeparse2
 
             use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
-
             try:
                 # Make sure to get timedelta, not relativedelta from dateutil
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = False
@@ -154,8 +167,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = use_dateutil
         except ImportError:
             raise ValueError("pytimeparse2 package is required to parse a time period string") from None
-    else:
-        raise ValueError(f"Invalid time period: {value!r}")
+    raise ValueError(f"Invalid time period: {value!r}")
 
 
 def td_str(td: timedelta, /) -> str:
@@ -249,11 +261,15 @@ class EventView(Protocol):
     Read-only view on an async event.
     """
 
-    async def wait(self) -> None: ...
+    def is_set(self) -> bool: ...
 
-    def __await__(self) -> Generator[Any, Any, None]: ...
+    def wait(self) -> Awaitable[None]: ...
 
-    def __bool__(self) -> bool: ...
+    def __bool__(self) -> bool:
+        return self.is_set()
+
+    def __await__(self) -> Generator[Any, Any, None]:
+        return self.wait().__await__()
 
 
 @dc.dataclass(slots=True)
@@ -269,14 +285,11 @@ class _Event(EventView):
     def set(self) -> None:
         self._source.set()
 
+    def is_set(self) -> bool:
+        return self._source.is_set()
+
     def wait(self) -> Awaitable[None]:
         return self._source.wait()
-
-    def __await__(self):
-        return self._source.wait().__await__()
-
-    def __bool__(self):
-        return self._source.is_set()
 
 
 @dc.dataclass(slots=True)
@@ -291,17 +304,14 @@ class EventViewProxy(EventView):
         self.source = source.source if isinstance(source, EventViewProxy) else source
         self._resolved.set()
 
+    def is_set(self) -> bool:
+        return bool(self.source)
+
     async def wait(self) -> None:
         if self.source is None:
             await self._resolved.wait()
         assert self.source is not None
         await self.source.wait()
-
-    def __await__(self):
-        return self.wait().__await__()
-
-    def __bool__(self):
-        return bool(self.source)
 
 
 async def _cancel_when(trigger: EventView | Callable[[], Awaitable[Any]], scope: CancelScope) -> None:

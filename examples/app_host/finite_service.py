@@ -3,9 +3,9 @@
 import time
 
 from localpost.hosting import ServiceLifetimeManager
-from localpost.hosting.app_host import AppHost
+from localpost.hosting.app import App
 
-host = AppHost()
+host = App()
 
 
 @host.service()

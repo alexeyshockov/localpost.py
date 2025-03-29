@@ -5,14 +5,13 @@ import time
 import anyio
 from anyio import CancelScope
 
-from localpost.hosting import ServiceLifetimeManager
-from localpost.hosting.app_host import AppHost
+from localpost.hosting import ServiceLifetimeManager, AppHost
 from localpost.hosting.middlewares import shutdown_timeout
 
-host = AppHost()
+app = AppHost()
 
 
-@host.service()
+@app.service
 def a_sync_service(service_lifetime: ServiceLifetimeManager):
     print(f"{a_sync_service.name} started")
     service_lifetime.set_started()
@@ -22,7 +21,7 @@ def a_sync_service(service_lifetime: ServiceLifetimeManager):
     print(f"{a_sync_service.name} stopped")
 
 
-@host.service()
+@app.service
 async def an_async_func(_):
     print(f"{an_async_func.name} started")
     while True:
@@ -30,7 +29,7 @@ async def an_async_func(_):
         await anyio.sleep(1)
 
 
-@host.service()
+@app.service
 async def an_async_service(service_lifetime: ServiceLifetimeManager):
     print(f"{an_async_service.name} started")
     service_lifetime.set_started()
@@ -39,7 +38,7 @@ async def an_async_service(service_lifetime: ServiceLifetimeManager):
         await anyio.sleep(1)
 
 
-@host.service()
+@app.service
 async def a_graceful_async_service(service_lifetime: ServiceLifetimeManager):
     print(f"{a_graceful_async_service.name} started")
     with CancelScope() as scope:
@@ -88,8 +87,6 @@ if __name__ == "__main__":
     logging.basicConfig()
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    # host = host >> with_timeout(start_timeout=5, shutdown_timeout=5)
-    # host = host.use(with_timeout(start_timeout=5, shutdown_timeout=5))
-    host = host.use(shutdown_timeout(5))
+    app.root_service //= shutdown_timeout(5)
 
-    exit(localpost.run(host))
+    exit(localpost.run(app))

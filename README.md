@@ -11,10 +11,57 @@ Simple in-process task scheduler & consumers framework for different message bro
 
 TBD
 
+### Tasks
+
+TBD, including:
+- can accept 0 or 1 argument (trigger's value)
+- return values will be available in a stream
+
+### Triggers & decorators
+
+TBD
+
+### Built-in triggers & decorators
+
+TBD, including:
+- every()
+- delay()
+- skip_first()
+
+### Custom triggers & decorators
+
+TBD
+
 ## Consumers
+
+TBD, including basic Kafka & SQS examples.
+
+## Flow & flow ops
+
+TBD
+
+### Handlers & handler managers
+
+TBD
+
+### Decorators
 
 TBD
 
 ## Hosting
+
+TBD
+
+### Hosted services
+
+TBD
+
+### Running multiple services
+
+TBD, including:
+- combining multiple services, using host's `+` operator
+- wrapping a service (or a set of services) with another one, using host's `>>` operator
+
+## Motivation
 
 TBD

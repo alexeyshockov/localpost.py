@@ -5,21 +5,32 @@ import anyio
 from anyio import open_signal_receiver
 
 from ._utils import HANDLED_SIGNALS, cancellable_from, choose_anyio_backend
-from .hosting import Host
-from .scheduler import Scheduler
+from .hosting import Host, HostedServiceFunc
 
 logger = logging.getLogger("localpost")
 
 
-def run(target: Host | Scheduler) -> int:
+def _ensure_host(target: Host | HostedServiceFunc) -> Host:
+    if isinstance(target, Host):
+        return target
+    return Host(target)
+
+
+def run(target: Host | HostedServiceFunc) -> int:
+    """
+    Run the target host (or service) until it stops or is interrupted by a signal.
+    """
     return anyio.run(arun, target, **choose_anyio_backend())
 
 
-async def arun(target: Host | Scheduler) -> int:
+async def arun(target: Host | HostedServiceFunc) -> int:
+    """
+    Run the target host (or service) until it stops or is interrupted by a signal.
+    """
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError("Signals can only be installed on the main thread")
 
-    host = target if isinstance(target, Host) else Host(target, name=f"{target.name}_host")
+    host = _ensure_host(target)
 
     @cancellable_from(host.stopped)
     async def handle_signals():

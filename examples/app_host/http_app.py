@@ -6,20 +6,22 @@ import anyio
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
 
-from localpost.hosting.app_host import AppHost
+from localpost.hosting import AppHost
 from localpost.hosting.http import UvicornService
 from localpost.scheduler import Scheduler, every, delay
 
 host = AppHost()
 
 http_api = FastAPI()
-host.add_service(UvicornService.for_app(http_api), name="http_api")
+# host.add_service(UvicornService.for_app(http_api), name="http_api")
+host.root_service += UvicornService.for_app(http_api)
 
 scheduler = Scheduler()
-host.add_service(scheduler, name=scheduler.name)
+# host.add_service(scheduler, name=scheduler.name)
+host.root_service += scheduler
 
 
-@host.service()
+@host.service
 async def background_job():
     print("Background job started")
     try:

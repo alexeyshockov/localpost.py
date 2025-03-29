@@ -1,5 +1,8 @@
 from ._host import (
+    AppHost,
     Host,
+    HostedService,
+    HostedServiceDecorator,
     HostedServiceFunc,
     ServiceFunc,
     ServiceLifetime,
@@ -10,7 +13,10 @@ from ._host import (
 )
 
 __all__ = [
+    "AppHost",
     "Host",
+    "HostedService",
+    "HostedServiceDecorator",
     "HostedServiceFunc",
     "ServiceFunc",
     "ServiceLifetime",

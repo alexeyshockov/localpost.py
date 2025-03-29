@@ -4,18 +4,22 @@ import dataclasses as dc
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from typing import TYPE_CHECKING, TypeAlias, TypedDict, cast, final
+from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, final, cast
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group, to_thread
+from typing_extensions import NotRequired
 
 from localpost import flow
+from localpost._utils import EventView
 from localpost.flow import Handler, HandlerManager
-from localpost.hosting import ServiceLifetimeManager
+from localpost.hosting import HostedService, ServiceLifetimeManager
 
 if TYPE_CHECKING:
     from types_aiobotocore_sqs import SQSClient
-    from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef
+    from types_aiobotocore_sqs.literals import MessageSystemAttributeNameType
+    from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef, \
+    MessageAttributeValueOutputTypeDef
 
 __all__ = [
     "delete_messages",
@@ -70,7 +74,7 @@ async def delete_messages(messages: Sequence[SqsMessage]):
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dc.dataclass(frozen=True, slots=True, eq=False)
 class SqsMessage(AbstractAsyncContextManager[str, None]):
     payload: "MessageTypeDef"
     """
@@ -78,12 +82,12 @@ class SqsMessage(AbstractAsyncContextManager[str, None]):
 
     See https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_Message.html.
     """
-
-    _consumer: SqsQueueConsumer
+    queue_name: str
+    queue_url: str
     _client: "SQSClient"
 
     def __repr__(self):
-        return f"<SqsMessage(queue_name={self._consumer.queue_name})>"
+        return f"{self.__class__.__name__}(queue_name={self.queue_name!r})"
 
     async def __aenter__(self) -> str:
         return self.body
@@ -91,14 +95,6 @@ class SqsMessage(AbstractAsyncContextManager[str, None]):
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         if exc_type is None:
             await self.ack()
-
-    @property
-    def queue_name(self) -> str:
-        return self._consumer.queue_name
-
-    @property
-    def queue_url(self) -> str:
-        return self._consumer.queue_url
 
     @property
     def receipt_handle(self):
@@ -119,7 +115,7 @@ class SqsMessage(AbstractAsyncContextManager[str, None]):
         Delete the message from the queue (acknowledge), otherwise it will reappear after the visibility timeout.
         """
         await self._client.delete_message(
-            QueueUrl=self._consumer.queue_url,
+            QueueUrl=self.queue_url,
             ReceiptHandle=self.receipt_handle,
         )
 
@@ -132,6 +128,9 @@ class SqsMessages(Sequence[SqsMessage], AbstractAsyncContextManager[Sequence[str
     """
 
     payload: Sequence[SqsMessage]
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(len={len(self)})"
 
     def __init__(self, payload: Sequence[SqsMessage]):
         if isinstance(payload, SqsMessages):
@@ -179,6 +178,8 @@ def create_client() -> AbstractAsyncContextManager["SQSClient"]:
 
 @final
 class SqsQueueConsumer:
+    _EMPTY_RECEIVE: Final[Sequence["MessageTypeDef"]] = ()
+
     def __init__(
         self,
         handler: HandlerManager[SqsMessage],
@@ -205,20 +206,21 @@ class SqsQueueConsumer:
 
     async def _run_consumer(
         self,
+        queue_url: str,
         client: "SQSClient",
         message_handler: Handler[SqsMessage],
         shutdown_scope: CancelScope,
+        app_started: EventView,
     ):
-        queue_url = cast(str, self.queue_url)
-        receive_req: "ReceiveMessageRequestTypeDef" = self.receive_req_template | {"QueueUrl": queue_url}
-        no_messages: Sequence["MessageTypeDef"] = []
-
-        # TODO Check HTTP status and retry on errors (exponential backoff)
         async def pull_messages() -> Sequence["MessageTypeDef"]:
+            # TODO Check HTTP status and retry on errors (exponential backoff)
             pull_resp = await client.receive_message(**receive_req)
-            return pull_resp.get("Messages", no_messages)
+            return pull_resp.get("Messages", self._EMPTY_RECEIVE)
 
-        messages = no_messages
+        receive_req: "ReceiveMessageRequestTypeDef" = self.receive_req_template | {"QueueUrl": queue_url}
+        messages = self._EMPTY_RECEIVE
+        with shutdown_scope:
+            await app_started  # Start pulling messages only after the whole app is started
         while not shutdown_scope.cancel_called:
             with shutdown_scope:
                 messages = await pull_messages()
@@ -228,7 +230,7 @@ class SqsQueueConsumer:
                 logger.debug("No messages in the queue (empty receive)")
                 continue
             for m in messages:
-                await message_handler(SqsMessage(m, self, client))
+                await message_handler(SqsMessage(m, self.queue_name, queue_url, client))
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
         async def _resolve_url_from_name():
@@ -236,16 +238,15 @@ class SqsQueueConsumer:
                 resolve_resp = await c.get_queue_url(QueueName=self.queue_name)
                 return resolve_resp["QueueUrl"]
 
-        self.queue_url = self.queue_url or await _resolve_url_from_name()
-
+        queue_url = self.queue_url or await _resolve_url_from_name()
         consumer_scopes = [CancelScope() for _ in range(self.consumers)]
+        app_started = service_lifetime.host.started
         # Make sure to create a task group _after_ resolving the handler, so we exit it only after all the consumer
         # tasks are done
-        async with AsyncExitStack() as clients, self.handler as message_handler, create_task_group() as tg:
+        async with AsyncExitStack() as clients, self.handler as mh, create_task_group() as tg:
             for shutdown_scope in consumer_scopes:
                 client = await clients.enter_async_context(self.client_factory())
-                tg.start_soon(self._run_consumer, client, message_handler, shutdown_scope)
-
+                tg.start_soon(self._run_consumer, queue_url, client, mh, shutdown_scope, app_started)
             service_lifetime.set_started()
             await service_lifetime.shutting_down
             for scope in consumer_scopes:
@@ -257,7 +258,9 @@ class SqsBroker:
     def __init__(self, *, client_factory: ClientFactory | None = None):
         self.client_factory = client_factory or create_client
 
-    def queue_consumer(self, queue_name_or_url: str, /, *, consumers: int = 1):
+    def queue_consumer(
+        self, queue_name_or_url: str, /, *, consumers: int = 1
+    ) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
         if "/" in queue_name_or_url:
             queue_url = queue_name_or_url
             queue_name = _queue_name_from_url(queue_url)
@@ -265,7 +268,7 @@ class SqsBroker:
             queue_url = None
             queue_name = queue_name_or_url
 
-        def _decorator(handler: HandlerManager[SqsMessage]) -> SqsQueueConsumer:
+        def _decorator(handler: HandlerManager[SqsMessage]) -> HostedService:
             consumer = SqsQueueConsumer(
                 handler,
                 queue_name=queue_name,
@@ -273,17 +276,50 @@ class SqsBroker:
                 client_factory=self.client_factory,
                 consumers=consumers,
             )
-            return consumer
+            return HostedService(consumer, f"SqsQueueConsumer({queue_name!r})")
 
         return _decorator
 
 
+class LambdaEventRecordMessageAttributeValue(TypedDict):
+    dataType: str
+    stringValue: str
+    binaryValue: bytes
+    stringListValues: Sequence[str]
+    binaryListValues: Sequence[bytes]
+
+
 class LambdaEventRecord(TypedDict):
+    """
+    {
+        "messageId": "059f36b4-87a3-44ab-83d2-661975830a7d",
+        "receiptHandle": "AQEBwJnKyrHigUMZj6rYigCgxlaS3SLy0a...",
+        "body": "Test message.",
+        "attributes": {
+            "ApproximateReceiveCount": "1",
+            "SentTimestamp": "1545082649183",
+            "SenderId": "AIDAIENQZJOLO23YVJ4VO",
+            "ApproximateFirstReceiveTimestamp": "1545082649185"
+        },
+        "messageAttributes": {
+            "myAttribute": {
+                "stringValue": "myValue",
+                "stringListValues": [],
+                "binaryListValues": [],
+                "dataType": "String"
+            }
+        },
+        "md5OfBody": "e4e68fb7bd0e697a0ae8f1bb342846b3",
+        "eventSource": "aws:sqs",
+        "eventSourceARN": "arn:aws:sqs:us-east-2:123456789012:my-queue",
+        "awsRegion": "us-east-2"
+    }
+    """
     messageId: str
     receiptHandle: str
     body: str
-    attributes: Mapping[str, object]
-    messageAttributes: Mapping[str, object]
+    attributes: Mapping[MessageSystemAttributeNameType, str]
+    messageAttributes: Mapping[str, LambdaEventRecordMessageAttributeValue]
     md5OfBody: str
     eventSource: str
     eventSourceARN: str
@@ -298,15 +334,17 @@ def _message2lambda(m: SqsMessage, /) -> LambdaEventRecord:
     # See https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html &
     # https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_ReceiveMessage.html#API_ReceiveMessage_ResponseSyntax
     return {
-        "messageId": m.payload["MessageId"],
-        "receiptHandle": m.payload["ReceiptHandle"],
-        "body": m.payload["Body"],
+        "messageId": m.payload["MessageId"],  # type: ignore
+        "receiptHandle": m.payload["ReceiptHandle"],  # type: ignore
+        "body": m.payload["Body"],  # type: ignore
         "attributes": m.payload.get("Attributes", {}),
         "messageAttributes": {
-            ma_name: {ma_k[0].lower() + ma_k[1:]: ma_v for ma_k, ma_v in ma_values.items()}
+            ma_name: cast(
+                LambdaEventRecordMessageAttributeValue,
+                {ma_k[0].lower() + ma_k[1:]: ma_v for ma_k, ma_v in ma_values.items()})
             for ma_name, ma_values in m.payload.get("MessageAttributes", {}).items()
         },
-        "md5OfBody": m.payload["MD5OfBody"],
+        "md5OfBody": m.payload["MD5OfBody"],    # type: ignore
         "eventSource": "aws:sqs",
         "eventSourceARN": "TODO",
         "awsRegion": "TODO",
@@ -337,12 +375,12 @@ def lambda_handler(
     async def _handler(workload: SqsMessage | Sequence[SqsMessage]) -> None:
         if isinstance(input, SqsMessage):
             message = workload
-            lambda_event = {"Records": [_message2lambda(message)]}
+            lambda_event: LambdaEvent = {"Records": [_message2lambda(message)]}
             async with message:
                 await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
         else:
-            messages = SqsMessages(workload)
-            lambda_event = {"Records": [_message2lambda(m) for m in messages]}
+            messages = SqsMessages(cast(Sequence[SqsMessage], workload))
+            lambda_event: LambdaEvent = {"Records": [_message2lambda(m) for m in messages]}
             async with messages:
                 await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
 

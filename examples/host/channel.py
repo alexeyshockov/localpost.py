@@ -2,7 +2,7 @@
 
 import anyio
 
-from localpost.hosting.app_host import AppHost
+from localpost.hosting.app import App
 from localpost.scheduler import Scheduler, every
 from localpost.scheduler import delay, take_first
 
@@ -10,7 +10,7 @@ channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
 
 scheduler = Scheduler()
 
-host = AppHost()
+host = App()
 host.add_service(scheduler, name=scheduler.name)
 
 

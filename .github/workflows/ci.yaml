@@ -21,6 +21,7 @@ jobs:
       - name: pdm install
         run: pdm install --frozen-lockfile --no-editable
       - name: pytest
+        timeout-minutes: 5
         run: pdm run pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
       - uses: SonarSource/sonarqube-scan-action@v5
         env:

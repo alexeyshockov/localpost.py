@@ -5,12 +5,12 @@ import time
 import anyio
 
 from localpost.hosting import ServiceLifetimeManager
-from localpost.hosting.app_host import AppHost
+from localpost.hosting.app import App
 
-host = AppHost()
+app = App()
 
 
-@host.service()
+@app.service()
 def a_sync_service(service_lifetime: ServiceLifetimeManager):
     print(f"{a_sync_service.name} started")
     service_lifetime.set_started()
@@ -23,7 +23,7 @@ def a_sync_service(service_lifetime: ServiceLifetimeManager):
     print(f"{a_sync_service.name} stopped")
 
 
-@host.service()
+@app.service()
 async def an_async_func():
     print(f"{an_async_func.name} started")
     try:
@@ -42,4 +42,4 @@ if __name__ == "__main__":
     logging.basicConfig()
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(host))
+    exit(localpost.run(app))

@@ -12,7 +12,7 @@ from anyio import CapacityLimiter, create_task_group, from_thread, to_thread
 from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer
 
 from localpost._utils import EventView, is_async_callable
-from localpost.hosting import ServiceLifetimeManager
+from localpost.hosting import HostedService, ServiceLifetimeManager
 
 __all__ = [
     "KafkaMessage",
@@ -26,11 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dc.dataclass(frozen=True, slots=True, eq=False)
 class KafkaMessage(AbstractContextManager[bytes, None]):
     payload: confluent_kafka.Message
-    _client: Consumer = dc.field(repr=False)
+    _client: Consumer
     _client_config: Mapping[str, Any]
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}(topic={self.payload.topic()!r}"
 
     def __enter__(self) -> bytes:
         return self.value
@@ -135,7 +138,10 @@ class KafkaTopicConsumer:
         # TODO stats_cb, to provide detailed debug information
         # https://docs.confluent.io/platform/current/clients/confluent-kafka-python/html/index.html#kafka-client-configuration
         # https://github.com/confluentinc/librdkafka/blob/master/STATISTICS.md
-        client = Consumer(self.client_config, logger=logger)
+        client = Consumer(
+            self.client_config,
+            logger=logger,  # noqa
+        )
         await to_thread.run_sync(client.subscribe, self.topics)  # type: ignore
         try:
             yield client
@@ -167,22 +173,23 @@ class KafkaTopicConsumer:
                 message_handler(message)
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
+        def _consumer_thread(c):
+            return to_thread.run_sync(
+                self._run_consumer,
+                c, message_handler, service_lifetime.shutting_down,
+                # A custom limiter, to not reduce the global capacity permanently
+                limiter=threads_limiter)
+
         assert self.consumers > 0
         threads_limiter = CapacityLimiter(self.consumers)
-
-        def _run_consumer_thread(c, ss) -> Awaitable[None]:
-            # Make sure to use a custom limiter for these long-running threads, to not reduce the global capacity
-            # permanently
-            return to_thread.run_sync(self._run_consumer, c, message_handler, ss, limiter=threads_limiter)
-
         # Make sure to create a task group _after_ resolving the handler, so we exit it only after all the consumer
         # tasks are done
         async with AsyncExitStack() as clients, self.handler as message_handler, create_task_group() as tg:
+            service_lifetime.set_started()
+            await service_lifetime.host.started  # Start pulling messages only after the whole app is started
             for _ in range(self.consumers):
                 client = await clients.enter_async_context(self._create_client())
-                tg.start_soon(_run_consumer_thread, client, service_lifetime.shutting_down)
-
-            service_lifetime.set_started()
+                tg.start_soon(_consumer_thread, client)
 
 
 def kafka_conf_from_env() -> dict[str, Any]:
@@ -216,14 +223,14 @@ class KafkaBroker:
 
     def topic_consumer(
         self, topics: str | Iterable[str], /, *, consumers: int = 1
-    ) -> Callable[[KafkaHandlerManager], KafkaTopicConsumer]:
-        def _decorator(handler: KafkaHandlerManager) -> KafkaTopicConsumer:
+    ) -> Callable[[KafkaHandlerManager], HostedService]:
+        def _decorator(handler: KafkaHandlerManager) -> HostedService:
             consumer = KafkaTopicConsumer(
                 handler,
                 [topics] if isinstance(topics, str) else topics,
                 client_config=self.client_config,
                 consumers=consumers,
             )
-            return consumer
+            return HostedService(consumer, f"KafkaTopicConsumer({topics!r})")
 
         return _decorator
