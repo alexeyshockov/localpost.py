@@ -7,7 +7,7 @@ from typing import Any
 from anyio import fail_after
 
 from localpost._utils import wait_all, wait_any
-from localpost.hosting._host import HostedServiceDecorator, _ServiceLifetime, logger
+from localpost.hosting._host import HostedService, HostedServiceDecorator, HostedServiceFunc, _ServiceLifetime, logger
 
 __all__ = [
     "lifespan",
@@ -17,7 +17,7 @@ __all__ = [
 
 
 def lifespan(cm: AbstractAsyncContextManager[Any], /) -> HostedServiceDecorator:
-    def decorator(svc_func) -> Callable[..., Awaitable[None]]:
+    def decorator(svc_func, **_) -> Callable[..., Awaitable[None]]:
         @wraps(svc_func)
         async def _run(sl: _ServiceLifetime, *args):
             async with cm:
@@ -33,58 +33,68 @@ def lifespan(cm: AbstractAsyncContextManager[Any], /) -> HostedServiceDecorator:
     return decorator
 
 
-def start_timeout(timeout=math.inf, /) -> HostedServiceDecorator:
-    def decorator(svc_func) -> Callable[..., Awaitable[None]]:
+def start_timeout(timeout: float, /) -> HostedServiceDecorator:
+    def decorator(svc_func: HostedServiceFunc, **attrs) -> HostedService:
+        if timeout > attrs.get("start_timeout", math.inf):
+            raise ValueError("Timeout must be less than the existing one")
+        attrs["start_timeout"] = timeout
+
         @wraps(svc_func)
-        def _run(sl: _ServiceLifetime, *args):
-            sl.parent_tg.start_soon(_observe_service_startup, sl, timeout)
+        def _run(sl, *args):
+            assert isinstance(sl, _ServiceLifetime)
+            sl.parent_tg.start_soon(_observe_service_start, sl, timeout)
             return svc_func(sl, *args)
 
-        return _run
+        return HostedService(_run, **attrs)
 
-    return decorator
+    return HostedService.decorator(decorator)
 
 
-def shutdown_timeout(timeout=math.inf, /) -> HostedServiceDecorator:
-    def decorator(svc_func) -> Callable[..., Awaitable[None]]:
+def shutdown_timeout(timeout: float, /) -> HostedServiceDecorator:
+    def decorator(svc_func: HostedServiceFunc, **attrs) -> HostedService:
+        if timeout > attrs.get("shutdown_timeout", math.inf):
+            raise ValueError("Timeout must be less than the existing one")
+        attrs["shutdown_timeout"] = timeout
+
         @wraps(svc_func)
-        def _run(sl: _ServiceLifetime, *args):
+        def _run(sl, *args):
+            assert isinstance(sl, _ServiceLifetime)
             sl.parent_tg.start_soon(_observe_service_shutdown, sl, timeout)
             return svc_func(sl, *args)
 
-        return _run
+        return HostedService(_run, **attrs)
 
-    return decorator
+    return HostedService.decorator(decorator)
 
 
-async def _observe_service_shutdown(lifetime: _ServiceLifetime, timeout: float):
+async def _observe_service_shutdown(svc: _ServiceLifetime, timeout: float):
     if math.isinf(timeout):
         return
     assert timeout >= 0
-    await wait_any(lifetime.shutting_down, lifetime.stopped)
-    if lifetime.stopped:
+    await wait_any(svc.shutting_down, svc.stopped)
+    if svc.stopped:
         return
-    service_scope = lifetime.tg.cancel_scope
+    service_scope = svc.tg.cancel_scope
     if timeout == 0:
         service_scope.cancel()
         return
     try:
         with fail_after(timeout):
-            await lifetime.stopped
+            await svc.stopped
     except TimeoutError as exc:
-        lifetime.exception = exc
-        logger.error(f"{lifetime.name} shutdown timeout")
+        svc.exception = exc
+        logger.error(f"{svc.name} shutdown timeout")
         service_scope.cancel()
 
 
-async def _observe_service_startup(lifetime: _ServiceLifetime, timeout: float):
+async def _observe_service_start(svc: _ServiceLifetime, timeout: float):
     if math.isinf(timeout):
         return
     assert timeout > 0
     try:
         with fail_after(timeout):
-            await wait_any(lifetime.started, lifetime.stopped)
+            await wait_any(svc.started, svc.stopped)
     except TimeoutError as exc:
-        lifetime.exception = exc
-        logger.error(f"{lifetime.name} startup timeout")
-        lifetime.tg.cancel_scope.cancel()
+        svc.exception = exc
+        logger.error(f"{svc.name} startup timeout")
+        svc.tg.cancel_scope.cancel()

@@ -1,5 +1,5 @@
 from os import getenv
-from typing import Any, Callable, final
+from typing import Any, Callable, cast, final
 
 import uvicorn
 from anyio import create_task_group
@@ -15,6 +15,7 @@ from ._host import ServiceLifetimeManager
 class UvicornService:
     def __init__(self, config: uvicorn.Config):
         self.config = config
+        self.name = "uvicorn"
 
     @classmethod
     def for_app(cls, app: Callable[..., Any]) -> Self:
@@ -27,28 +28,40 @@ class UvicornService:
             )
         )
 
+    # It is hard to use server.serve() directly, because it overrides the signal handlers. A possible workaround is
+    # to call it in a separate thread, but currently it looks like an overkill.
+    # See uvicorn.Server._serve() for the original implementation.
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        server = uvicorn.Server(config=self.config)
         config = self.config
-        if not config.loaded:
-            config.load()
-        server.lifespan = config.lifespan_class(config)
+        server = uvicorn.Server(config)
 
-        # It is hard to use server.serve() directly, because it overrides the signal handlers. A possible workaround is
-        # to call it in a separate thread, but currently it looks like an overkill.
-        # See uvicorn.Server._serve() for the original implementation.
-        async def _serve():
+        if config.should_reload:
+            raise ValueError("Reload is not supported")
+        elif config.workers > 1:
+            raise ValueError("Multiple workers are not supported")
+
+        try:
+            if not config.loaded:
+                config.load()
+            server.lifespan = config.lifespan_class(config)
             await server.startup()
+        except SystemExit as e:
+            service_lifetime.host.exit_code = cast(int, e.code)
+            raise e.__context__ if e.__context__ else RuntimeError("Server startup failed") from None
+
+        if not server.started:
+            raise RuntimeError("Server did not start")
+
+        async def serve():
             service_lifetime.set_started()
-            # TODO Log started (host + port)
             await server.main_loop()
-            service_lifetime.set_shutting_down()  # TODO Extract the exception, if any
+            service_lifetime.set_shutting_down()
             await server.shutdown()
 
-        async def _observe_shutdown():
+        async def observe_shutdown():
             await service_lifetime.shutting_down
             server.should_exit = True
 
         async with create_task_group() as tg:
-            start_task_soon(tg, _serve)
-            start_task_soon(tg, _observe_shutdown)
+            start_task_soon(tg, serve)
+            start_task_soon(tg, observe_shutdown)

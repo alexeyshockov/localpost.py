@@ -2,12 +2,9 @@
 
 import logging
 import random
-from datetime import timedelta
 
+from localpost.flow import skip_first
 from localpost.scheduler import Scheduler, after, delay, every
-
-logging.basicConfig()
-logging.getLogger("localpost").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()
 
@@ -21,7 +18,7 @@ async def task1(_):
     return random.randint(1, 22)
 
 
-@scheduler.task(after(task1))
+@scheduler.task(after(task1) >> skip_first(3))
 async def task2(task1_result: str):
     """
     A task that runs after task1 and prints its result.
@@ -42,5 +39,9 @@ async def task2(task1_result: str):
 
 if __name__ == "__main__":
     import localpost
+
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(scheduler))

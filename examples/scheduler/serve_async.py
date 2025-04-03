@@ -6,10 +6,10 @@ from .app import scheduler
 
 
 async def main(duration: int):
-    from localpost.scheduler import aserve
+    from localpost.hosting import Host
 
-    # Scheduler in the same thread, same event loop
-    async with aserve(scheduler):
+    host = Host(scheduler)
+    async with host.aserve():  # Scheduler in the same thread, same event loop
         for _ in range(duration):
             await anyio.sleep(1)
             print("Main thread is running...")

@@ -23,6 +23,7 @@ if __name__ == "__main__":
     import localpost
 
     logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(host))

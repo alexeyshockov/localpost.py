@@ -1,14 +1,13 @@
 import logging
 import random
 import string
-from collections.abc import Collection
 
 import anyio
 import pytest
 from confluent_kafka import Producer
 
-from localpost import flow, flow_ops
-from localpost.consumers.kafka import KafkaBroker, KafkaMessage
+from localpost import flow
+from localpost.consumers.kafka import KafkaBroker, KafkaMessage, topic_consumer, KafkaMessages
 from localpost.hosting import Host
 from .RedpandaContainer import RedpandaContainer
 
@@ -46,9 +45,9 @@ async def test_normal_case(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_broker.topic_consumer(topic_name)
+    @topic_consumer(kafka_broker, topic_name)
     @flow.sync_handler
-    def handle(m: KafkaMessage):
+    def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
 
     host = Host(handle)
@@ -82,10 +81,10 @@ async def test_batching(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_broker.topic_consumer(topic_name)
-    @flow_ops.batch(10, 1)
+    @topic_consumer(kafka_broker, topic_name)
+    @flow.batch(10, 1, KafkaMessages)
     @flow.handler
-    def handle(messages: Collection[KafkaMessage]):
+    async def handle(messages: KafkaMessages):
         nonlocal received
         received += [
             [m.value.decode() for m in messages]

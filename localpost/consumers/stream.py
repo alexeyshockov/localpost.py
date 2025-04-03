@@ -4,8 +4,8 @@ from typing import TypeVar, final
 
 from anyio.streams.memory import MemoryObjectReceiveStream
 
-from localpost._flow import stream_consumer
 from localpost.flow import HandlerManager
+from localpost.flow._flow import stream_consumer
 from localpost.hosting import ServiceLifetimeManager
 
 T = TypeVar("T")

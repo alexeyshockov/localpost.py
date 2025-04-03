@@ -9,6 +9,7 @@ from localpost.hosting import ServiceLifetimeManager, AppHost
 from localpost.hosting.middlewares import shutdown_timeout
 
 app = AppHost()
+app.use(shutdown_timeout(5))
 
 
 @app.service
@@ -85,8 +86,9 @@ if __name__ == "__main__":
     import logging
 
     logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    app.root_service //= shutdown_timeout(5)
+    # app.root_service //= shutdown_timeout(5)
 
     exit(localpost.run(app))

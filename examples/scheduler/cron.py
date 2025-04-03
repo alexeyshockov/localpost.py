@@ -5,9 +5,6 @@ import logging
 from localpost.scheduler import Scheduler, delay
 from localpost.scheduler.cond.cron import cron
 
-logging.basicConfig()
-logging.getLogger("localpost").setLevel(logging.DEBUG)
-
 scheduler = Scheduler()
 
 
@@ -19,5 +16,9 @@ async def cron_job():
 
 if __name__ == "__main__":
     import localpost
+
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(scheduler))

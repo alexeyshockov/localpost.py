@@ -17,10 +17,10 @@ async def heavy_background_task():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    from localpost.scheduler import aserve
+    from localpost.hosting import Host
 
-    # Scheduler in the same thread, same event loop
-    async with aserve(scheduler):
+    host = Host(scheduler)
+    async with host.aserve():  # Scheduler in the same thread, same event loop
         yield
 
 

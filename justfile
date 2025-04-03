@@ -15,7 +15,19 @@ check: check-style types
 [doc("Check types (using both PyRight and MyPy)")]
 types:
     -pyright --pythonpath $(which python) localpost
-    -mypy --pretty --python-executable $(which python) localpost
+    -mypy --pretty \
+      --python-executable $(which python) \
+      --strict-bytes \
+      localpost
+
+[doc("Check types (using both PyRight and MyPy)")]
+types-strict:
+    -pyright --pythonpath $(which python) localpost
+    -mypy --pretty \
+      --python-executable $(which python) \
+      --strict-bytes \
+      --warn-unreachable \
+      localpost
 
 [doc("Check types (including examples and tests)")]
 types-all: types

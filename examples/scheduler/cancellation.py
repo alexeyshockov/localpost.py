@@ -7,14 +7,12 @@ from datetime import timedelta
 import anyio
 
 from localpost.hosting import Host
+from localpost.hosting.middlewares import shutdown_timeout
 from localpost.scheduler import Scheduler, every
-
-logging.basicConfig()
-logging.getLogger("localpost").setLevel(logging.DEBUG)
 
 scheduler = Scheduler()
 host = Host(scheduler)
-host.shutdown_timeout = 1
+host.root_service //= shutdown_timeout(1)
 
 
 @scheduler.task(every(timedelta(seconds=3)))
@@ -34,5 +32,9 @@ async def long_async_task():
 
 if __name__ == "__main__":
     import localpost
+
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(host))

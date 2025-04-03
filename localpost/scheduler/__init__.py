@@ -1,5 +1,5 @@
 from ._cond import after, every
-from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Scheduler, Task, aserve, serve
+from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Scheduler, Task
 from ._trigger import delay, take_first
 
 __all__ = [
@@ -12,8 +12,6 @@ __all__ = [
     # "TriggerFactoryMiddleware",
     # "TriggerFactoryDecorator",
     "Scheduler",
-    "aserve",
-    "serve",
     # "make_decorator",
     "delay",
     "take_first",

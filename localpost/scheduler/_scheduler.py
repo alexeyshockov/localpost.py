@@ -21,20 +21,18 @@ from localpost._utils import (
     start_task_soon,
     wait_all,
 )
-from localpost.flow import Handler, HandlerDecorator, HandlerManager
+from localpost.flow import HandlerDecorator, HandlerManager
 from localpost.hosting import Host, HostedServiceFunc, ServiceLifetimeManager
 
 T = TypeVar("T")
 T2 = TypeVar("T2")
-ResT = TypeVar("ResT")
-
-P = ParamSpec("P")
+R = TypeVar("R")
 
 TaskHandler: TypeAlias = Union[
-    Callable[[], Awaitable[ResT]],
-    Callable[[T], Awaitable[ResT]],
-    Callable[[], ResT],
-    Callable[[T], ResT],
+    Callable[[T], Awaitable[R]],
+    Callable[[], Awaitable[R]],
+    Callable[[T], R],
+    Callable[[], R],
 ]
 
 logger = logging.getLogger("localpost.scheduler")
@@ -43,44 +41,41 @@ logger = logging.getLogger("localpost.scheduler")
 @final
 @dc.dataclass()
 class Task(
-    Generic[T, ResT],
-    AbstractAsyncContextManager[Handler[T]],  # HandlerManager[T]
+    Generic[T, R],
+    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],  # HandlerManager[T]
 ):
     name: str
-    target: TaskHandler[T, ResT]
     event_aware: bool
 
-    def __init__(self, target: TaskHandler[T, ResT], /, *, name: str | None = None):
+    def __init__(self, target: TaskHandler[T, R], /, *, name: str | None = None):
         self.name = name or def_full_name(target)
-        self.target = target
+        self._target = target
         e_aware = self.event_aware = len(inspect.signature(target).parameters) > 0
 
-        def e_handler() -> Callable[[T], Awaitable[ResT]]:
-            if is_async_callable(target):
-                return target if e_aware else lambda _: target()  # type: ignore
-            elif e_aware:
-                return lambda e: to_thread.run_sync(target, e)  # type: ignore
-            return lambda _: to_thread.run_sync(target)  # type: ignore
+        def e_handler(t) -> Callable[[T], Awaitable[R]]:
+            if is_async_callable(t):
+                return t if e_aware else lambda _: t()  # type: ignore[misc]
+            return (lambda e: to_thread.run_sync(t, e)) if e_aware else (lambda _: to_thread.run_sync(t))
 
-        self._handle = e_handler()
+        self._handle = e_handler(target)
 
         self._cm = ExitStack()
-        self._subscribers: list[MemoryObjectSendStream[Result[ResT]]] = []
+        self._subscribers: list[MemoryObjectSendStream[Result[R]]] = []
         self._users = 0
 
     def __repr__(self):
         return f"<{self.__class__.__name__} {self.name!r}>"
 
-    def subscribe(self, buffer_max_size: float = math.inf) -> MemoryObjectReceiveStream[Result[ResT]]:
+    def subscribe(self, buffer_max_size: float = math.inf) -> MemoryObjectReceiveStream[Result[R]]:
         # By default, a stream is created with a buffer size of 0, which means that any write will be blocked until
         # there is a free reader. We do not want to block the task execution flow in any way, so:
         #  - the buffer is unbounded by default
         #  - if the buffer is full, the result is dropped (see publish method below)
-        send_stream, receive_stream = create_memory_object_stream[Result[ResT]](buffer_max_size)
+        send_stream, receive_stream = create_memory_object_stream[Result[R]](buffer_max_size)
         self._subscribers.append(self._cm.enter_context(send_stream))
         return receive_stream
 
-    def _publish_result(self, result: Result[ResT]) -> None:
+    def _publish_result(self, result: Result[R]) -> None:
         for i, subscriber in enumerate(self._subscribers):
             try:
                 subscriber.send_nowait(result)
@@ -89,7 +84,7 @@ class Task(
             except WouldBlock:
                 logger.error("Subscriber's buffer is full, dropping the result")
 
-    async def __call__(self, event: T):  # MessageHandler[T]
+    async def __call__(self, event: T) -> None:  # MessageHandler[T]
         try:
             result = Result.ok(await self._handle(event))
             self._publish_result(result)
@@ -123,8 +118,8 @@ class ScheduledTaskTemplate(Generic[T]):
 
     def __init__(self, tf: TriggerFactory[T]):
         self._tf = tf
-        self._tf_stack: tuple[TriggerFactoryDecorator, ...] = ()
-        self._handler_stack: tuple[HandlerDecorator, ...] = ()
+        self._tf_queue: tuple[TriggerFactoryDecorator, ...] = ()
+        self._handler_queue: tuple[HandlerDecorator, ...] = ()
 
     # TriggerFactory[T]
     def __call__(self, *args, **kwargs) -> Trigger[T]:
@@ -137,39 +132,34 @@ class ScheduledTaskTemplate(Generic[T]):
 
     def __floordiv__(self, decorator: TriggerFactoryDecorator[T, T2]) -> ScheduledTaskTemplate[T2]:
         n = ScheduledTaskTemplate(self._tf)
-        n._tf_stack = self._tf_stack + (decorator,)
+        n._tf_queue = self._tf_queue + (decorator,)
         return cast(ScheduledTaskTemplate[T2], n)
 
-    def __rshift__(self, decorator: HandlerDecorator[P, T, T2]) -> ScheduledTaskTemplate[T2]:
-        n = ScheduledTaskTemplate(self._tf)
-        n._handler_stack = self._handler_stack + (decorator,)
-        return cast(ScheduledTaskTemplate[T2], n)
+    def __rshift__(self, decorator: HandlerDecorator) -> ScheduledTaskTemplate[T]:
+        n = ScheduledTaskTemplate[T](self._tf)
+        n._handler_queue = self._handler_queue + (decorator,)
+        return n
 
     def resolve_handler(self, task: Task[T, Any]) -> HandlerManager[T]:
-        def from_task(*_):
-            return task
-
-        handler: Callable[..., HandlerManager[T]] = from_task
-        for decorator in self._handler_stack:
+        handler: HandlerManager[T] = task
+        for decorator in self._handler_queue:
             handler = decorator(handler)
-        return handler()
+        return handler
 
     @property
     def tf(self) -> TriggerFactory[T]:
-        if not self._tf_stack:
-            return self._tf
         tf = self._tf
-        for decorator in self._tf_stack:
+        for decorator in self._tf_queue:
             tf = decorator(tf)
         return tf
 
 
-class ScheduledTask(Protocol[T, ResT]):
+class ScheduledTask(Protocol[T, R]):
     @property
     def scheduler(self) -> Scheduler: ...
 
     @property
-    def task(self) -> Task[T, ResT]: ...
+    def task(self) -> Task[T, R]: ...
 
     @property
     def started(self) -> EventView: ...
@@ -184,11 +174,11 @@ class ScheduledTask(Protocol[T, ResT]):
 
 
 @final
-class _ScheduledTask(Generic[T, ResT]):
+class _ScheduledTask(Generic[T, R]):
     def __init__(
         self,
         scheduler: Scheduler,
-        task: Task[T, ResT],
+        task: Task[T, R],
         tf: TriggerFactory[T],
         handler: HandlerManager[T] | None = None,
     ):
@@ -249,8 +239,7 @@ class _ScheduledTask(Generic[T, ResT]):
 
 Trigger: TypeAlias = AbstractAsyncContextManager[AsyncIterator[T]]
 TriggerFactory: TypeAlias = Callable[
-    [ScheduledTask[T, Any]],
-    AbstractAsyncContextManager[AsyncIterator[T]]  # Trigger[T]
+    [ScheduledTask[T, Any]], AbstractAsyncContextManager[AsyncIterator[T]]  # Trigger[T]
 ]
 TriggerFactoryMiddleware: TypeAlias = Callable[
     [
@@ -316,8 +305,8 @@ class Scheduler:
     def shutdown(self) -> None:  # TODO Reason
         self._lifetime.set_shutting_down()
 
-    def schedule(self, t: TriggerFactory[T], /) -> Callable[[Task[T, ResT]], ScheduledTask[T, ResT]]:
-        def _decorator(task: Task[T, ResT]) -> ScheduledTask[T, ResT]:
+    def schedule(self, t: TriggerFactory[T], /) -> Callable[[Task[T, R]], ScheduledTask[T, R]]:
+        def _decorator(task: Task[T, R]) -> ScheduledTask[T, R]:
             tpl = ScheduledTaskTemplate.ensure(t)
             scheduled_task = _ScheduledTask(self, task, tpl.tf, tpl.resolve_handler(task))
             self._scheduled.append(scheduled_task)
@@ -326,20 +315,20 @@ class Scheduler:
         return _decorator
 
     @staticmethod
-    def as_task(*, name: str | None = None) -> Callable[[TaskHandler[T, ResT]], Task[T, ResT]]:
+    def as_task(*, name: str | None = None) -> Callable[[TaskHandler[T, R]], Task[T, R]]:
         """
         Create a task from the given callable (the same task can be scheduled multiple times).
         """
-        return partial(Task, name=name)
+        return partial(Task, name=name)  # type: ignore[return-value]
 
     def task(
         self, tpl: TriggerFactory[T], /, *, name: str | None = None
-    ) -> Callable[[TaskHandler[T, ResT]], ScheduledTask[T, ResT]]:
+    ) -> Callable[[TaskHandler[T, R]], ScheduledTask[T, R]]:
         """
         Schedule a task with the given trigger.
         """
 
-        def _decorator(func: TaskHandler[T, ResT]) -> ScheduledTask[T, ResT]:
+        def _decorator(func: TaskHandler[T, R]) -> ScheduledTask[T, R]:
             t = self.as_task(name=name)(func)
             st = self.schedule(tpl)(t)
             return st
@@ -372,15 +361,3 @@ class Scheduler:
             start_task_soon(tg, when_tasks_started)
             await service_lifetime.shutting_down
             tg.cancel_scope.cancel()
-
-
-async def aserve(scheduler: Scheduler) -> AbstractAsyncContextManager[Host]:
-    host = Host(scheduler)
-    host.name = scheduler.name
-    return host.aserve()
-
-
-def serve(scheduler: Scheduler) -> AbstractContextManager[Host]:
-    host = Host(scheduler)
-    host.name = scheduler.name
-    return host.serve()

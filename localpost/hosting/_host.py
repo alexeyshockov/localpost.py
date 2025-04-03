@@ -4,13 +4,14 @@ import dataclasses as dc
 import inspect
 import logging
 import threading
-from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Generator, Iterable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Generator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from functools import cached_property, wraps
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Final,
     Literal,
     ParamSpec,
     Protocol,
@@ -32,7 +33,7 @@ from anyio import (
 )
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
-from typing_extensions import Concatenate, Self, TypeVarTuple, Unpack
+from typing_extensions import Concatenate, Self
 
 from localpost._utils import (
     NO_OP_TS,
@@ -47,7 +48,7 @@ from localpost._utils import (
 )
 
 T = TypeVar("T")
-PosArgsT = TypeVarTuple("PosArgsT")
+P = ParamSpec("P")
 
 logger = logging.getLogger("localpost.hosting")
 
@@ -175,30 +176,16 @@ class ServiceLifetimeManager(Protocol):
 
     def set_shutting_down(self, *, reason: BaseException | str | None = None) -> None: ...
 
-    @overload
-    def start_child_service(
-        self,
-        func: Callable[[ServiceLifetimeManager], Awaitable[None]],
-        /,
-        *,
-        name: str | None = None,
-    ) -> ServiceLifetime: ...
-
-    @overload
-    def start_child_service(
-        self,
-        func: Callable[[ServiceLifetimeManager, Unpack[PosArgsT]], Awaitable[None]],
-        /,
-        *func_args: Unpack[PosArgsT],
-        name: str | None = None,
-    ) -> ServiceLifetime: ...
-
-    # PyCharm has a bug when calling a TypeVarTuple-parameterized function with 0 arguments (see
-    # https://youtrack.jetbrains.com/issue/PY-63820), that why this dance with overloads
+    # 1. PyCharm (at least 2024.03) has a bug when calling a TypeVarTuple-parameterized function with 0 arguments (see
+    # https://youtrack.jetbrains.com/issue/PY-63820),
+    # 2. mypy (at least 1.15.0) does not like overloads ("error: Incompatible return value type ...  [return-value]"),
+    # So just skip complex typing here, for now
     def start_child_service(  # type: ignore[misc]
         self,
+        # func: Callable[[ServiceLifetimeManager, Unpack[PosArgsT]], Awaitable[None]],
         func: Callable[..., Awaitable[None]],
         /,
+        # *func_args: Unpack[PosArgsT],
         *func_args,
         name: str | None = None,
     ) -> ServiceLifetime: ...
@@ -206,33 +193,30 @@ class ServiceLifetimeManager(Protocol):
 
 # Everything that can be used as a hosted service, see HostedService.create()
 ServiceFunc: TypeAlias = Union[
-    Callable[[ServiceLifetimeManager], Awaitable[Any]],  # Service
-    Callable[[], Awaitable[Any]],  # SimpleService
-    Callable[[ServiceLifetimeManager], Any],  # SyncService
-    Callable[[], Any],  # SimpleSyncService
+    Callable[..., Awaitable[None]],
+    Callable[..., None],
 ]
 
 if TYPE_CHECKING:
     HostedServiceFunc: TypeAlias = Callable[Concatenate[ServiceLifetimeManager, ...], Awaitable[None]]
 else:
+    # Python 3.10 does not support ... (ellipsis) for Concatenate
     HostedServiceFunc: TypeAlias = Callable[..., Awaitable[None]]
 # HostedServiceFunc: TypeAlias = Callable[[ServiceLifetimeManager, ...], Awaitable[None]]
 # class HostedServiceFunc(Protocol):
 #     def __call__(self, service_lifetime: ServiceLifetimeManager, *args) -> Awaitable[None]: ...
 
-P = ParamSpec("P")
 HostedServiceDecorator: TypeAlias = Callable[
     [Callable[P, Awaitable[None]]],  # [HostedServiceFunc]
     Callable[P, Awaitable[None]],  # HostedServiceFunc
 ]
 
 
-def async_hosted_service(func: Callable[..., Awaitable[Any]]) -> HostedServiceFunc:
+def async_hosted_service(func: Callable[..., Awaitable[None]]) -> HostedServiceFunc:
     """
     Decorator to create a service from an async function.
     """
-    func_signature = inspect.signature(func)
-    if len(func_signature.parameters) >= 1:
+    if len(inspect.signature(func).parameters) >= 1:
         return cast(HostedServiceFunc, func)
 
     @wraps(func)
@@ -265,9 +249,7 @@ def sync_hosted_service(func: Callable[..., Any]) -> HostedServiceFunc:
             lifetime.set_started(graceful_shutdown_scope=run_scope)
             await to_thread.run_sync(func, limiter=sync_services_limiter)
 
-    func_signature = inspect.signature(func)
-    lifetime_aware = len(func_signature.parameters) >= 1
-
+    lifetime_aware = len(inspect.signature(func).parameters) >= 1
     return _service if lifetime_aware else _simple_service
 
 
@@ -307,6 +289,14 @@ class _ServiceLifetime:
 
         self.stopped = _Event()
         self.exception: BaseException | None = None
+
+    @property
+    def as_view(self) -> ServiceLifetime:
+        return self
+
+    @property
+    def as_manager(self) -> ServiceLifetimeManager:
+        return self
 
     @property
     def state(self) -> ServiceState:
@@ -367,26 +357,23 @@ class _ServiceLifetime:
         /,
         *target_args,
         name: str | None = None,
-    ) -> ServiceLifetime:
+    ) -> _ServiceLifetime:
         if self.stopped:
             raise RuntimeError("Cannot start a child service for a stopped service")
 
         def start_service():
-            svc = HostedService.ensure(func)
-            if name:
-                svc = svc.named(name)
+            svc = HostedService.ensure(func).named(name)
             svc_lifetime = _ServiceLifetime(svc.name, self.host, self.tg)
-            child_lifetime = cast(ServiceLifetime, svc_lifetime)
-            self.child_services.append(child_lifetime)
-            self.tg.start_soon(_run_service, svc, target_args, svc_lifetime)
-            return child_lifetime
+            self.child_services.append(svc_lifetime.as_view)
+            self.tg.start_soon(_run_service, svc, target_args, svc_lifetime, name=svc.name)
+            return svc_lifetime
 
         return self.host.in_host_thread(start_service)
 
 
 async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLifetime):
     async def _supervise_service():
-        await func(cast(ServiceLifetimeManager, svc_lifetime), *func_args)
+        await func(svc_lifetime, *func_args)
         if child_services := svc_lifetime.child_services:
             await svc_lifetime.shutting_down
             for child in child_services:
@@ -411,38 +398,60 @@ async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLif
         svc_lifetime.stopped.set()
 
 
-@dc.dataclass(slots=True)  # TODO Make frozen
+@dc.dataclass(frozen=True, eq=False, slots=True)
 class _HostExecContext:
     root_service_lifetime: _ServiceLifetime
     portal: BlockingPortal
     thread_id: int
     run_scope: CancelScope
 
-    def __init__(self, host: Host, portal: BlockingPortal, tg: TaskGroup):
-        self.portal = portal
-        self.thread_id = threading.get_ident()
-        self.run_scope = tg.cancel_scope
-
-        self.root_service_lifetime = svc_lifetime = _ServiceLifetime(host.name, host, tg)
+    @classmethod
+    def create(cls, host: Host, portal: BlockingPortal, tg: TaskGroup) -> Self:
+        svc_lifetime = _ServiceLifetime(host.name, host, tg)
         svc_lifetime.started = cast(_Event, host.started)
         svc_lifetime.shutting_down = cast(_Event, host.shutting_down)
         svc_lifetime.stopped = cast(_Event, host.stopped)
+        return cls(svc_lifetime, portal, threading.get_ident(), tg.cancel_scope)
+
+
+def _hs_name(func: object) -> str:
+    match func:
+        case HostedService(s, attrs):
+            return attrs.get("name") or _hs_name(s)
+        case HostedServiceSeq(services):
+            return "(" + " + ".join(_hs_name(s) for s in services) + ")"
+        case WrappedHostedService(w, t):
+            return _hs_name(w) + " >> " + _hs_name(t)
+        case _:
+            return getattr(func, "name", def_full_name(func))
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
-class HostedService:
+@dc.dataclass(frozen=True)
+class HostedService:  # Also a HostedServiceFunc, see __call__() below
     """
     Named hosted service callable, immutable.
     """
 
-    _source: HostedServiceFunc
-    _name_override: str | None = None
+    source: HostedServiceFunc
+    _attrs: dict[str, Any] = dc.field(compare=False, hash=False)
+
+    @staticmethod
+    def decorator(dec: Callable[..., HostedServiceFunc]) -> HostedServiceDecorator:
+        def _decorator(func: HostedServiceFunc) -> HostedService:
+            svc_func = func
+            attrs = {}
+            if isinstance(func, HostedService):
+                svc_func = func.source
+                attrs = func._attrs
+            return HostedService.ensure(dec(svc_func, **attrs))
+
+        return _decorator
 
     @staticmethod
     def _unwrap(func: HostedServiceFunc) -> HostedServiceFunc:
-        if isinstance(func, HostedService) and not func._name_override:
-            return HostedService._unwrap(func._source)
+        if isinstance(func, HostedService) and not func._attrs:
+            return HostedService._unwrap(func.source)
         return func
 
     @classmethod
@@ -457,40 +466,61 @@ class HostedService:
             return target
         return cls(target)
 
-    def __init__(self, source: HostedServiceFunc, name_override: str | None = None, /):
-        assert callable(source)
-        source = self._unwrap(source)
-        if isinstance(source, HostedService) and not name_override:
-            source, name_override = source._source, source._name_override
+    def __init__(self, s: HostedServiceFunc, /, **attrs):
+        source = self._unwrap(s)
+        if "name" in attrs and not attrs["name"]:
+            del attrs["name"]
+        if isinstance(source, HostedService) and not attrs:
+            source, attrs = source.source, source._attrs  # type: ignore[attr-defined]
         if isinstance(source, HostedServiceSeq) and len(source) == 1:
             source = source.services[0]
-        object.__setattr__(self, "_source", source)
-        object.__setattr__(self, "_name_override", name_override)
+        assert callable(source)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "_attrs", attrs)
 
     @property
     def _services(self) -> HostedServiceSeq:
-        if isinstance(self._source, HostedServiceSeq) and not self._name_override:
-            return self._source
+        if isinstance(self.source, HostedServiceSeq) and not self._attrs:
+            return self.source
         return HostedServiceSeq(self)
 
     @property
     def name(self) -> str:
-        return self._name_override or getattr(self._source, "name", def_full_name(self._source))
+        return _hs_name(self)
 
-    def named(self, name_override: str | None) -> HostedService:
-        if self._name_override == name_override:
+    def named(self, name: str | None) -> HostedService:
+        """
+        Override the service name.
+        """
+        if name == self._attrs.get("name"):
             return self
-        if not name_override and isinstance(self._source, HostedService):
-            return self._source
-        return HostedService(self._source, name_override)
+        attrs = self._attrs | {"name": name}
+        return HostedService(self.source, **attrs)
+
+    @property
+    def attrs(self) -> Mapping[str, Any]:
+        return self._attrs
+
+    def annotated(self, **attrs: Any) -> HostedService:
+        """
+        Annotate the service with a set of attributes (kwargs).
+        """
+        if self._attrs == attrs:
+            return self
+        attrs = self._attrs | attrs
+        return HostedService(self.source, **attrs)
 
     def __call__(self, service_lifetime: ServiceLifetimeManager, *args) -> Awaitable[None]:  # HostedServiceFunc
-        return self._source(service_lifetime, *args)
+        return self.source(service_lifetime, *args)
 
     def __add__(self, other: HostedServiceFunc) -> HostedService:
         """
         Combine two services to run in parallel.
         """
+        if self is EMPTY_SERVICE:
+            return HostedService.ensure(other)
+        if other is EMPTY_SERVICE:
+            return self
         if isinstance(other, HostedService):
             other = other._services
         return HostedService(self._services.append(other))
@@ -505,7 +535,7 @@ class HostedService:
         """
         if not callable(target):  # Assume multiple services
             target = HostedServiceSeq(*target)
-        return HostedService(WrappedHostedService(self, HostedService.ensure(target)))  # TODO Name
+        return HostedService(WrappedHostedService(self, HostedService.ensure(target)))
 
     # s1 >>= s2
     def __irshift__(self, target: HostedServiceFunc | Iterable[HostedServiceFunc]) -> HostedService:
@@ -515,10 +545,14 @@ class HostedService:
         """
         Apply a middleware to the hosted service (decorate the source callable).
         """
-        source = self._source
+
+        def _ensure(s: HostedServiceFunc) -> HostedService:
+            return s if isinstance(s, HostedService) else HostedService(s, **self._attrs)
+
+        source = self
         for middleware in middlewares:
-            source = middleware(source)
-        return HostedService(source, self._name_override)
+            source = _ensure(middleware(source))
+        return source
 
     # s1 = s1 // m1
     def __floordiv__(self, middleware: HostedServiceDecorator) -> HostedService:
@@ -547,15 +581,15 @@ class HostedServiceSeq(Iterable[HostedService]):
     def __repr__(self):
         return f"{self.__class__.__name__}(len={len(self)})"
 
-    def append(self, *services: HostedServiceFunc) -> HostedServiceSeq:
-        return HostedServiceSeq(*(self.services + services))
-
     def __iter__(self) -> Iterator[HostedService]:
         for s in self.services:
             yield HostedService.ensure(s)
 
     def __len__(self) -> int:
         return len(self.services)
+
+    def append(self, *services: HostedServiceFunc) -> HostedServiceSeq:
+        return HostedServiceSeq(*(self.services + services))
 
     async def __call__(self, lifetime: ServiceLifetimeManager) -> None:
         async def when_all_started():
@@ -617,6 +651,13 @@ class WrappedHostedService:
         wrapper.shutdown()
 
 
+async def _empty_service(lifetime: ServiceLifetimeManager) -> None:
+    lifetime.set_started()
+
+
+EMPTY_SERVICE: Final = HostedService(_empty_service, name="empty_service")
+
+
 @final
 class Host:
     def __init__(self, root_service: HostedServiceFunc, /):
@@ -644,11 +685,6 @@ class Host:
     def name(self) -> str:
         return self._root_service.name
 
-    @name.setter
-    def name(self, value: str | None):
-        self._assert_not_started()
-        self._root_service = self._root_service.named(value)
-
     @property
     def exit_code(self) -> int:
         if self._exit_code is not None:
@@ -659,9 +695,9 @@ class Host:
 
     @exit_code.setter
     def exit_code(self, value: int):
-        if 0 <= value <= 255:
-            self._exit_code = value
-        raise ValueError("Exit code must be in [0,255] range")
+        if not 0 <= value <= 255:
+            raise ValueError("Exit code must be in [0,255] range")
+        self._exit_code = value
 
     @cached_property
     def started(self) -> EventView:
@@ -718,14 +754,17 @@ class Host:
     def stop(self) -> None:
         self.in_host_thread(self._exec.run_scope.cancel)
 
+    def _prepare_for_run(self) -> HostedService:
+        return self._root_service
+
     @asynccontextmanager
     async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
         self._assert_not_started()
 
         # A premature optimization, to save one task group nesting level
         tg: TaskGroup = exec_tg if exec_tg else portal._task_group  # noqa
-        self._exec_context = exec_context = _HostExecContext(self, portal, tg)
-        tg.start_soon(_run_service, self._root_service, (), exec_context.root_service_lifetime)
+        self._exec_context = exec_context = _HostExecContext.create(self, portal, tg)
+        tg.start_soon(_run_service, self._prepare_for_run(), (), exec_context.root_service_lifetime)
         try:
             yield self
         finally:
@@ -770,12 +809,29 @@ class Host:
 
 @final
 class AppHost(Host):  # type: ignore[misc]
-    def __init__(self):
-        async def _empty_service(lifetime: ServiceLifetimeManager):
-            lifetime.set_started()
-            logger.warning("AppHost is empty")
+    def __init__(self, name: str | None = "app", /):
+        super().__init__(EMPTY_SERVICE)
+        self._name = name
+        self._middlewares: tuple[HostedServiceDecorator, ...] = ()
 
-        super().__init__(HostedService(_empty_service, "app_host"))
+    @property
+    def name(self) -> str:
+        return self._name or self._root_service.name
+
+    @name.setter
+    def name(self, value: str | None):
+        self._assert_not_started()
+        self._name = value
+
+    def use(self, *middlewares: HostedServiceDecorator) -> None:
+        """
+        Register middlewares for the root service.
+        """
+        self._assert_not_started()
+        self._middlewares += middlewares
+
+    def _prepare_for_run(self) -> HostedService:
+        return self._root_service.use(*self._middlewares).named(self.name)
 
     def _add_service(self, target: ServiceFunc, name: str | None = None) -> HostedService:
         self._assert_not_started()

@@ -17,7 +17,6 @@ http_api = FastAPI()
 host.root_service += UvicornService.for_app(http_api)
 
 scheduler = Scheduler()
-# host.add_service(scheduler, name=scheduler.name)
 host.root_service += scheduler
 
 
@@ -52,7 +51,7 @@ if __name__ == "__main__":
     import localpost
 
     logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(host))
-

@@ -4,11 +4,10 @@ import dataclasses as dc
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, final, cast
+from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, cast, final
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group, to_thread
-from typing_extensions import NotRequired
 
 from localpost import flow
 from localpost._utils import EventView
@@ -18,12 +17,15 @@ from localpost.hosting import HostedService, ServiceLifetimeManager
 if TYPE_CHECKING:
     from types_aiobotocore_sqs import SQSClient
     from types_aiobotocore_sqs.literals import MessageSystemAttributeNameType
-    from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef, \
-    MessageAttributeValueOutputTypeDef
+    from types_aiobotocore_sqs.type_defs import (
+        MessageTypeDef,
+        ReceiveMessageRequestTypeDef,
+    )
 
 __all__ = [
     "delete_messages",
     "SqsMessage",
+    "SqsMessages",
     "SqsQueueConsumer",
     "SqsBroker",
     "lambda_handler",
@@ -268,7 +270,7 @@ class SqsBroker:
             queue_url = None
             queue_name = queue_name_or_url
 
-        def _decorator(handler: HandlerManager[SqsMessage]) -> HostedService:
+        def _decorator(handler) -> HostedService:
             consumer = SqsQueueConsumer(
                 handler,
                 queue_name=queue_name,
@@ -276,9 +278,16 @@ class SqsBroker:
                 client_factory=self.client_factory,
                 consumers=consumers,
             )
-            return HostedService(consumer, f"SqsQueueConsumer({queue_name!r})")
+            return HostedService(consumer, name=f"SqsQueueConsumer({queue_name!r})")
 
         return _decorator
+
+
+# PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
+def queue_consumer(
+    self, queue_name_or_url: str, /, *, consumers: int = 1
+) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
+    return self.queue_consumer(queue_name_or_url, consumers=consumers)
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):
@@ -315,6 +324,7 @@ class LambdaEventRecord(TypedDict):
         "awsRegion": "us-east-2"
     }
     """
+
     messageId: str
     receiptHandle: str
     body: str
@@ -341,10 +351,11 @@ def _message2lambda(m: SqsMessage, /) -> LambdaEventRecord:
         "messageAttributes": {
             ma_name: cast(
                 LambdaEventRecordMessageAttributeValue,
-                {ma_k[0].lower() + ma_k[1:]: ma_v for ma_k, ma_v in ma_values.items()})
+                {ma_k[0].lower() + ma_k[1:]: ma_v for ma_k, ma_v in ma_values.items()},
+            )
             for ma_name, ma_values in m.payload.get("MessageAttributes", {}).items()
         },
-        "md5OfBody": m.payload["MD5OfBody"],    # type: ignore
+        "md5OfBody": m.payload["MD5OfBody"],  # type: ignore
         "eventSource": "aws:sqs",
         "eventSourceARN": "TODO",
         "awsRegion": "TODO",
@@ -373,14 +384,15 @@ def lambda_handler(
 
     @flow.handler
     async def _handler(workload: SqsMessage | Sequence[SqsMessage]) -> None:
+        lambda_event: LambdaEvent = {"Records": []}
         if isinstance(input, SqsMessage):
             message = workload
-            lambda_event: LambdaEvent = {"Records": [_message2lambda(message)]}
+            lambda_event["Records"] = _message2lambda(message)
             async with message:
                 await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
         else:
             messages = SqsMessages(cast(Sequence[SqsMessage], workload))
-            lambda_event: LambdaEvent = {"Records": [_message2lambda(m) for m in messages]}
+            lambda_event["Records"] = [_message2lambda(m) for m in messages]
             async with messages:
                 await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
 

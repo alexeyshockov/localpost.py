@@ -23,12 +23,13 @@ from typing import (
     Union,
     cast,
     final,
+    overload,
 )
 
 import anyio
 from anyio import CancelScope, create_task_group
 from anyio.abc import TaskGroup, TaskStatus
-from typing_extensions import NotRequired, Self
+from typing_extensions import NotRequired, Self, TypeGuard
 
 if sys.version_info >= (3, 11):
     from builtins import ExceptionGroup  # noqa
@@ -104,7 +105,7 @@ class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncC
 
 @final
 # Actually immutable, but frozen=True has noticeable performance impact
-@dc.dataclass(slots=True, eq=True)
+@dc.dataclass(slots=True, eq=True, unsafe_hash=True)
 class Result(Generic[T]):
     value: T
     error: BaseException | None = None
@@ -128,14 +129,24 @@ def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
     return type(None)
 
 
-# Inspired by Starlette, see https://github.com/encode/starlette/issues/886
-def is_async_callable(obj: Callable[..., Any], /) -> bool:
+@overload
+def is_async_callable(obj: Callable[P, Any], /) -> TypeGuard[Callable[P, Awaitable[Any]]]: ...
+
+
+@overload
+def is_async_callable(obj: Callable[P, Any], ret_t: type[R], /) -> TypeGuard[Callable[P, Awaitable[R]]]: ...
+
+
+def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[Callable[..., Awaitable[Any]]]:
     while isinstance(obj, functools.partial):
         obj = obj.func
-    assert callable(obj)
-    return (inspect.iscoroutinefunction(obj)
-            or inspect.iscoroutinefunction(obj.__call__)  # type: ignore
-            or issubclass(get_callable_return_type(obj), Awaitable))
+    if not callable(obj):
+        return False
+    return (
+        inspect.iscoroutinefunction(obj)
+        or inspect.iscoroutinefunction(obj.__call__)  # type: ignore
+        or issubclass(get_callable_return_type(obj), Awaitable)
+    )
 
 
 def def_full_name(func: Any, /) -> str:
@@ -146,9 +157,7 @@ def def_full_name(func: Any, /) -> str:
         object_type = type(func)
         module = object_type.__module__
         name = object_type.__qualname__
-    if module is None or module == "__builtin__" or module == "__main__":
-        return name
-    return module + "." + name
+    return f"{module}.{name}" if module and module not in ("builtins", "__main__") else name
 
 
 def ensure_td(value: timedelta | str, /) -> timedelta:
@@ -272,12 +281,12 @@ class EventView(Protocol):
         return self.wait().__await__()
 
 
-@dc.dataclass(slots=True)
+@dc.dataclass(frozen=True, slots=True)
 class _Event(EventView):
     _source: anyio.Event
 
     def __init__(self) -> None:
-        self._source = anyio.Event()
+        object.__setattr__(self, "_source", anyio.Event())
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(is_set={self._source.is_set()})"

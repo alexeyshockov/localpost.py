@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-## [0.4.0] - 2025-03-30
+## [0.4.0] - 2025-04-03
+
+### Fixed
+
+- `UvicornService` crashes the whole app if the server fails to start
 
 ### Added
 
@@ -29,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `EventView.__bool__()` instead of `EventView.is_set()`
 - `app_host.AppService` instead of `app_host.HostedService`
+- `localpost.flow_ops` has been merged into `localpost.flow`
+
+### Removed
+
+- `localpost.scheduler.serve()` & `localpost.scheduler.aserve()` (just use `Host` instead)
 
 ## [0.3.1] - 2025-03-13
 
