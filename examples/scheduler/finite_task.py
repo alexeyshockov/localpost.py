@@ -6,9 +6,6 @@ from datetime import timedelta
 
 from localpost.scheduler import Scheduler, every, take_first, delay
 
-logging.basicConfig()
-logging.getLogger("localpost").setLevel(logging.DEBUG)
-
 scheduler = Scheduler()
 
 
@@ -23,5 +20,9 @@ async def task1():
 
 if __name__ == "__main__":
     import localpost
+
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(scheduler))

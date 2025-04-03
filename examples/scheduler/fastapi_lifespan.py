@@ -3,8 +3,9 @@
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
-from fastapi import FastAPI  # noqa
+from fastapi import FastAPI
 
+from localpost.hosting import Host
 from localpost.scheduler import Scheduler, every, delay
 
 scheduler = Scheduler()
@@ -17,10 +18,7 @@ async def heavy_background_task():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    from localpost.hosting import Host
-
-    host = Host(scheduler)
-    async with host.aserve():  # Scheduler in the same thread, same event loop
+    async with Host(scheduler).aserve():  # Scheduler in the same thread, same event loop
         yield
 
 

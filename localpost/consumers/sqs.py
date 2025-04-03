@@ -285,9 +285,11 @@ class SqsBroker:
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def queue_consumer(
-    self, queue_name_or_url: str, /, *, consumers: int = 1
+    queue_name_or_url: str, broker: SqsBroker | None = None, /, *, consumers: int = 1
 ) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
-    return self.queue_consumer(queue_name_or_url, consumers=consumers)
+    if broker is None:
+        broker = SqsBroker()
+    return broker.queue_consumer(queue_name_or_url, consumers=consumers)
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):

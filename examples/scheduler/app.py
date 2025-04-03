@@ -27,16 +27,6 @@ async def task2(task1_result: str):
     print(f"task2 here! task1 result: {task1_result}")
 
 
-# @scheduler.task(recurrent())
-# async def task3(_):
-#     """
-#     A more complex repeating task, which period is dynamically changed.
-#     """
-#     print("task3 here!")
-#     # And override the next iteration's interval (delay)
-#     return timedelta(seconds=random.randint(3, 9))
-
-
 if __name__ == "__main__":
     import localpost
 

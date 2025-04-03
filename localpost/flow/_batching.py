@@ -21,8 +21,8 @@ from localpost._utils import start_task_soon
 from ._flow import (
     Handler,
     HandlerDecorator,
+    handler_middleware,
     logger,
-    make_handler_decorator,
 )
 
 T = TypeVar("T")
@@ -87,7 +87,7 @@ def batch(
     capacity: int | float = 0,
     process_leftovers: bool = True,
     full_mode: Literal["wait", "drop"] = "wait",
-) -> HandlerDecorator[Sequence[T], Awaitable[None], T]: ...
+) -> HandlerDecorator[Sequence[T], Awaitable[None], T, Awaitable[None]]: ...
 
 
 @overload
@@ -100,7 +100,7 @@ def batch(
     capacity: int | float = 0,
     process_leftovers: bool = True,
     full_mode: Literal["wait", "drop"] = "wait",
-) -> HandlerDecorator[TC, Awaitable[None], T]: ...
+) -> HandlerDecorator[TC, Awaitable[None], T, Awaitable[None]]: ...
 
 
 def batch(
@@ -112,7 +112,7 @@ def batch(
     capacity: int | float = 0,
     process_leftovers: bool = True,
     full_mode: Literal["wait", "drop"] = "wait",
-) -> HandlerDecorator[Sequence[object], Awaitable[None], T]:
+) -> HandlerDecorator[Sequence[object], Awaitable[None], T, Awaitable[None]]:
     """
     Collect items into batches.
 
@@ -125,7 +125,7 @@ def batch(
     if capacity < 0:
         raise ValueError("Buffer capacity must be greater than or equal to 0")
 
-    @asynccontextmanager
+    @handler_middleware
     async def _middleware(next_h: Handler[Sequence[object]]) -> AsyncGenerator[Handler[T]]:
         buffer_writer, buffer_reader = cast(  # For PyCharm, to properly recognize types
             tuple[MemoryObjectSendStream[T], MemoryObjectReceiveStream[T]], create_memory_object_stream(capacity)
@@ -144,4 +144,4 @@ def batch(
             else:
                 yield buffer_writer.send
 
-    return make_handler_decorator(_middleware)
+    return _middleware

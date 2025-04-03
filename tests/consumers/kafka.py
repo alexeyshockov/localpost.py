@@ -39,13 +39,13 @@ async def test_normal_case(local_kafka):
     # Act
 
     received = []
-    kafka_broker = KafkaBroker()
-    kafka_broker.client_config = local_kafka | {
+    broker = KafkaBroker()
+    broker.client_config = local_kafka | {
         "group.id": "integration_tests",
         "auto.offset.reset": "earliest",
     }
 
-    @topic_consumer(kafka_broker, topic_name)
+    @topic_consumer(topic_name, broker)
     @flow.sync_handler
     def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
@@ -75,13 +75,13 @@ async def test_batching(local_kafka):
     # Act
 
     received = []
-    kafka_broker = KafkaBroker()
-    kafka_broker.client_config = local_kafka | {
+    broker = KafkaBroker()
+    broker.client_config = local_kafka | {
         "group.id": "integration_tests",
         "auto.offset.reset": "earliest",
     }
 
-    @topic_consumer(kafka_broker, topic_name)
+    @topic_consumer(topic_name, broker)
     @flow.batch(10, 1, KafkaMessages)
     @flow.handler
     async def handle(messages: KafkaMessages):

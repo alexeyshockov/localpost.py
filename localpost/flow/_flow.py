@@ -13,18 +13,19 @@ from contextlib import (
     nullcontext,
 )
 from functools import partial, wraps
-from typing import Any, Generic, ParamSpec, TypeAlias, TypeVar, Union, cast
+from typing import Any, ParamSpec, TypeAlias, TypeVar, Union, cast
 
 from anyio import ClosedResourceError, EndOfStream, create_task_group, from_thread, to_thread
 from anyio.abc import ObjectReceiveStream
 from typing_extensions import Self
 
-from localpost._utils import is_async_callable
+from localpost._utils import ensure_async_callable, is_async_callable
 
 T = TypeVar("T")
 T2 = TypeVar("T2")
 P = ParamSpec("P")
 R = TypeVar("R", Awaitable[None], None)
+R2 = TypeVar("R2", Awaitable[None], None)
 
 Handler: TypeAlias = Callable[[T], Awaitable[None]]
 HandlerManager: TypeAlias = AbstractAsyncContextManager[
@@ -46,13 +47,20 @@ AnyHandlerManager: TypeAlias = Union[
 ]
 
 HandlerWrapper: TypeAlias = Callable[[T], AbstractContextManager[Any]]
-HandlerMiddleware: TypeAlias = Callable[
-    [Callable[[T], R]],  # next handler (sync or async)
-    AbstractAsyncContextManager[Callable[[T2], R]],  # Handler manager
+HandlerMiddleware: TypeAlias = Union[
+    Callable[
+        [Callable[[T], R]],  # next handler (sync or async)
+        AbstractAsyncContextManager[Callable[[T2], R2]],  # Handler manager
+    ],
+    Callable[[Callable[[T], R]], AsyncGenerator[Callable[[T2], R2], None]],
+]
+_HandlerMiddleware: TypeAlias = Callable[
+    [Callable[[T], R]],
+    AbstractAsyncContextManager[Callable[[T2], R2]],
 ]
 HandlerDecorator: TypeAlias = Callable[
     [AbstractAsyncContextManager[Callable[[T], R]]],  # HandlerManager[T] or SyncHandlerManager[T]
-    AbstractAsyncContextManager[Callable[[T2], R]],  # Same handler manager type
+    AbstractAsyncContextManager[Callable[[T2], R2]],
 ]
 
 logger = logging.getLogger("localpost.flow")
@@ -97,10 +105,7 @@ def ensure_async_handler(source: AnyHandlerManager[T]) -> HandlerManager[T]:
     @asynccontextmanager
     async def _async_handler_manager():
         async with source as h:
-            if is_async_callable(h):
-                yield h
-            else:
-                yield partial(to_thread.run_sync, h)
+            yield ensure_async_callable(h)
 
     return _HandlerManagerFactory(cast(Callable[[], HandlerManager[T]], _async_handler_manager))
 
@@ -131,7 +136,7 @@ def ensure_sync_handler(source: AnyHandlerManager[T]) -> SyncHandlerManager[T]:
 
 @asynccontextmanager
 async def _composite_handler_manager(
-    hm: AbstractAsyncContextManager[Callable[[T], R]], middlewares: Iterable[HandlerMiddleware]
+    hm: AbstractAsyncContextManager[Callable[[Any], Any]], middlewares: Iterable[_HandlerMiddleware]
 ):
     async with AsyncExitStack() as es:
         for middleware in middlewares:
@@ -142,13 +147,13 @@ async def _composite_handler_manager(
 
 
 class _HandlerManagerFactory(
-    Generic[R],
     # Handler manager by itself (assuming the factory has no parameters)
-    AbstractAsyncContextManager[Callable[[Any], R]],
+    AbstractAsyncContextManager[Callable[[Any], Any]],
 ):
-    _factory: Callable[..., AbstractAsyncContextManager[Callable[[Any], R]]]
-    _middlewares: tuple[HandlerMiddleware, ...]
-    _handler: AbstractAsyncContextManager[Callable[[Any], R]] | None
+    _factory: Callable[..., AbstractAsyncContextManager[Callable[[Any], Any]]]
+    _middlewares: tuple[_HandlerMiddleware, ...]
+
+    _handler: AbstractAsyncContextManager[Callable[[Any], Any]] | None
 
     @classmethod
     def ensure(cls, func: Callable[..., Any]) -> Self:
@@ -178,15 +183,16 @@ class _HandlerManagerFactory(
         self._handler = None
         self._middlewares = ()
 
-    def __call__(self, *args, **kwargs) -> AbstractAsyncContextManager[Callable[[Any], R]]:
+    def __call__(self, *args, **kwargs) -> AbstractAsyncContextManager[Callable[[Any], Any]]:
         hm = self._factory(*args, **kwargs)
         if not self._middlewares:
             return hm
         return _composite_handler_manager(hm, self._middlewares)
 
-    def use(self, middleware: HandlerMiddleware[Any, R, Any]) -> _HandlerManagerFactory[R]:
-        f = _HandlerManagerFactory[R](self._factory)
-        f._middlewares = self._middlewares + (middleware,)
+    def use(self, m: HandlerMiddleware) -> _HandlerManagerFactory:
+        m = cast(_HandlerMiddleware, asynccontextmanager(m) if inspect.isasyncgenfunction(m) else m)
+        f = _HandlerManagerFactory(self._factory)
+        f._middlewares = self._middlewares + (m,)
         return f
 
     async def __aenter__(self):
@@ -202,16 +208,22 @@ class _HandlerManagerFactory(
             self._handler = None
 
 
-def make_handler_decorator(m: HandlerMiddleware[T, R, T2], /) -> HandlerDecorator[T, R, T2]:
+def handler_middleware(m: HandlerMiddleware[T, R, T2, R2], /) -> HandlerDecorator[T, R, T2, R2]:
     def decorator(next_h):
         return (next_h if isinstance(next_h, _HandlerManagerFactory) else _HandlerManagerFactory(next_h)).use(m)
 
     return decorator
 
 
-def handler_decorator_from_wrapper(w: HandlerWrapper[T], /) -> HandlerDecorator[T, R, T]:
-    @asynccontextmanager
-    async def _middleware(next_h: Callable[[T], Awaitable[None]] | Callable[[T], None]):
+def handler_wrapper(
+    w: Callable[[T], AbstractContextManager[Any]] | Callable[[T], Generator[Any, None, Any]], /
+) -> HandlerDecorator[T, R, T, R]:
+    if inspect.isgeneratorfunction(w):
+        w = contextmanager(w)
+    w = cast(Callable[[T], AbstractContextManager[Any]], w)
+
+    @handler_middleware
+    async def middleware(next_h: Callable[[T], R]) -> AsyncGenerator[Callable[[T], Any], None]:
         if is_async_callable(next_h):
 
             async def _handle_async(item: T):
@@ -227,7 +239,7 @@ def handler_decorator_from_wrapper(w: HandlerWrapper[T], /) -> HandlerDecorator[
 
             yield _handle_sync
 
-    return make_handler_decorator(cast(HandlerMiddleware[T, R, T], _middleware))
+    return middleware
 
 
 @asynccontextmanager

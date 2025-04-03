@@ -44,7 +44,7 @@ TBD
 
 TBD
 
-### Decorators
+### Decorators (middlewares & wrappers)
 
 TBD
 
@@ -62,6 +62,16 @@ TBD, including:
 - combining multiple services, using host's `+` operator
 - wrapping a service (or a set of services) with another one, using host's `>>` operator
 
-## Motivation
+### AppHost
 
 TBD
+
+## Motivation
+
+TBD, including:
+- type safety
+- FastAPI-like
+  - decorators to create scheduled tasks & hosted services
+  - middlewares
+- Async first
+  - AnyIO backed (mainly for structured concurrency, compatibility with Trio as a bonus)

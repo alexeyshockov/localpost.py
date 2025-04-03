@@ -70,17 +70,6 @@ async def a_graceful_async_service(service_lifetime: ServiceLifetimeManager):
 #     print(f"{a_graceful_anyio_func.__name__} gracefully shut down")
 
 
-# async def an_async_service_tpl(n: int):
-#     print(f"Async Service {n} started")
-#     while True:
-#         print(f"Async Service {n} running")
-#         await anyio.sleep(1)
-#
-#
-# host.service("first_service")(partial(an_async_service_tpl, 1))
-# host.service("second_service")(partial(an_async_service_tpl, 2))
-
-
 if __name__ == "__main__":
     import localpost
     import logging

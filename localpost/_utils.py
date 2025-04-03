@@ -27,7 +27,7 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, create_task_group
+from anyio import CancelScope, create_task_group, to_thread
 from anyio.abc import TaskGroup, TaskStatus
 from typing_extensions import NotRequired, Self, TypeGuard
 
@@ -147,6 +147,12 @@ def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[
         or inspect.iscoroutinefunction(obj.__call__)  # type: ignore
         or issubclass(get_callable_return_type(obj), Awaitable)
     )
+
+
+def ensure_async_callable(func: Callable[P, Any], /) -> Callable[P, Awaitable[Any]]:
+    if is_async_callable(func):
+        return func
+    return functools.partial(to_thread.run_sync, func)
 
 
 def def_full_name(func: Any, /) -> str:

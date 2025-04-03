@@ -55,9 +55,9 @@ async def test_normal_case(local_sqs):
     def create_client():
         return get_session().create_client("sqs", **local_sqs)
 
-    sqs_broker = SqsBroker(client_factory=create_client)
+    broker = SqsBroker(client_factory=create_client)
 
-    @queue_consumer(sqs_broker, queue_name)
+    @queue_consumer(queue_name, broker)
     @flow.handler
     async def handle(m: SqsMessage):
         nonlocal received
@@ -91,9 +91,9 @@ async def test_batching(local_sqs):
     def create_client():
         return get_session().create_client("sqs", **local_sqs)
 
-    sqs_broker = SqsBroker(client_factory=create_client)
+    broker = SqsBroker(client_factory=create_client)
 
-    @queue_consumer(sqs_broker, queue_name)
+    @queue_consumer(queue_name, broker)
     @flow.batch(10, 1, SqsMessages)
     @flow.handler
     async def handle(messages: SqsMessages):

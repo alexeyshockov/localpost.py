@@ -234,6 +234,8 @@ class KafkaBroker:
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def topic_consumer(
-    self: KafkaBroker, topics: str | Iterable[str], /, *, consumers: int = 1
+    topics: str | Iterable[str], broker: KafkaBroker | None = None, /, *, consumers: int = 1
 ) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], HostedService]:
-    return self.topic_consumer(topics, consumers=consumers)
+    if broker is None:
+        broker = KafkaBroker()
+    return broker.topic_consumer(topics, consumers=consumers)

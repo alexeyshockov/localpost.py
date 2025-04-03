@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, contextmanager
-from typing import Literal, TypeVar, cast
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Any, Literal, TypeVar, cast
 
 from anyio import WouldBlock, create_memory_object_stream
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -13,10 +12,9 @@ from localpost._utils import DelayFactory, ensure_delay_factory, is_async_callab
 from ._flow import (
     Handler,
     HandlerDecorator,
-    HandlerMiddleware,
-    handler_decorator_from_wrapper,
+    handler_middleware,
+    handler_wrapper,
     logger,
-    make_handler_decorator,
     stream_consumer,
 )
 
@@ -24,11 +22,11 @@ T = TypeVar("T")
 R = TypeVar("R", Awaitable[None], None)
 
 
-def delay(value: DelayFactory, /) -> HandlerDecorator[T, Awaitable[None], T]:
+def delay(value: DelayFactory, /) -> HandlerDecorator[T, Awaitable[None], T, Awaitable[None]]:
     jitter_f = ensure_delay_factory(value)
 
-    @asynccontextmanager
-    async def _middleware(next_h: Handler[T]):
+    @handler_middleware
+    async def middleware(next_h: Handler[T]):
         async def _handle(item: T):
             item_jitter = jitter_f()
             await sleep(item_jitter)
@@ -36,32 +34,32 @@ def delay(value: DelayFactory, /) -> HandlerDecorator[T, Awaitable[None], T]:
 
         yield _handle
 
-    return make_handler_decorator(_middleware)
+    return middleware
 
 
-def log_errors(custom_logger=None, /) -> HandlerDecorator[T, R, T]:
+def log_errors(custom_logger=None, /) -> HandlerDecorator[T, R, T, R]:
     h_logger = custom_logger or logger
 
-    @contextmanager
+    @handler_wrapper
     def wrapper(_):
         try:
             yield
         except Exception:  # noqa
             h_logger.exception("Error while processing a message")
 
-    return handler_decorator_from_wrapper(wrapper)
+    return wrapper
 
 
 # Does NOT work, as we cannot _stop_ the source (events) from the handler
 # def take_first(n: int, /): ...
 
 
-def skip_first(n: int, /) -> HandlerDecorator[T, R, T]:
+def skip_first(n: int, /) -> HandlerDecorator[T, R, T, R]:
     if n < 1:
         raise ValueError("n must be greater than or equal to 1")
 
-    @asynccontextmanager
-    async def _middleware(next_h: Callable[[T], Awaitable[None]] | Callable[[T], None]):
+    @handler_middleware
+    async def middleware(next_h: Callable[[T], R]) -> AsyncGenerator[Callable[[T], Any], None]:
         iter_n = 0
 
         if is_async_callable(next_h):
@@ -85,7 +83,7 @@ def skip_first(n: int, /) -> HandlerDecorator[T, R, T]:
 
             yield _handle_sync
 
-    return make_handler_decorator(cast(HandlerMiddleware[T, R, T], _middleware))
+    return middleware
 
 
 def buffer(
@@ -95,7 +93,7 @@ def buffer(
     concurrency: int = 1,
     process_leftovers: bool = True,
     full_mode: Literal["wait", "drop"] = "wait",
-) -> HandlerDecorator[T, Awaitable[None], T]:
+) -> HandlerDecorator[T, Awaitable[None], T, Awaitable[None]]:
     """
     Buffer items in an in-memory stream.
     """
@@ -104,8 +102,8 @@ def buffer(
     if concurrency < 1:
         raise ValueError("Concurrency must be greater than or equal to 1")
 
-    @asynccontextmanager
-    async def _middleware(next_h: Handler[T]):
+    @handler_middleware
+    async def middleware(next_h: Handler[T]):
         buffer_writer, buffer_reader = cast(  # For PyCharm, to properly recognize types
             tuple[MemoryObjectSendStream[T], MemoryObjectReceiveStream[T]], create_memory_object_stream(capacity)
         )
@@ -123,4 +121,4 @@ def buffer(
             else:
                 yield buffer_writer.send
 
-    return make_handler_decorator(_middleware)
+    return middleware

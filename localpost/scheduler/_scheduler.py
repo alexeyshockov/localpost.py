@@ -5,9 +5,9 @@ import inspect
 import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager, AbstractContextManager, ExitStack
+from contextlib import AbstractAsyncContextManager, ExitStack
 from functools import partial
-from typing import Any, Generic, ParamSpec, Protocol, TypeAlias, TypeVar, Union, cast, final
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final
 
 from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, create_task_group, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
