@@ -11,6 +11,7 @@ from ._host import ServiceLifetimeManager
 class AsyncGrpcService:
     def __init__(self, server: grpc.aio.Server):
         self._server = server
+        self.name = "grpc"
         self.grace_termination_period = 5
 
     @property

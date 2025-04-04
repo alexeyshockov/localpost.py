@@ -17,6 +17,10 @@ TBD, including:
 - can accept 0 or 1 argument (trigger's value)
 - return values will be available in a stream
 
+#### Concurrency
+
+Solely depends on the trigger.
+
 ### Triggers & decorators
 
 TBD

@@ -2,7 +2,7 @@
 
 import anyio
 
-from localpost.hosting.app import App
+from localpost.hosting import Host, hosted_service
 from localpost.scheduler import Scheduler, every
 from localpost.scheduler import delay, take_first
 
@@ -10,12 +10,8 @@ channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
 
 scheduler = Scheduler()
 
-host = App()
-host.add_service(scheduler, name=scheduler.name)
 
-
-# Does not hold the host alive, if the scheduler is done
-@host.service(daemon=True)
+@hosted_service
 async def print_channel():
     """
     A hosted service, to read the channel in the background.
@@ -29,6 +25,10 @@ async def print_channel():
 async def scheduled_background_task():
     print("Scheduled work here, writing to the channel...")
     await channel_writer.send("hello from the background task!")
+
+
+# Stop printing after the scheduler is done
+host = Host(print_channel >> scheduler)
 
 
 if __name__ == "__main__":

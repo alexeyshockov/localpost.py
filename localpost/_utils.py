@@ -137,6 +137,7 @@ def is_async_callable(obj: Callable[P, Any], /) -> TypeGuard[Callable[P, Awaitab
 def is_async_callable(obj: Callable[P, Any], ret_t: type[R], /) -> TypeGuard[Callable[P, Awaitable[R]]]: ...
 
 
+# See also: https://docs.python.org/3/library/inspect.html#inspect.markcoroutinefunction
 def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[Callable[..., Awaitable[Any]]]:
     while isinstance(obj, functools.partial):
         obj = obj.func
