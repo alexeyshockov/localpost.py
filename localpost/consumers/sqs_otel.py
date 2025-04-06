@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Sequence
 from typing import TypeVar
 
@@ -13,8 +12,9 @@ from opentelemetry.trace import SpanKind, TracerProvider, get_tracer_provider
 from opentelemetry.util.types import AttributeValue
 
 from localpost import __version__
+from localpost._otel_utils import rec_duration
 from localpost.consumers.sqs import SqsMessage
-from localpost.flow import HandlerDecorator, handler_wrapper
+from localpost.flow import HandlerDecorator, handler_mapper
 
 T = TypeVar("T", SqsMessage, Sequence[SqsMessage])
 
@@ -33,7 +33,7 @@ def trace(
     m_process_duration = create_messaging_client_operation_duration(meter)
     messages_consumed = create_messaging_client_consumed_messages(meter)
 
-    @handler_wrapper
+    @handler_mapper
     def call_tracer(message: T):
         queue_name = message.queue_name if isinstance(message, SqsMessage) else message[0].queue_name
         attrs: dict[str, AttributeValue] = {
@@ -46,10 +46,7 @@ def trace(
 
         messages_consumed.add(1 if isinstance(message, SqsMessage) else len(message), attrs)
         with tracer.start_as_current_span(f"process {queue_name}", kind=SpanKind.CONSUMER, attributes=attrs):
-            start_time = time.perf_counter()
-            yield
-            end_time = time.perf_counter()
-        # TODO Also record on error
-        m_process_duration.record(end_time - start_time, attrs)
+            with rec_duration(m_process_duration, attrs):
+                yield message
 
     return call_tracer

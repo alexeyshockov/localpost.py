@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses as dc
 import inspect
+import itertools
 import logging
 import threading
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Generator, Iterable, Iterator, Mapping
@@ -418,7 +419,7 @@ def _hs_name(func: object) -> str:
     match func:
         case HostedService(s, attrs):
             return attrs.get("name") or _hs_name(s)
-        case HostedServiceSeq(services):
+        case HostedServiceSet(services):
             return "(" + " + ".join(_hs_name(s) for s in services) + ")"
         case WrappedHostedService(w, t):
             return _hs_name(w) + " >> " + _hs_name(t)
@@ -449,10 +450,14 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
         return _decorator
 
     @staticmethod
-    def _unwrap(func: HostedServiceFunc) -> HostedServiceFunc:
+    def _unwrap(func: HostedServiceFunc, attrs: dict[str, Any]) -> tuple[HostedServiceFunc, dict[str, Any]]:
         if isinstance(func, HostedService) and not func._attrs:
-            return HostedService._unwrap(func.source)
-        return func
+            return HostedService._unwrap(func.source, attrs)
+        if isinstance(func, HostedService) and not attrs:
+            return func.source, func._attrs
+        if isinstance(func, HostedServiceSet) and len(func) == 1:
+            return HostedService._unwrap(next(iter(func)), attrs)
+        return func, attrs
 
     @classmethod
     def create(cls, target: ServiceFunc, /) -> Self:
@@ -467,22 +472,19 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
         return cls(target)
 
     def __init__(self, s: HostedServiceFunc, /, **attrs):
-        source = self._unwrap(s)
         if "name" in attrs and not attrs["name"]:
             del attrs["name"]
-        if isinstance(source, HostedService) and not attrs:
-            source, attrs = source.source, source._attrs  # type: ignore[attr-defined]
-        if isinstance(source, HostedServiceSeq) and len(source) == 1:
-            source = source.services[0]
-        assert callable(source)
+        source, attrs = self._unwrap(s, attrs)
+        if not callable(source):
+            raise ValueError(f"Invalid service source: {source}")
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "_attrs", attrs)
 
     @property
-    def _services(self) -> HostedServiceSeq:
-        if isinstance(self.source, HostedServiceSeq) and not self._attrs:
+    def _services(self) -> HostedServiceSet:
+        if isinstance(self.source, HostedServiceSet) and not self._attrs:
             return self.source
-        return HostedServiceSeq(self)
+        return HostedServiceSet(self)
 
     @property
     def name(self) -> str:
@@ -523,23 +525,26 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
             return self
         if isinstance(other, HostedService):
             other = other._services
-        return HostedService(self._services.append(other))
+        return HostedService(self._services.add(other))
 
     def __iadd__(self, other: HostedServiceFunc) -> HostedService:
         return self.__add__(other)
 
-    # s1 = s1 >> s2
-    def __rshift__(self, target: HostedServiceFunc | Iterable[HostedServiceFunc]) -> HostedService:
+    def wrap(self, target: HostedServiceFunc | Iterable[HostedServiceFunc]) -> HostedService:
         """
-        Run `wrapped` service(s) inside this host, like in a context manager.
+        Run `target` service(s) inside this service, like in a context manager.
         """
         if not callable(target):  # Assume multiple services
-            target = HostedServiceSeq(*target)
+            target = HostedServiceSet(*target)
         return HostedService(WrappedHostedService(self, HostedService.ensure(target)))
+
+    # s1 = s1 >> s2
+    def __rshift__(self, target: HostedServiceFunc | Iterable[HostedServiceFunc]) -> HostedService:
+        return self.wrap(target)
 
     # s1 >>= s2
     def __irshift__(self, target: HostedServiceFunc | Iterable[HostedServiceFunc]) -> HostedService:
-        return self.__rshift__(target)
+        return self.wrap(target)
 
     def use(self, *middlewares: HostedServiceDecorator) -> HostedService:
         """
@@ -565,31 +570,36 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
 
 @final
 @dc.dataclass(frozen=True, slots=True)
-class HostedServiceSeq(Iterable[HostedService]):
-    services: tuple[HostedServiceFunc]
+class HostedServiceSet(Collection[HostedService]):
+    services: frozenset[HostedService]
 
     def __init__(self, *services: HostedServiceFunc):
         def unwrap():
             for s in services:
-                if isinstance(s, HostedServiceSeq):  # Flatten if needed
+                if isinstance(s, HostedServiceSet):  # Flatten if needed
                     yield from s.services
                 else:
-                    yield s
+                    yield HostedService.ensure(s)
 
-        object.__setattr__(self, "services", tuple(unwrap()))
+        object.__setattr__(self, "services", frozenset(unwrap()))
 
     def __repr__(self):
         return f"{self.__class__.__name__}(len={len(self)})"
 
     def __iter__(self) -> Iterator[HostedService]:
-        for s in self.services:
-            yield HostedService.ensure(s)
+        return iter(self.services)
 
     def __len__(self) -> int:
         return len(self.services)
 
-    def append(self, *services: HostedServiceFunc) -> HostedServiceSeq:
-        return HostedServiceSeq(*(self.services + services))
+    def __contains__(self, x, /) -> bool:
+        if not callable(x):
+            return False
+        other = HostedService.ensure(cast(HostedServiceFunc, x))
+        return other in self.services
+
+    def add(self, *services: HostedServiceFunc) -> HostedServiceSet:
+        return HostedServiceSet(*itertools.chain(services, self.services))
 
     async def __call__(self, lifetime: ServiceLifetimeManager) -> None:
         async def when_all_started():

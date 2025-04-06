@@ -13,7 +13,7 @@ from contextlib import (
     nullcontext,
 )
 from functools import partial, wraps
-from typing import Any, ParamSpec, TypeAlias, TypeVar, Union, cast
+from typing import Any, ParamSpec, TypeAlias, TypeVar, Union, cast, overload
 
 from anyio import ClosedResourceError, EndOfStream, create_task_group, from_thread, to_thread
 from anyio.abc import ObjectReceiveStream
@@ -59,7 +59,7 @@ _HandlerMiddleware: TypeAlias = Callable[
     AbstractAsyncContextManager[Callable[[T2], R2]],
 ]
 HandlerDecorator: TypeAlias = Callable[
-    [AbstractAsyncContextManager[Callable[[T], R]]],  # HandlerManager[T] or SyncHandlerManager[T]
+    [AbstractAsyncContextManager[Callable[[T], R]]],  # Source (HandlerManager[T] or SyncHandlerManager[T])
     AbstractAsyncContextManager[Callable[[T2], R2]],
 ]
 
@@ -215,29 +215,53 @@ def handler_middleware(m: HandlerMiddleware[T, R, T2, R2], /) -> HandlerDecorato
     return decorator
 
 
-def handler_wrapper(
-    w: Callable[[T], AbstractContextManager[Any]] | Callable[[T], Generator[Any, None, Any]], /
-) -> HandlerDecorator[T, R, T, R]:
-    if inspect.isgeneratorfunction(w):
-        w = contextmanager(w)
-    w = cast(Callable[[T], AbstractContextManager[Any]], w)
+@overload
+def handler_mapper(
+    w: Callable[[T], AbstractContextManager[T2]] | Callable[[T], Generator[T2, None, Any]], /
+) -> HandlerDecorator[T2, R, T, R]: ...
+
+
+@overload
+def handler_mapper(
+    w: Callable[[T], AsyncGenerator[T2, None]], /
+) -> HandlerDecorator[T2, Awaitable[None], T, Awaitable[None]]: ...
+
+
+def handler_mapper(m, /) -> HandlerDecorator[T2, Any, T, Any]:
+    if inspect.isasyncgenfunction(m):
+        amap: Callable[[T], AbstractAsyncContextManager[T2]] = asynccontextmanager(m)
+
+        @handler_middleware
+        async def async_only_middleware(next_h: Callable[[T2], Awaitable[None]]):
+            async def handle_async(item: T):
+                async with amap(item) as item2:
+                    await next_h(item2)
+
+            yield handle_async
+
+        return async_only_middleware
+
+    if inspect.isgeneratorfunction(m):
+        m = contextmanager(m)
+    # noinspection PyShadowingBuiltins
+    map: Callable[[T], AbstractContextManager[T2]] = m
 
     @handler_middleware
-    async def middleware(next_h: Callable[[T], R]) -> AsyncGenerator[Callable[[T], Any], None]:
+    async def middleware(next_h: Callable[[T2], R]) -> AsyncGenerator[Callable[[T], Any], None]:
         if is_async_callable(next_h):
 
-            async def _handle_async(item: T):
-                with w(item):
-                    await next_h(item)
+            async def handle_async(item: T):
+                with map(item) as item2:
+                    await next_h(item2)
 
-            yield _handle_async
+            yield handle_async
         else:
 
-            def _handle_sync(item: T):
-                with w(item):
-                    next_h(item)
+            def handle(item: T):
+                with map(item) as item2:
+                    next_h(item2)
 
-            yield _handle_sync
+            yield handle
 
     return middleware
 

@@ -10,8 +10,8 @@ from ._flow import (
     ensure_async_handler,
     ensure_sync_handler,
     handler,
+    handler_mapper,
     handler_middleware,
-    handler_wrapper,
     sync_handler,
 )
 from ._ops import buffer, delay, log_errors, skip_first
@@ -30,7 +30,7 @@ __all__ = [
     "HandlerWrapper",
     "HandlerMiddleware",
     "HandlerDecorator",
-    "handler_wrapper",
+    "handler_mapper",
     "handler_middleware",
     # ops
     "delay",

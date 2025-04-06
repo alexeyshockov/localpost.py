@@ -82,6 +82,8 @@ rabbitmq = [
 dev = [
     "icecream ~=2.1",
     "structlog ~=25.0",
+]
+dev-consumers = [
     "aws-lambda-powertools",
     "confluent-kafka[schemaregistry,protobuf]",
     "grpcio-tools ~=1.68",
@@ -101,6 +103,8 @@ dev-types = [
 examples = [
     "fast-depends ~=2.4",
     "fastapi-slim ~=0.111",
+    "pydantic ~=2.10",
+    'psycopg[binary,pool] ~=3.2',
 ]
 unit-tests = [
     "pytest ~=8.1",
@@ -143,8 +147,8 @@ distribution = true
 
 [tool.pdm.version]
 source = "scm"
-write_to = "localpost/_version.py"
-write_template = "__version__ = '{}'"
+write_to = "localpost/__meta__.py"
+write_template = "version = '{}'"
 
 [tool.pdm.build]
 excludes = ["./**/.git", "tests", "examples"]
