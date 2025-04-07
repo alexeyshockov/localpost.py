@@ -4,25 +4,20 @@ import dataclasses as dc
 import inspect
 import logging
 import math
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
-from functools import partial
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, create_task_group, to_thread
+from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
-    EventView,
-    EventViewProxy,
     Result,
     def_full_name,
     is_async_callable,
-    start_task_soon,
-    wait_all,
 )
 from localpost.flow import HandlerDecorator, HandlerManager
-from localpost.hosting import Host, HostedServiceFunc, ServiceLifetimeManager
+from localpost.hosting import ServiceLifetimeManager, ExposedService, ExposedServiceBase
 
 T = TypeVar("T")
 T2 = TypeVar("T2")
@@ -84,7 +79,8 @@ class Task(
             except WouldBlock:
                 logger.error("Subscriber's buffer is full, dropping the result")
 
-    async def __call__(self, event: T) -> None:  # MessageHandler[T]
+    # MessageHandler[T]
+    async def __call__(self, event: T) -> None:
         try:
             result = Result.ok(await self._handle(event))
             self._publish_result(result)
@@ -112,7 +108,7 @@ class Task(
 class ScheduledTaskTemplate(Generic[T]):
     @classmethod
     def ensure(cls, tpl: TriggerFactory[T]) -> ScheduledTaskTemplate[T]:
-        if isinstance(tpl, ScheduledTaskTemplate):
+        if isinstance(tpl, cls):
             return tpl
         return cls(tpl)
 
@@ -154,46 +150,19 @@ class ScheduledTaskTemplate(Generic[T]):
         return tf
 
 
-class ScheduledTask(Protocol[T, R]):
-    @property
-    def scheduler(self) -> Scheduler: ...
-
+class ScheduledTask(ExposedService, Protocol[T, R]):
     @property
     def task(self) -> Task[T, R]: ...
 
-    @property
-    def started(self) -> EventView: ...
-
-    @property
-    def shutting_down(self) -> EventView: ...
-
-    @property
-    def stopped(self) -> EventView: ...
-
-    def shutdown(self) -> None: ...
-
 
 @final
-class _ScheduledTask(Generic[T, R]):
-    def __init__(
-        self,
-        scheduler: Scheduler,
-        task: Task[T, R],
-        tf: TriggerFactory[T],
-        handler: HandlerManager[T] | None = None,
-    ):
-        self.scheduler = scheduler
+class _ScheduledTask(ExposedServiceBase, Generic[T, R]):
+    def __init__(self, task: Task[T, R], tf: TriggerFactory[T]):
+        super().__init__()
         self.task = task
-
-        self.started = EventViewProxy()
-        self.shutting_down = EventViewProxy()
-        self.stopped = EventViewProxy()
-
         self._trigger_factory = tf
-        self._handler = handler if handler else self.task
-
-        self._trigger: Trigger[T] | None = None
-        self._service_lifetime: ServiceLifetimeManager | None = None
+        tpl = ScheduledTaskTemplate.ensure(tf)
+        self._handler = tpl.resolve_handler(task)
 
     def __repr__(self):
         return f"ScheduledTask({self.name!r})"
@@ -202,39 +171,16 @@ class _ScheduledTask(Generic[T, R]):
     def name(self) -> str:
         return self.task.name
 
-    @property
-    def _lifetime(self) -> ServiceLifetimeManager:
-        assert self._service_lifetime, "Task has not started yet"
-        return self._service_lifetime
+    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
+        self._lifetime = service_lifetime
+        trigger = self._trigger_factory(self)
 
-    @_lifetime.setter
-    def _lifetime(self, value: ServiceLifetimeManager):
-        assert self._service_lifetime is None, "Task has already started"
-        self._service_lifetime = value
-        self.started.resolve(value.started)
-        self.shutting_down.resolve(value.shutting_down)
-        self.stopped.resolve(value.stopped)
-
-    def shutdown(self) -> None:
-        self._lifetime.set_shutting_down()
-
-    def create_runner(self) -> HostedServiceFunc:
-        if self._trigger is None:
-            trigger = self._trigger = self._trigger_factory(self)
-        else:
-            trigger = self._trigger
-
-        async def run_task(service_lifetime: ServiceLifetimeManager):
-            assert self._service_lifetime is None, f"{self!r} has already started"
-            self._lifetime = service_lifetime
-            async with trigger as t_events, self._handler as message_handler:
-                service_lifetime.set_started()
-                async for t_event in t_events:
-                    await message_handler(t_event)
-                logger.debug(f"{self!r} trigger is completed")
-            logger.debug(f"{self!r} is done")
-
-        return run_task
+        async with trigger as t_events, self._handler as message_handler:
+            service_lifetime.set_started()
+            async for t_event in t_events:
+                await message_handler(t_event)
+            logger.debug(f"{self!r} trigger is completed")
+        logger.debug(f"{self!r} is done")
 
 
 Trigger: TypeAlias = AbstractAsyncContextManager[AsyncIterator[T]]
@@ -254,110 +200,17 @@ TriggerFactoryDecorator: TypeAlias = Callable[
 ]
 
 
-@final
-class Scheduler:
-    def __init__(self, name: str = "scheduler"):
-        self.name = name
+def scheduled_task(
+    tf: TriggerFactory[T], /, *, name: str | None = None
+) -> Callable[[TaskHandler[T, R] | Task[T, R]], ScheduledTask[T, R]]:
+    """
+    Schedule a task with the given trigger.
+    """
 
-        self._started = EventViewProxy()
-        self._shutting_down = EventViewProxy()
-        self._stopped = EventViewProxy()
+    def _decorator(func: TaskHandler[T, R] | Task[T, R]) -> ScheduledTask[T, R]:
+        t = func if isinstance(func, Task) else Task(func)
+        if name:
+            t.name = name
+        return _ScheduledTask(t, tf)
 
-        self._scheduled: list[_ScheduledTask] = []
-        self._service_lifetime: ServiceLifetimeManager | None = None
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(len={len(self._scheduled)})"
-
-    @property
-    def scheduled_tasks(self) -> Sequence[ScheduledTask]:
-        return self._scheduled
-
-    @property
-    def started(self) -> EventView:
-        return self._started
-
-    @property
-    def shutting_down(self) -> EventView:
-        return self._shutting_down
-
-    @property
-    def stopped(self) -> EventView:
-        return self._stopped
-
-    @property
-    def _lifetime(self) -> ServiceLifetimeManager:
-        assert self._service_lifetime, "Scheduler has not started yet"
-        return self._service_lifetime
-
-    @_lifetime.setter
-    def _lifetime(self, value: ServiceLifetimeManager):
-        assert not self._service_lifetime, "Scheduler has already started"
-        self._service_lifetime = value
-        self._started.resolve(value.started)
-        self._shutting_down.resolve(value.shutting_down)
-        self._stopped.resolve(value.stopped)
-
-    @property
-    def host(self) -> Host:
-        return self._lifetime.host
-
-    def shutdown(self) -> None:  # TODO Reason
-        self._lifetime.set_shutting_down()
-
-    def schedule(self, t: TriggerFactory[T], /) -> Callable[[Task[T, R]], ScheduledTask[T, R]]:
-        def _decorator(task: Task[T, R]) -> ScheduledTask[T, R]:
-            tpl = ScheduledTaskTemplate.ensure(t)
-            scheduled_task = _ScheduledTask(self, task, tpl.tf, tpl.resolve_handler(task))
-            self._scheduled.append(scheduled_task)
-            return scheduled_task
-
-        return _decorator
-
-    @staticmethod
-    def as_task(*, name: str | None = None) -> Callable[[TaskHandler[T, R]], Task[T, R]]:
-        """
-        Create a task from the given callable (the same task can be scheduled multiple times).
-        """
-        return partial(Task, name=name)  # type: ignore[return-value]
-
-    def task(
-        self, tpl: TriggerFactory[T], /, *, name: str | None = None
-    ) -> Callable[[TaskHandler[T, R]], ScheduledTask[T, R]]:
-        """
-        Schedule a task with the given trigger.
-        """
-
-        def _decorator(func: TaskHandler[T, R]) -> ScheduledTask[T, R]:
-            t = self.as_task(name=name)(func)
-            st = self.schedule(tpl)(t)
-            return st
-
-        return _decorator
-
-    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
-        self._lifetime = service_lifetime
-
-        def start_task(task: _ScheduledTask):
-            return service_lifetime.start_child_service(task.create_runner(), name=f"{self.name}/{task.task.name}")
-
-        services = [start_task(t) for t in self._scheduled]
-        if not services:
-            logger.warning("Scheduler has no tasks to run")
-            service_lifetime.set_started()
-            return
-
-        async def when_tasks_done():
-            await wait_all(task_svc.stopped for task_svc in services)
-            service_lifetime.set_shutting_down()
-
-        async def when_tasks_started():
-            await wait_all(task_svc.started for task_svc in services)
-            # Consider the scheduler started only when all the tasks are started
-            service_lifetime.set_started()
-
-        async with create_task_group() as tg:
-            start_task_soon(tg, when_tasks_done)
-            start_task_soon(tg, when_tasks_started)
-            await service_lifetime.shutting_down
-            tg.cancel_scope.cancel()
+    return _decorator

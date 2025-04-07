@@ -13,7 +13,7 @@ from ._flow import (
     Handler,
     HandlerDecorator,
     handler_middleware,
-    handler_wrapper,
+    handler_mapper,
     logger,
     stream_consumer,
 )
@@ -40,10 +40,10 @@ def delay(value: DelayFactory, /) -> HandlerDecorator[T, Awaitable[None], T, Awa
 def log_errors(custom_logger=None, /) -> HandlerDecorator[T, R, T, R]:
     h_logger = custom_logger or logger
 
-    @handler_wrapper
-    def wrapper(_):
+    @handler_mapper
+    def wrapper(item):
         try:
-            yield
+            yield item
         except Exception:  # noqa
             h_logger.exception("Error while processing a message")
 

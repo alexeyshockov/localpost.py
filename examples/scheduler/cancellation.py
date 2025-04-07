@@ -8,14 +8,10 @@ import anyio
 
 from localpost.hosting import Host
 from localpost.hosting.middlewares import shutdown_timeout
-from localpost.scheduler import Scheduler, every
-
-scheduler = Scheduler()
-host = Host(scheduler)
-host.root_service //= shutdown_timeout(1)
+from localpost.scheduler import every, scheduled_task
 
 
-@scheduler.task(every(timedelta(seconds=3)))
+@scheduled_task(every(timedelta(seconds=3)))
 async def long_async_task():
     print("long_async_task is triggered!")
     try:
@@ -28,6 +24,10 @@ async def long_async_task():
     finally:
         # Will be executed always
         print("long_async_task has finished!")
+
+
+host = Host(long_async_task)
+host.root_service //= shutdown_timeout(1)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 from ._host import (
     AppHost,
+    ExposedService,
+    ExposedServiceBase,
     Host,
     HostedService,
     HostedServiceDecorator,
@@ -10,11 +12,14 @@ from ._host import (
     ServiceLifetimeManager,
     ServiceState,
     ServiceStatus,
+    exposed,
     hosted_service,
 )
 
 __all__ = [
     "AppHost",
+    "ExposedService",
+    "ExposedServiceBase",
     "Host",
     "HostedService",
     "HostedServiceDecorator",
@@ -25,5 +30,6 @@ __all__ = [
     "ServiceLifetimeManager",
     "ServiceState",
     "ServiceStatus",
+    "exposed",
     "hosted_service",
 ]
