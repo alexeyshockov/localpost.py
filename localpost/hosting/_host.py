@@ -41,13 +41,14 @@ from typing_extensions import Concatenate, Self
 from localpost._utils import (
     NO_OP_TS,
     EventView,
+    EventViewProxy,
     _Event,
     choose_anyio_backend,
     def_full_name,
     is_async_callable,
     start_task_soon,
     unwrap_exc,
-    wait_all, EventViewProxy,
+    wait_all,
 )
 
 T = TypeVar("T")
@@ -121,6 +122,12 @@ class HostLifetime(Protocol):
 
     @property
     def status(self) -> ServiceStatus: ...
+
+    # @property
+    # def same_thread(self) -> bool: ...
+
+    # @property
+    # def portal(self) -> BlockingPortal: ...
 
     @property
     def started(self) -> EventView: ...
@@ -239,7 +246,7 @@ HostedServiceDecorator: TypeAlias = Callable[
 ]
 
 
-def async_hosted_service(func: Callable[..., Awaitable[None]]) -> HostedServiceFunc:
+def async_service(func: Callable[..., Awaitable[None]]) -> HostedServiceFunc:
     """
     Decorator to create a service from an async function.
     """
@@ -255,7 +262,7 @@ def async_hosted_service(func: Callable[..., Awaitable[None]]) -> HostedServiceF
     return _simple_service
 
 
-def sync_hosted_service(func: Callable[..., Any]) -> HostedServiceFunc:
+def sync_service(func: Callable[..., Any]) -> HostedServiceFunc:
     """
     Decorator to create a service from a target sync function (by running it in a separate thread).
 
@@ -360,7 +367,7 @@ class _ServiceLifetime:
             self.graceful_shutdown_scope = graceful_shutdown_scope
             logger.debug(f"{self.name} started")
 
-        self.host.in_host_thread(_do)
+        in_host_thread(self.host, _do)
 
     def set_shutting_down(self, *, reason: BaseException | str | None = None):
         self.shutdown(reason=reason)
@@ -376,7 +383,7 @@ class _ServiceLifetime:
             if graceful_shutdown_scope := self.graceful_shutdown_scope:
                 graceful_shutdown_scope.cancel()
 
-        self.host.in_host_thread(_do)
+        in_host_thread(self.host, _do)
 
     def start_child_service(
         self,
@@ -395,7 +402,7 @@ class _ServiceLifetime:
             self.tg.start_soon(_run_service, svc, target_args, svc_lifetime, name=svc.name)
             return svc_lifetime
 
-        return self.host.in_host_thread(start_service)
+        return in_host_thread(self.host, start_service)
 
 
 async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLifetime):
@@ -489,7 +496,7 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
     def create(cls, target: ServiceFunc, /) -> Self:
         if isinstance(target, cls):
             return target
-        return cls(async_hosted_service(target) if is_async_callable(target) else sync_hosted_service(target))
+        return cls(async_service(target) if is_async_callable(target) else sync_service(target))
 
     @classmethod
     def ensure(cls, target: HostedServiceFunc, /) -> Self:
@@ -625,7 +632,7 @@ class HostedServiceSet(Collection[HostedService]):
         return other in self.services
 
     def add(self, *services: HostedServiceFunc) -> HostedServiceSet:
-        return HostedServiceSet(*itertools.chain(services, self.services))
+        return HostedServiceSet(*itertools.chain(services, self.services))  # type: ignore[arg-type]
 
     async def __call__(self, lifetime: ServiceLifetimeManager) -> None:
         async def when_all_started():
@@ -710,11 +717,14 @@ class ExposedService(Protocol):  # Also a HostedServiceFunc
 
 
 class ExposedServiceBase(abc.ABC):
-    def __init__(self):
+    def __init__(self) -> None:
         self._started = EventViewProxy()
         self._shutting_down = EventViewProxy()
         self._stopped = EventViewProxy()
         self._service_lifetime: ServiceLifetimeManager | None = None
+
+    @abstractmethod
+    def __call__(self, service_lifetime: ServiceLifetimeManager) -> Awaitable[None]: ...
 
     @property
     def _lifetime(self) -> ServiceLifetimeManager:
@@ -759,13 +769,13 @@ class _ExposedService(ExposedServiceBase):
         return self._source(service_lifetime)
 
 
-# What is a better name: exposed() or observable()?..
-def exposed(func: HostedServiceFunc) -> ExposedService:
-    return _ExposedService(func)
+# # What is a better name: exposed() or observable()?..
+# def exposed(func: HostedServiceFunc) -> ExposedService:
+#     return _ExposedService(func)
 
 
 class AbstractHost(abc.ABC):
-    def __init__(self):
+    def __init__(self) -> None:
         self._exec_context: _HostExecContext | None = None
         self._exit_code: int | None = None
 
@@ -838,16 +848,11 @@ class AbstractHost(abc.ABC):
     def same_thread(self) -> bool:
         return threading.get_ident() == self._exec.thread_id
 
-    def in_host_thread(self, func: Callable[[], T]) -> T:
-        if self.same_thread:
-            return func()
-        return self.portal.start_task_soon(func).result()  # type: ignore
-
     def shutdown(self, *, reason: BaseException | str | None = None) -> None:
         self._exec.root_service_lifetime.shutdown(reason=reason)
 
     def stop(self) -> None:
-        self.in_host_thread(self._exec.run_scope.cancel)
+        in_host_thread(self, self._exec.run_scope.cancel)
 
     @asynccontextmanager
     async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
@@ -901,6 +906,13 @@ class AbstractHost(abc.ABC):
                 yield lifetime
 
 
+# def in_host_thread(h: HostLifetime, func: Callable[..., T]) -> T:
+def in_host_thread(h: AbstractHost, func: Callable[..., T]) -> T:
+    if h.same_thread:
+        return func()
+    return h.portal.start_task_soon(func).result()
+
+
 @final
 class Host(AbstractHost):
     def __init__(self, root_service: HostedServiceFunc, /):
@@ -925,67 +937,3 @@ class Host(AbstractHost):
     def root_service(self, value: HostedServiceFunc):
         self._assert_not_started()
         self._root_service = HostedService.ensure(value)
-
-
-@final
-class AppHost(AbstractHost):
-    def __init__(self, name: str | None = "app", /):
-        super().__init__()
-        self._name = name
-        self._middlewares: tuple[HostedServiceDecorator, ...] = ()
-        self._root_service = EMPTY_SERVICE
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}(root_service={self.name!r})"
-
-    def _prepare_for_run(self) -> HostedService:
-        return self._root_service.use(*self._middlewares).named(self.name)
-
-    @property
-    def name(self) -> str:
-        return self._name or self._root_service.name
-
-    @name.setter
-    def name(self, value: str | None):
-        self._assert_not_started()
-        self._name = value
-
-    @property
-    def root_service(self) -> HostedService:
-        return self._root_service
-
-    @root_service.setter
-    def root_service(self, value: HostedServiceFunc):
-        self._assert_not_started()
-        self._root_service = HostedService.ensure(value)
-
-    def use(self, *middlewares: HostedServiceDecorator) -> None:
-        """
-        Register middlewares for the root service.
-        """
-        self._assert_not_started()
-        self._middlewares += middlewares
-
-    def _add_service(self, target: ServiceFunc, name: str | None = None) -> HostedService:
-        self._assert_not_started()
-        hs = HostedService.create(target).named(name)
-        self.root_service += hs
-        return hs
-
-    @overload
-    def service(self, target: ServiceFunc, /) -> HostedService: ...
-
-    @overload
-    def service(self, name: str | None, /) -> Callable[[ServiceFunc], HostedService]: ...
-
-    def service(self, target: ServiceFunc | str | None) -> HostedService | Callable[[ServiceFunc], HostedService]:
-        """
-        Register a service in the host.
-
-        Equivalent to: `host.root_service += hosted_service(target).named(name)`
-        """
-
-        def _decorator(func: ServiceFunc) -> HostedService:
-            return self._add_service(func, cast(str | None, target))
-
-        return self._add_service(target) if callable(target) else _decorator

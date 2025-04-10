@@ -15,7 +15,7 @@ T2 = TypeVar("T2")
 logger = logging.getLogger("localpost.scheduler.cond")
 
 
-def make_decorator(middleware: TriggerFactoryMiddleware[T, T2]) -> TriggerFactoryDecorator[T, T2]:
+def trigger_factory_middleware(middleware: TriggerFactoryMiddleware[T, T2]) -> TriggerFactoryDecorator[T, T2]:
     def _decorator(source: TriggerFactory[T]) -> TriggerFactory[T2]:
         @wraps(source)
         def _run(task):
@@ -34,7 +34,8 @@ def take_first(n: int, /) -> TriggerFactoryDecorator[T, T]:
     if n < 0:
         raise ValueError("n must be a non-negative integer")
 
-    async def _middleware(source: Trigger[T], _):
+    @trigger_factory_middleware
+    async def middleware(source: Trigger[T], _):
         iter_n = 0
         if iter_n >= n:
             return
@@ -45,13 +46,14 @@ def take_first(n: int, /) -> TriggerFactoryDecorator[T, T]:
                 if iter_n >= n:
                     break
 
-    return make_decorator(_middleware)
+    return middleware
 
 
 def delay(value: DelayFactory, /) -> TriggerFactoryDecorator[T, T]:
     delay_f = ensure_delay_factory(value)
 
-    async def _middleware(source: Trigger[T], task: ScheduledTask):
+    @trigger_factory_middleware
+    async def middleware(source: Trigger[T], task: ScheduledTask):
         shutdown_aware_sleep = cancellable_from(task.shutting_down)(sleep)
         async with source as events:
             async for event in events:
@@ -62,4 +64,4 @@ def delay(value: DelayFactory, /) -> TriggerFactoryDecorator[T, T]:
                     break
                 yield event
 
-    return make_decorator(_middleware)
+    return middleware

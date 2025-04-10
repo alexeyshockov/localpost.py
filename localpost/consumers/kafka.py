@@ -13,14 +13,15 @@ from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer
 
 from localpost._utils import EventView
 from localpost.flow import HandlerManager, SyncHandlerManager, ensure_sync_handler
-from localpost.hosting import HostedService, ServiceLifetimeManager
+from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 __all__ = [
     "KafkaMessage",
     "KafkaMessages",
-    "KafkaTopicConsumer",
-    "KafkaBroker",
-    "topic_consumer",
+    "KafkaConsumer",
+    # "KafkaBroker",
+    "kafka_config",
+    "kafka_consumer",
 ]
 
 logger = logging.getLogger(__name__)
@@ -111,20 +112,21 @@ class KafkaMessages(Sequence[KafkaMessage], AbstractContextManager[Sequence[byte
 
 
 @final
-class KafkaTopicConsumer:
+class KafkaConsumer(ExposedServiceBase):
     def __init__(
         self,
         handler: SyncHandlerManager[KafkaMessage],
         topics: Iterable[str],
         /,
         *,
-        client_config: dict[str, Any] | None = None,
+        client_config: Mapping[str, Any] | None = None,
         consumers: int = 1,
     ):
+        super().__init__()
         if consumers < 1:
             raise ValueError("At least one consumer is required")
 
-        self.client_config: dict[str, Any] = client_config or {}
+        self.client_config: dict[str, Any] = dict(client_config or {})
         self.topics = list(topics)
         self.handler = handler
         self.consumers = consumers
@@ -166,6 +168,10 @@ class KafkaTopicConsumer:
             message_handler(message)
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
+        assert self.consumers > 0
+        threads_limiter = CapacityLimiter(self.consumers)
+        self._lifetime = service_lifetime
+
         def _consumer_thread(c):
             return to_thread.run_sync(
                 self._run_consumer,
@@ -176,8 +182,6 @@ class KafkaTopicConsumer:
                 limiter=threads_limiter,
             )
 
-        assert self.consumers > 0
-        threads_limiter = CapacityLimiter(self.consumers)
         # Make sure to create a task group _after_ resolving the handler, so we exit it only after all the consumer
         # tasks are done
         async with AsyncExitStack() as clients, self.handler as message_handler, create_task_group() as tg:
@@ -188,7 +192,7 @@ class KafkaTopicConsumer:
                 tg.start_soon(_consumer_thread, client)
 
 
-def kafka_conf_from_env() -> dict[str, Any]:
+def kafka_config_from_env() -> dict[str, Any]:
     """
     Construct a configuration dictionary for KAFKA_* environment variables.
 
@@ -206,36 +210,51 @@ def kafka_conf_from_env() -> dict[str, Any]:
     return dict(_read_env_vars())
 
 
-@final
-class KafkaBroker:
-    """
-    Convenient way to create and register Kafka consumers.
-    """
+def kafka_config(**overrides) -> dict[str, Any]:
+    conf_from_args = {k.replace("_", "."): v for k, v in overrides.items()}
+    conf_from_env = kafka_config_from_env()
+    return conf_from_env | conf_from_args
 
-    def __init__(self, **config):
-        conf_from_args = {k.replace("_", "."): v for k, v in config.items()}
-        conf_from_env = kafka_conf_from_env()
-        self.client_config = conf_from_env | conf_from_args
 
-    def topic_consumer(
-        self, topics: str | Iterable[str], /, *, consumers: int = 1
-    ) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], HostedService]:
-        def _decorator(handler) -> HostedService:
-            consumer = KafkaTopicConsumer(
-                ensure_sync_handler(handler),
-                [topics] if isinstance(topics, str) else topics,
-                client_config=self.client_config,
-                consumers=consumers,
-            )
-            return HostedService(consumer, name=f"KafkaTopicConsumer({topics!r})")
-
-        return _decorator
+# @final
+# class KafkaBroker:
+#     """
+#     Convenient way to create and register Kafka consumers.
+#     """
+#
+#     def __init__(self, **config):
+#         conf_from_args = {k.replace("_", "."): v for k, v in config.items()}
+#         conf_from_env = kafka_conf_from_env()
+#         self.client_config = conf_from_env | conf_from_args
+#
+#     def topic_consumer(
+#         self, topics: str | Iterable[str], /, *, consumers: int = 1
+#     # ) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], HostedService]:
+#     ) -> Callable[[T], T]:
+#         def _decorator(handler):
+#             consumer = KafkaTopicConsumer(
+#                 ensure_sync_handler(handler),
+#                 [topics] if isinstance(topics, str) else topics,
+#                 client_config=self.client_config,
+#                 consumers=consumers,
+#             )
+#             # return HostedService(consumer, name=f"KafkaTopicConsumer({topics!r})")
+#             return handler
+#
+#         return _decorator
 
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
-def topic_consumer(
-    topics: str | Iterable[str], broker: KafkaBroker | None = None, /, *, consumers: int = 1
-) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], HostedService]:
-    if broker is None:
-        broker = KafkaBroker()
-    return broker.topic_consumer(topics, consumers=consumers)
+def kafka_consumer(
+    topics: str | Iterable[str], client_config: Mapping[str, Any] | None = None, /, *, consumers: int = 1
+) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], KafkaConsumer]:
+    def _decorator(handler):
+        consumer = KafkaConsumer(
+            ensure_sync_handler(handler),
+            [topics] if isinstance(topics, str) else topics,
+            client_config=client_config,
+            consumers=consumers,
+        )
+        return consumer
+
+    return _decorator

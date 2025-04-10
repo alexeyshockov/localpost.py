@@ -6,7 +6,7 @@ import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final, overload
 
 from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -17,11 +17,13 @@ from localpost._utils import (
     is_async_callable,
 )
 from localpost.flow import HandlerDecorator, HandlerManager
-from localpost.hosting import ServiceLifetimeManager, ExposedService, ExposedServiceBase
+from localpost.hosting import ExposedService, ExposedServiceBase, HostedService, ServiceLifetimeManager
+from localpost.hosting._host import AbstractHost, HostedServiceSet
 
 T = TypeVar("T")
 T2 = TypeVar("T2")
 R = TypeVar("R")
+DecF = TypeVar("DecF", bound=Callable[..., Any])
 
 TaskHandler: TypeAlias = Union[
     Callable[[T], Awaitable[R]],
@@ -122,9 +124,9 @@ class ScheduledTaskTemplate(Generic[T]):
         return self.tf(*args, **kwargs)
 
     def __truediv__(self, middleware: TriggerFactoryMiddleware[T, T2]) -> ScheduledTaskTemplate[T2]:
-        from ._trigger import make_decorator
+        from ._trigger import trigger_factory_middleware
 
-        return self // make_decorator(middleware)
+        return self // trigger_factory_middleware(middleware)
 
     def __floordiv__(self, decorator: TriggerFactoryDecorator[T, T2]) -> ScheduledTaskTemplate[T2]:
         n = ScheduledTaskTemplate(self._tf)
@@ -214,3 +216,40 @@ def scheduled_task(
         return _ScheduledTask(t, tf)
 
     return _decorator
+
+
+class Scheduler(AbstractHost):
+    """
+    Custom host type, tailored to schedule periodic tasks.
+
+    If you need to combine multiple different services together (like a Kafka consumer and a scheduled task), use the
+    generic Host instead.
+    """
+
+    def __init__(self, name: str = "scheduler"):
+        super().__init__()
+        self._name = name
+        self._scheduled_tasks: list[ScheduledTask[Any, Any]] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def _prepare_for_run(self) -> HostedService:
+        return HostedService(HostedServiceSet(*self._scheduled_tasks))
+
+    def task(
+        self, tf: TriggerFactory[T], /, *, name: str | None = None
+    ) -> Callable[[TaskHandler[T, R] | Task[T, R] | ScheduledTask[T, R]], ScheduledTask[T, R]]:
+        """
+        Schedule a task with the given trigger.
+        """
+
+        def _decorator(func: TaskHandler[T, R] | Task[T, R] | ScheduledTask[T, R]):
+            if isinstance(func, _ScheduledTask):
+                func = func.task
+            st = scheduled_task(tf, name=name)(cast(TaskHandler[T, R] | Task[T, R], func))
+            self._scheduled_tasks.append(st)
+            return st
+
+        return _decorator

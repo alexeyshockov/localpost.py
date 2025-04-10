@@ -7,7 +7,7 @@ import pytest
 from confluent_kafka import Producer
 
 from localpost import flow
-from localpost.consumers.kafka import KafkaBroker, KafkaMessage, topic_consumer, KafkaMessages
+from localpost.consumers.kafka import KafkaBroker, KafkaMessage, kafka_consumer, KafkaMessages
 from localpost.hosting import Host
 from .RedpandaContainer import RedpandaContainer
 
@@ -45,7 +45,7 @@ async def test_normal_case(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @topic_consumer(topic_name, broker)
+    @kafka_consumer(topic_name, broker)
     @flow.sync_handler
     def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
@@ -81,7 +81,7 @@ async def test_batching(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @topic_consumer(topic_name, broker)
+    @kafka_consumer(topic_name, broker)
     @flow.batch(10, 1, KafkaMessages)
     @flow.handler
     async def handle(messages: KafkaMessages):

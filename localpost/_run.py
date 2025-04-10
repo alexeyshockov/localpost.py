@@ -5,25 +5,25 @@ import anyio
 from anyio import open_signal_receiver
 
 from ._utils import HANDLED_SIGNALS, cancellable_from, choose_anyio_backend
-from .hosting import Host, HostedServiceFunc
+from .hosting import AbstractHost, Host, HostedServiceFunc
 
 logger = logging.getLogger("localpost")
 
 
-def _ensure_host(target: Host | HostedServiceFunc) -> Host:
-    if isinstance(target, Host):
+def _ensure_host(target: AbstractHost | HostedServiceFunc) -> AbstractHost:
+    if isinstance(target, AbstractHost):
         return target
     return Host(target)
 
 
-def run(target: Host | HostedServiceFunc) -> int:
+def run(target: AbstractHost | HostedServiceFunc) -> int:
     """
     Run the target host (or service) until it stops or is interrupted by a signal.
     """
     return anyio.run(arun, target, **choose_anyio_backend())
 
 
-async def arun(target: Host | HostedServiceFunc) -> int:
+async def arun(target: AbstractHost | HostedServiceFunc) -> int:
     """
     Run the target host (or service) until it stops or is interrupted by a signal.
     """

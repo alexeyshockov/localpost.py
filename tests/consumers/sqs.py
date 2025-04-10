@@ -8,7 +8,7 @@ from aiobotocore.session import get_session
 from testcontainers.localstack import LocalStackContainer
 
 from localpost import flow
-from localpost.consumers.sqs import SqsBroker, SqsMessage, SqsMessages, queue_consumer
+from localpost.consumers.sqs import SqsBroker, SqsMessage, SqsMessages, sqs_queue_consumer
 from localpost.hosting import Host
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -57,7 +57,7 @@ async def test_normal_case(local_sqs):
 
     broker = SqsBroker(client_factory=create_client)
 
-    @queue_consumer(queue_name, broker)
+    @sqs_queue_consumer(queue_name, broker)
     @flow.handler
     async def handle(m: SqsMessage):
         nonlocal received
@@ -93,7 +93,7 @@ async def test_batching(local_sqs):
 
     broker = SqsBroker(client_factory=create_client)
 
-    @queue_consumer(queue_name, broker)
+    @sqs_queue_consumer(queue_name, broker)
     @flow.batch(10, 1, SqsMessages)
     @flow.handler
     async def handle(messages: SqsMessages):

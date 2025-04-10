@@ -12,8 +12,8 @@ from localpost._utils import DelayFactory, ensure_delay_factory, is_async_callab
 from ._flow import (
     Handler,
     HandlerDecorator,
-    handler_middleware,
     handler_mapper,
+    handler_middleware,
     logger,
     stream_consumer,
 )

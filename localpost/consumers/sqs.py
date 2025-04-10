@@ -12,7 +12,7 @@ from anyio import CancelScope, create_task_group, to_thread
 from localpost import flow
 from localpost._utils import EventView
 from localpost.flow import Handler, HandlerManager
-from localpost.hosting import HostedService, ServiceLifetimeManager
+from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 if TYPE_CHECKING:
     from types_aiobotocore_sqs import SQSClient
@@ -27,8 +27,9 @@ __all__ = [
     "SqsMessage",
     "SqsMessages",
     "SqsQueueConsumer",
-    "SqsBroker",
+    # "SqsBroker",
     "lambda_handler",
+    "sqs_queue_consumer",
 ]
 
 ClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager["SQSClient"]]
@@ -179,7 +180,7 @@ def create_client() -> AbstractAsyncContextManager["SQSClient"]:
 
 
 @final
-class SqsQueueConsumer:
+class SqsQueueConsumer(ExposedServiceBase):
     _EMPTY_RECEIVE: Final[Sequence["MessageTypeDef"]] = ()
 
     def __init__(
@@ -191,6 +192,7 @@ class SqsQueueConsumer:
         client_factory: ClientFactory | None = None,
         consumers: int = 1,
     ):
+        super().__init__()
         if consumers < 1:
             raise ValueError("Number of consumers must be at least 1")
 
@@ -235,6 +237,8 @@ class SqsQueueConsumer:
                 await message_handler(SqsMessage(m, self.queue_name, queue_url, client))
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
+        self._lifetime = service_lifetime
+
         async def _resolve_url_from_name():
             async with self.client_factory() as c:
                 resolve_resp = await c.get_queue_url(QueueName=self.queue_name)
@@ -255,41 +259,56 @@ class SqsQueueConsumer:
                 scope.cancel()
 
 
-@final
-class SqsBroker:
-    def __init__(self, *, client_factory: ClientFactory | None = None):
-        self.client_factory = client_factory or create_client
-
-    def queue_consumer(
-        self, queue_name_or_url: str, /, *, consumers: int = 1
-    ) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
-        if "/" in queue_name_or_url:
-            queue_url = queue_name_or_url
-            queue_name = _queue_name_from_url(queue_url)
-        else:
-            queue_url = None
-            queue_name = queue_name_or_url
-
-        def _decorator(handler) -> HostedService:
-            consumer = SqsQueueConsumer(
-                handler,
-                queue_name=queue_name,
-                queue_url=queue_url,
-                client_factory=self.client_factory,
-                consumers=consumers,
-            )
-            return HostedService(consumer, name=f"SqsQueueConsumer({queue_name!r})")
-
-        return _decorator
+# @final
+# class SqsBroker:
+#     def __init__(self, *, client_factory: ClientFactory | None = None):
+#         self.client_factory = client_factory or create_client
+#
+#     def queue_consumer(
+#         self, queue_name_or_url: str, /, *, consumers: int = 1
+#     ) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
+#         if "/" in queue_name_or_url:
+#             queue_url = queue_name_or_url
+#             queue_name = _queue_name_from_url(queue_url)
+#         else:
+#             queue_url = None
+#             queue_name = queue_name_or_url
+#
+#         def _decorator(handler) -> HostedService:
+#             consumer = SqsQueueConsumer(
+#                 handler,
+#                 queue_name=queue_name,
+#                 queue_url=queue_url,
+#                 client_factory=self.client_factory,
+#                 consumers=consumers,
+#             )
+#             return HostedService(consumer, name=f"SqsQueueConsumer({queue_name!r})")
+#
+#         return _decorator
 
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
-def queue_consumer(
-    queue_name_or_url: str, broker: SqsBroker | None = None, /, *, consumers: int = 1
-) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
-    if broker is None:
-        broker = SqsBroker()
-    return broker.queue_consumer(queue_name_or_url, consumers=consumers)
+def sqs_queue_consumer(
+    queue_name_or_url: str, client_factory: ClientFactory | None = None, /, *, consumers: int = 1
+) -> Callable[[HandlerManager[SqsMessage]], SqsQueueConsumer]:
+    if "/" in queue_name_or_url:
+        queue_url = queue_name_or_url
+        queue_name = _queue_name_from_url(queue_url)
+    else:
+        queue_url = None
+        queue_name = queue_name_or_url
+
+    def _decorator(handler):
+        consumer = SqsQueueConsumer(
+            handler,
+            queue_name=queue_name,
+            queue_url=queue_url,
+            client_factory=client_factory,
+            consumers=consumers,
+        )
+        return consumer
+
+    return _decorator
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):
@@ -387,9 +406,9 @@ def lambda_handler(
     @flow.handler
     async def _handler(workload: SqsMessage | Sequence[SqsMessage]) -> None:
         lambda_event: LambdaEvent = {"Records": []}
-        if isinstance(input, SqsMessage):
+        if isinstance(workload, SqsMessage):
             message = workload
-            lambda_event["Records"] = _message2lambda(message)
+            lambda_event["Records"] = [_message2lambda(message)]
             async with message:
                 await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
         else:
