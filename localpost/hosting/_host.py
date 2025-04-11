@@ -9,7 +9,7 @@ import threading
 from abc import abstractmethod
 from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Generator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from functools import cached_property, wraps
+from functools import wraps
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -439,14 +439,6 @@ class _HostExecContext:
     thread_id: int
     run_scope: CancelScope
 
-    @classmethod
-    def create(cls, host: AbstractHost, portal: BlockingPortal, tg: TaskGroup) -> Self:
-        svc_lifetime = _ServiceLifetime(host.name, host, tg)
-        svc_lifetime.started = cast(_Event, host.started)
-        svc_lifetime.shutting_down = cast(_Event, host.shutting_down)
-        svc_lifetime.stopped = cast(_Event, host.stopped)
-        return cls(svc_lifetime, portal, threading.get_ident(), tg.cancel_scope)
-
 
 def _hs_name(func: object) -> str:
     match func:
@@ -726,14 +718,19 @@ class ExposedServiceBase(abc.ABC):
     @abstractmethod
     def __call__(self, service_lifetime: ServiceLifetimeManager) -> Awaitable[None]: ...
 
+    def _assert_not_started(self):
+        if self._service_lifetime:
+            raise RuntimeError("Service has already started")
+
     @property
     def _lifetime(self) -> ServiceLifetimeManager:
-        assert self._service_lifetime, "Service has not started yet"
-        return self._service_lifetime
+        if self._service_lifetime:
+            return self._service_lifetime
+        raise RuntimeError("Service has not started yet")
 
     @_lifetime.setter
     def _lifetime(self, value: ServiceLifetimeManager):
-        assert not self._service_lifetime, "Service has already started"
+        self._assert_not_started()
         self._service_lifetime = value
         self._started.resolve(value.started)
         self._shutting_down.resolve(value.shutting_down)
@@ -774,8 +771,9 @@ class _ExposedService(ExposedServiceBase):
 #     return _ExposedService(func)
 
 
-class AbstractHost(abc.ABC):
+class AbstractHost(ExposedServiceBase, abc.ABC):
     def __init__(self) -> None:
+        super().__init__()
         self._exec_context: _HostExecContext | None = None
         self._exit_code: int | None = None
 
@@ -803,18 +801,6 @@ class AbstractHost(abc.ABC):
         if not 0 <= value <= 255:
             raise ValueError("Exit code must be in [0,255] range")
         self._exit_code = value
-
-    @cached_property
-    def started(self) -> EventView:
-        return _Event()
-
-    @cached_property
-    def shutting_down(self) -> EventView:
-        return _Event()
-
-    @cached_property
-    def stopped(self) -> EventView:
-        return _Event()
 
     @property
     def _exec(self) -> _HostExecContext:
@@ -848,20 +834,23 @@ class AbstractHost(abc.ABC):
     def same_thread(self) -> bool:
         return threading.get_ident() == self._exec.thread_id
 
-    def shutdown(self, *, reason: BaseException | str | None = None) -> None:
-        self._exec.root_service_lifetime.shutdown(reason=reason)
-
     def stop(self) -> None:
         in_host_thread(self, self._exec.run_scope.cancel)
 
+    def __call__(self, sl: ServiceLifetimeManager) -> Awaitable[None]:
+        """Run the host as a service (in another host)."""
+        assert isinstance(sl, _ServiceLifetime)
+        self._lifetime = sl
+        self._exec_context = _HostExecContext(sl, sl.host.portal, threading.get_ident(), sl.tg.cancel_scope)
+        return self._prepare_for_run()(sl)
+
     @asynccontextmanager
     async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
-        self._assert_not_started()
-
         # A premature optimization, to save one task group nesting level
         tg: TaskGroup = exec_tg if exec_tg else portal._task_group  # noqa
-        self._exec_context = exec_context = _HostExecContext.create(self, portal, tg)
-        tg.start_soon(_run_service, self._prepare_for_run(), (), exec_context.root_service_lifetime)
+        self._lifetime = sl = _ServiceLifetime(self.name, self, tg)
+        self._exec_context = _HostExecContext(sl, portal, threading.get_ident(), sl.tg.cancel_scope)
+        tg.start_soon(_run_service, self._prepare_for_run(), (), sl)
         try:
             yield cast(HostLifetime, self)
         finally:

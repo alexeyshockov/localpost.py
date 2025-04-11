@@ -6,7 +6,7 @@ import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final, overload
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final
 
 from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
@@ -17,8 +17,14 @@ from localpost._utils import (
     is_async_callable,
 )
 from localpost.flow import HandlerDecorator, HandlerManager
-from localpost.hosting import ExposedService, ExposedServiceBase, HostedService, ServiceLifetimeManager
-from localpost.hosting._host import AbstractHost, HostedServiceSet
+from localpost.hosting import (
+    AbstractHost,
+    ExposedService,
+    ExposedServiceBase,
+    HostedService,
+    HostedServiceSet,
+    ServiceLifetimeManager,
+)
 
 T = TypeVar("T")
 T2 = TypeVar("T2")
