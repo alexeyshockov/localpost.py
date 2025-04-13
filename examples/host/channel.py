@@ -3,8 +3,7 @@
 import anyio
 
 from localpost.hosting import Host, hosted_service
-from localpost.scheduler import delay, take_first
-from localpost.scheduler import every, scheduled_task
+from localpost.scheduler import delay, every, scheduled_task, take_first
 
 channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
 
@@ -31,6 +30,7 @@ host = Host(print_channel >> scheduled_background_task)
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()

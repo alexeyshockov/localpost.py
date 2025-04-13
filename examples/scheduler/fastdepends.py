@@ -6,16 +6,14 @@ from datetime import timedelta
 
 from fast_depends import Depends, inject
 
-from localpost.scheduler import Scheduler, every, delay
-
-scheduler = Scheduler()
+from localpost.scheduler import delay, every, scheduled_task
 
 
 def roll_dice():
     return random.randint(1, 6)
 
 
-@scheduler.task(every(timedelta(seconds=3)) // delay((0, 3)))
+@scheduled_task(every(timedelta(seconds=3)) // delay((0, 3)))
 @inject
 def print_task(
     n1: int = Depends(roll_dice, use_cache=False),
@@ -32,4 +30,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(scheduler))
+    exit(localpost.run(print_task))

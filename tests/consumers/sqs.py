@@ -8,7 +8,7 @@ from aiobotocore.session import get_session
 from testcontainers.localstack import LocalStackContainer
 
 from localpost import flow
-from localpost.consumers.sqs import SqsBroker, SqsMessage, SqsMessages, sqs_queue_consumer
+from localpost.consumers.sqs import SqsMessage, SqsMessages, sqs_queue_consumer
 from localpost.hosting import Host
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -20,7 +20,7 @@ def anyio_backend():
     """
     SQS consumer uses aioboto3 which is asyncio only.
     """
-    return 'asyncio'
+    return "asyncio"
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +39,7 @@ def local_sqs():
 
 
 async def test_normal_case(local_sqs):
-    queue_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -55,9 +55,7 @@ async def test_normal_case(local_sqs):
     def create_client():
         return get_session().create_client("sqs", **local_sqs)
 
-    broker = SqsBroker(client_factory=create_client)
-
-    @sqs_queue_consumer(queue_name, broker)
+    @sqs_queue_consumer(queue_name, create_client)
     @flow.handler
     async def handle(m: SqsMessage):
         nonlocal received
@@ -75,7 +73,7 @@ async def test_normal_case(local_sqs):
 
 
 async def test_batching(local_sqs):
-    queue_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -91,16 +89,12 @@ async def test_batching(local_sqs):
     def create_client():
         return get_session().create_client("sqs", **local_sqs)
 
-    broker = SqsBroker(client_factory=create_client)
-
-    @sqs_queue_consumer(queue_name, broker)
+    @sqs_queue_consumer(queue_name, create_client)
     @flow.batch(10, 1, SqsMessages)
     @flow.handler
     async def handle(messages: SqsMessages):
         nonlocal received
-        received += [
-            [m.body for m in messages]
-        ]
+        received += [[m.body for m in messages]]
 
     host = Host(handle)
     async with host.aserve():
@@ -110,4 +104,4 @@ async def test_batching(local_sqs):
     # Assert
 
     assert host.status["exception"] is None
-    assert received == [[m for m in sent]]
+    assert received == [sent]

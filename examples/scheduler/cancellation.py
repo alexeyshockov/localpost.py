@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import anyio
 
-from localpost.hosting import Host
+from localpost.hosting import hosted_service
 from localpost.hosting.middlewares import shutdown_timeout
 from localpost.scheduler import every, scheduled_task
 
@@ -26,8 +26,9 @@ async def long_async_task():
         print("long_async_task has finished!")
 
 
-host = Host(long_async_task)
-host.root_service //= shutdown_timeout(1)
+# host = Host(long_async_task)
+# host.root_service //= shutdown_timeout(1)
+host = hosted_service(long_async_task) // shutdown_timeout(1)
 
 
 if __name__ == "__main__":

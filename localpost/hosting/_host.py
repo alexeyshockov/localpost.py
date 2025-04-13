@@ -463,8 +463,16 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
     _attrs: dict[str, Any] = dc.field(compare=False, hash=False)
 
     @staticmethod
+    def wraps(wrapped: HostedServiceFunc, attrs: dict[str, Any]) -> Callable[[HostedServiceFunc], HostedService]:
+        def decorator(func: HostedServiceFunc) -> HostedService:
+            wrapped_hs = HostedService.ensure(wrapped)
+            return HostedService(func, **({"name": wrapped_hs.name} | attrs))
+
+        return decorator
+
+    @staticmethod
     def decorator(dec: Callable[..., HostedServiceFunc]) -> HostedServiceDecorator:
-        def _decorator(func: HostedServiceFunc) -> HostedService:
+        def decorate(func: HostedServiceFunc) -> HostedService:
             svc_func = func
             attrs = {}
             if isinstance(func, HostedService):
@@ -472,7 +480,7 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
                 attrs = func._attrs
             return HostedService.ensure(dec(svc_func, **attrs))
 
-        return _decorator
+        return decorate
 
     @staticmethod
     def _unwrap(func: HostedServiceFunc, attrs: dict[str, Any]) -> tuple[HostedServiceFunc, dict[str, Any]]:

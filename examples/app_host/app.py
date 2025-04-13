@@ -5,7 +5,7 @@ import time
 import anyio
 from anyio import CancelScope
 
-from localpost.hosting import ServiceLifetimeManager, AppHost
+from localpost.hosting import AppHost, ServiceLifetimeManager
 from localpost.hosting.middlewares import shutdown_timeout
 
 app = AppHost()
@@ -14,40 +14,40 @@ app.use(shutdown_timeout(5))
 
 @app.service
 def a_sync_service(service_lifetime: ServiceLifetimeManager):
-    print(f"{a_sync_service.name} started")
+    print(f"{a_sync_service.__name__} started")
     service_lifetime.set_started()
     while not service_lifetime.shutting_down:
-        print(f"{a_sync_service.name} running")
+        print(f"{a_sync_service.__name__} running")
         time.sleep(1)
-    print(f"{a_sync_service.name} stopped")
+    print(f"{a_sync_service.__name__} stopped")
 
 
 @app.service
 async def an_async_func(_):
-    print(f"{an_async_func.name} started")
+    print(f"{an_async_func.__name__} started")
     while True:
-        print(f"{an_async_func.name} running")
+        print(f"{an_async_func.__name__} running")
         await anyio.sleep(1)
 
 
 @app.service
 async def an_async_service(service_lifetime: ServiceLifetimeManager):
-    print(f"{an_async_service.name} started")
+    print(f"{an_async_service.__name__} started")
     service_lifetime.set_started()
     while not service_lifetime.shutting_down:
-        print(f"{an_async_service.name} running")
+        print(f"{an_async_service.__name__} running")
         await anyio.sleep(1)
 
 
 @app.service
 async def a_graceful_async_service(service_lifetime: ServiceLifetimeManager):
-    print(f"{a_graceful_async_service.name} started")
+    print(f"{a_graceful_async_service.__name__} started")
     with CancelScope() as scope:
         service_lifetime.set_started(graceful_shutdown_scope=scope)
         while not scope.cancel_called:
-            print(f"{a_graceful_async_service.name} running")
+            print(f"{a_graceful_async_service.__name__} running")
             await anyio.sleep(1)
-    print(f"{a_graceful_async_service.name} gracefully shut down")
+    print(f"{a_graceful_async_service.__name__} gracefully shut down")
 
 
 # @host.service()
@@ -71,8 +71,9 @@ async def a_graceful_async_service(service_lifetime: ServiceLifetimeManager):
 
 
 if __name__ == "__main__":
-    import localpost
     import logging
+
+    import localpost
 
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)

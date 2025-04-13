@@ -4,7 +4,7 @@ import logging
 import random
 
 from localpost.flow import skip_first
-from localpost.scheduler import after, delay, every, scheduled_task, Scheduler
+from localpost.scheduler import Scheduler, after, delay, every, scheduled_task
 
 scheduler = Scheduler()
 

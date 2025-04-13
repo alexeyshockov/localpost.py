@@ -248,7 +248,7 @@ def kafka_config(**overrides) -> dict[str, Any]:
 def kafka_consumer(
     topics: str | Iterable[str], client_config: Mapping[str, Any] | None = None, /, *, consumers: int = 1
 ) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], KafkaConsumer]:
-    def _decorator(handler):
+    def decorator(handler):
         consumer = KafkaConsumer(
             ensure_sync_handler(handler),
             [topics] if isinstance(topics, str) else topics,
@@ -257,4 +257,4 @@ def kafka_consumer(
         )
         return consumer
 
-    return _decorator
+    return decorator

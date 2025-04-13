@@ -298,7 +298,7 @@ def sqs_queue_consumer(
         queue_url = None
         queue_name = queue_name_or_url
 
-    def _decorator(handler):
+    def decorator(handler):
         consumer = SqsQueueConsumer(
             handler,
             queue_name=queue_name,
@@ -308,7 +308,7 @@ def sqs_queue_consumer(
         )
         return consumer
 
-    return _decorator
+    return decorator
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):

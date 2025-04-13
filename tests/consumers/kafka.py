@@ -7,8 +7,9 @@ import pytest
 from confluent_kafka import Producer
 
 from localpost import flow
-from localpost.consumers.kafka import KafkaBroker, KafkaMessage, kafka_consumer, KafkaMessages
+from localpost.consumers.kafka import KafkaMessage, KafkaMessages, kafka_consumer
 from localpost.hosting import Host
+
 from .RedpandaContainer import RedpandaContainer
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -26,7 +27,7 @@ def local_kafka():
 
 
 async def test_normal_case(local_kafka):
-    topic_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -39,13 +40,12 @@ async def test_normal_case(local_kafka):
     # Act
 
     received = []
-    broker = KafkaBroker()
-    broker.client_config = local_kafka | {
+    client_config = local_kafka | {
         "group.id": "integration_tests",
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_consumer(topic_name, broker)
+    @kafka_consumer(topic_name, client_config)
     @flow.sync_handler
     def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
@@ -62,7 +62,7 @@ async def test_normal_case(local_kafka):
 
 
 async def test_batching(local_kafka):
-    topic_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -75,20 +75,17 @@ async def test_batching(local_kafka):
     # Act
 
     received = []
-    broker = KafkaBroker()
-    broker.client_config = local_kafka | {
+    client_config = local_kafka | {
         "group.id": "integration_tests",
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_consumer(topic_name, broker)
+    @kafka_consumer(topic_name, client_config)
     @flow.batch(10, 1, KafkaMessages)
     @flow.handler
     async def handle(messages: KafkaMessages):
         nonlocal received
-        received += [
-            [m.value.decode() for m in messages]
-        ]
+        received += [[m.value.decode() for m in messages]]
 
     host = Host(handle)
     async with host.aserve():
@@ -98,4 +95,4 @@ async def test_batching(local_kafka):
     # Assert
 
     assert host.status["exception"] is None
-    assert received == [[m for m in sent]]
+    assert received == [sent]

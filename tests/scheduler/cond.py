@@ -1,11 +1,11 @@
 from datetime import timedelta
-from unittest.mock import patch, AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import anyio
 import pytest
 
 from localpost._utils import _Event
-from localpost.scheduler import every, ScheduledTask
+from localpost.scheduler import ScheduledTask, every
 
 pytestmark = pytest.mark.anyio
 

@@ -2,7 +2,7 @@
 
 import time
 
-from localpost.hosting import Host, ServiceLifetimeManager, hosted_service
+from localpost.hosting import ServiceLifetimeManager, hosted_service
 
 
 @hosted_service
@@ -15,15 +15,13 @@ def a_sync_service(service_lifetime: ServiceLifetimeManager):
     # The host should also stop after this point, as all the services have stopped
 
 
-host = Host(a_sync_service)
-
-
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(host))
+    exit(localpost.run(a_sync_service))

@@ -2,20 +2,25 @@
 
 import time
 
-from localpost.hosting import Host
-from .app import scheduler
+from localpost.scheduler import Scheduler, delay, every
+
+scheduler = Scheduler()
+
+
+@scheduler.task(every("3s") // delay((0, 1)))
+async def task1():
+    print(f"Hello from {task1.task.name}!")
 
 
 def main():
-    # Scheduler in a _separate_ thread, _separate_ event loop
-    with Host(scheduler).serve() as host:
+    # Start the scheduler in a _separate_ thread, with its own event loop
+    with scheduler.serve():
         try:
             while True:
                 time.sleep(1)
                 print("Main thread is running...")
         except KeyboardInterrupt:
-            # Scheduler service is the only one in the host, so after the scheduler is done, the host will stop too
-            host.shutdown()
+            scheduler.shutdown()
 
     print("Main thread is done, exiting the app")
 

@@ -14,10 +14,9 @@ check: check-style types
 
 [doc("Check types (using both PyRight and MyPy)")]
 types:
-    -pyright --pythonpath $(which python) localpost
-    -mypy --pretty \
-      --python-executable $(which python) \
-      --strict-bytes \
+    -pyright --pythonpath $(which python) \
+      localpost
+    -mypy --pretty --strict-bytes --python-executable $(which python) \
       localpost
 
 [doc("Check types (using both PyRight and MyPy)")]
@@ -31,7 +30,10 @@ types-strict:
 
 [doc("Check types (including examples and tests)")]
 types-all: types
-    pyright --pythonpath $(which python) examples tests
+    -pyright --pythonpath $(which python) \
+      examples tests
+    -mypy --pretty --strict-bytes --python-executable $(which python) \
+      examples tests
 
 [doc("Check that the public API is correctly typed")]
 type-coverage:

@@ -4,12 +4,10 @@ import logging
 import random
 from datetime import timedelta
 
-from localpost.scheduler import Scheduler, every, take_first, delay
-
-scheduler = Scheduler()
+from localpost.scheduler import delay, every, scheduled_task, take_first
 
 
-@scheduler.task(every(timedelta(seconds=3)) // take_first(3) // delay((0, 3)))
+@scheduled_task(every(timedelta(seconds=3)) // take_first(3) // delay((0, 3)))
 async def task1():
     """
     A simple repeating task that returns a random number.
@@ -25,4 +23,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(scheduler))
+    exit(localpost.run(task1))

@@ -1,7 +1,5 @@
 import math
-from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
-from functools import wraps
 from typing import Any
 
 from anyio import fail_after
@@ -17,9 +15,10 @@ __all__ = [
 
 
 def lifespan(cm: AbstractAsyncContextManager[Any], /) -> HostedServiceDecorator:
-    def decorator(svc_func, **_) -> Callable[..., Awaitable[None]]:
-        @wraps(svc_func)
-        async def _run(sl: _ServiceLifetime, *args):
+    def decorator(svc_func: HostedServiceFunc, **attrs) -> HostedService:
+        @HostedService.wraps(svc_func, attrs)
+        async def run(sl, *args):
+            assert isinstance(sl, _ServiceLifetime)
             async with cm:
                 await svc_func(sl, *args)
                 if child_services := sl.child_services:
@@ -28,7 +27,7 @@ def lifespan(cm: AbstractAsyncContextManager[Any], /) -> HostedServiceDecorator:
                         child.shutdown()
                     await wait_all(child.stopped for child in child_services)
 
-        return _run
+        return run
 
     return decorator
 
@@ -39,13 +38,13 @@ def start_timeout(timeout: float, /) -> HostedServiceDecorator:
             raise ValueError("Timeout must be less than the existing one")
         attrs["start_timeout"] = timeout
 
-        @wraps(svc_func)
-        def _run(sl, *args):
+        @HostedService.wraps(svc_func, attrs)
+        def run(sl, *args):
             assert isinstance(sl, _ServiceLifetime)
             sl.parent_tg.start_soon(_observe_service_start, sl, timeout)
             return svc_func(sl, *args)
 
-        return HostedService(_run, **attrs)
+        return run
 
     return HostedService.decorator(decorator)
 
@@ -56,13 +55,13 @@ def shutdown_timeout(timeout: float, /) -> HostedServiceDecorator:
             raise ValueError("Timeout must be less than the existing one")
         attrs["shutdown_timeout"] = timeout
 
-        @wraps(svc_func)
-        def _run(sl, *args):
+        @HostedService.wraps(svc_func, attrs)
+        def run(sl, *args):
             assert isinstance(sl, _ServiceLifetime)
             sl.parent_tg.start_soon(_observe_service_shutdown, sl, timeout)
             return svc_func(sl, *args)
 
-        return HostedService(_run, **attrs)
+        return run
 
     return HostedService.decorator(decorator)
 

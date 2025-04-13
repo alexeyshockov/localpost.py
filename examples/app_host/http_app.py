@@ -8,19 +8,15 @@ from starlette.responses import JSONResponse
 
 from localpost.hosting import AppHost
 from localpost.hosting.http import UvicornService
-from localpost.scheduler import Scheduler, every, delay
+from localpost.scheduler import delay, every, scheduled_task
 
-host = AppHost()
+app = AppHost()
 
 http_api = FastAPI()
-# host.add_service(UvicornService.for_app(http_api), name="http_api")
-host.root_service += UvicornService.for_app(http_api)
-
-scheduler = Scheduler()
-host.root_service += scheduler
+app.service(UvicornService.for_app(http_api))
 
 
-@host.service
+@app.service
 async def background_job():
     print("Background job started")
     try:
@@ -31,7 +27,8 @@ async def background_job():
         print("Background job done")
 
 
-@scheduler.task(every(timedelta(seconds=3)) // delay((1, 5)))
+@app.service
+@scheduled_task(every(timedelta(seconds=3)) // delay((1, 5)))
 async def heavy_periodic_task():
     print("Some periodic work")
 
@@ -43,15 +40,16 @@ async def predict():
 
 @http_api.get("/health")
 async def health_check() -> JSONResponse:
-    return JSONResponse(host.status)
+    return JSONResponse(app.status)
 
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(host))
+    exit(localpost.run(app))
