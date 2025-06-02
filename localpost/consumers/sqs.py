@@ -4,7 +4,7 @@ import dataclasses as dc
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
-from typing import TypeAlias, cast, final, TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias, cast, final
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group, to_thread

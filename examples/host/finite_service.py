@@ -20,6 +20,7 @@ host = Host(a_sync_service)
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()

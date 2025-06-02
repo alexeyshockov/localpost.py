@@ -3,7 +3,7 @@
 import logging
 from datetime import timedelta
 
-from localpost.scheduler import Scheduler, every, delay
+from localpost.scheduler import Scheduler, delay, every
 
 logging.basicConfig()
 logging.getLogger("localpost").setLevel(logging.DEBUG)

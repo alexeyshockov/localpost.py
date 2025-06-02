@@ -37,6 +37,7 @@ async def an_async_func():
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()

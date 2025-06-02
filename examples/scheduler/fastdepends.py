@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from fast_depends import Depends, inject
 
-from localpost.scheduler import Scheduler, every, delay
+from localpost.scheduler import Scheduler, delay, every
 
 logging.basicConfig()
 logging.getLogger("localpost").setLevel(logging.DEBUG)

@@ -18,14 +18,18 @@ class RedpandaContainer(BaseRedpandaContainer):
     def tc_start(self) -> None:
         internal = f"internal://{self.get_docker_client().bridge_ip(self.get_wrapped_container().id)}:29092"
         external = f"external://{self.get_container_host_ip()}:{self.get_exposed_port(self.redpanda_port)}"
-        data = dedent(
-            f"""
+        data = (
+            dedent(
+                f"""
             #!/bin/bash
             rpk redpanda start --mode dev-container --smp 1 \
             --kafka-addr internal://0.0.0.0:29092,external://0.0.0.0:{self.redpanda_port} \
             --advertise-kafka-addr {internal},{external} \
             --schema-registry-addr internal://0.0.0.0:28081,external://0.0.0.0:{self.schema_registry_port}
             """
-        ).strip().encode("utf-8")
+            )
+            .strip()
+            .encode("utf-8")
+        )
 
         self.create_file(data, RedpandaContainer.TC_START_SCRIPT)

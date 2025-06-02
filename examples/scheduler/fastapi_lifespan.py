@@ -5,7 +5,7 @@ from datetime import timedelta
 
 from fastapi import FastAPI  # noqa
 
-from localpost.scheduler import Scheduler, every, delay
+from localpost.scheduler import Scheduler, delay, every
 
 scheduler = Scheduler()
 
