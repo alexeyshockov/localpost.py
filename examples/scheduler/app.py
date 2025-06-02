@@ -2,7 +2,6 @@
 
 import logging
 import random
-from datetime import timedelta
 
 from localpost.scheduler import Scheduler, after, delay, every
 

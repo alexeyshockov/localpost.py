@@ -21,7 +21,7 @@ def anyio_backend():
     """
     SQS consumer uses aioboto3 which is asyncio only.
     """
-    return 'asyncio'
+    return "asyncio"
 
 
 @pytest.fixture(scope="module")
@@ -40,7 +40,7 @@ def local_sqs():
 
 
 async def test_normal_case(local_sqs):
-    queue_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -76,7 +76,7 @@ async def test_normal_case(local_sqs):
 
 
 async def test_batching(local_sqs):
-    queue_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -99,9 +99,7 @@ async def test_batching(local_sqs):
     @flow.handler
     async def handle(messages: Collection[SqsMessage]):
         nonlocal received
-        received += [
-            [m.body for m in messages]
-        ]
+        received += [[m.body for m in messages]]
 
     host = Host(handle)
     async with host.aserve():

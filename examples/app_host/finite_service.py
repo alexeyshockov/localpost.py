@@ -20,6 +20,7 @@ def a_sync_service(service_lifetime: ServiceLifetimeManager):
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()

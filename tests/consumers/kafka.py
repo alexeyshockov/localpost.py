@@ -10,6 +10,7 @@ from confluent_kafka import Producer
 from localpost import flow, flow_ops
 from localpost.consumers.kafka import KafkaBroker, KafkaMessage
 from localpost.hosting import Host
+
 from .RedpandaContainer import RedpandaContainer
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -27,7 +28,7 @@ def local_kafka():
 
 
 async def test_normal_case(local_kafka):
-    topic_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -63,7 +64,7 @@ async def test_normal_case(local_kafka):
 
 
 async def test_batching(local_kafka):
-    topic_name = "test_" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
+    topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
 
@@ -87,9 +88,7 @@ async def test_batching(local_kafka):
     @flow.handler
     def handle(messages: Collection[KafkaMessage]):
         nonlocal received
-        received += [
-            [m.value.decode() for m in messages]
-        ]
+        received += [[m.value.decode() for m in messages]]
 
     host = Host(handle)
     async with host.aserve():

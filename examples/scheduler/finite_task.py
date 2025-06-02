@@ -4,7 +4,7 @@ import logging
 import random
 from datetime import timedelta
 
-from localpost.scheduler import Scheduler, every, take_first, delay
+from localpost.scheduler import Scheduler, delay, every, take_first
 
 logging.basicConfig()
 logging.getLogger("localpost").setLevel(logging.DEBUG)

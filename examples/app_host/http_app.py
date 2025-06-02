@@ -8,7 +8,7 @@ from starlette.responses import JSONResponse
 
 from localpost.hosting.app_host import AppHost
 from localpost.hosting.http import UvicornService
-from localpost.scheduler import Scheduler, every, delay
+from localpost.scheduler import Scheduler, delay, every
 
 host = AppHost()
 
@@ -47,10 +47,10 @@ async def health_check() -> JSONResponse:
 
 if __name__ == "__main__":
     import logging
+
     import localpost
 
     logging.basicConfig()
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
     exit(localpost.run(host))
-

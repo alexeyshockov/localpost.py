@@ -35,7 +35,9 @@ def trace(tracer_provider: TracerProvider | None = None, meter_provider: MeterPr
             }
 
             messages_consumed.add(1, attrs)
-            with tracer.start_as_current_span(f"process {message.payload.topic()}", kind=SpanKind.CONSUMER, attributes=attrs):
+            with tracer.start_as_current_span(
+                f"process {message.payload.topic()}", kind=SpanKind.CONSUMER, attributes=attrs
+            ):
                 start_time = time.perf_counter()
                 await next_h(message)
                 end_time = time.perf_counter()
