@@ -7,11 +7,11 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, cast, final
 
 from aiobotocore.session import get_session
-from anyio import CancelScope, create_task_group, to_thread
+from anyio import CancelScope, create_task_group
 
 from localpost import flow
-from localpost._utils import EventView
-from localpost.flow import Handler, HandlerManager
+from localpost._utils import EventView, ensure_async_callable
+from localpost.flow import AsyncHandler, AsyncHandlerManager, FlowHandlerManager
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 if TYPE_CHECKING:
@@ -185,7 +185,7 @@ class SqsQueueConsumer(ExposedServiceBase):
 
     def __init__(
         self,
-        handler: HandlerManager[SqsMessage],
+        handler: AsyncHandlerManager[SqsMessage],
         queue_name: str,
         *,
         queue_url: str | None = None,
@@ -212,7 +212,7 @@ class SqsQueueConsumer(ExposedServiceBase):
         self,
         queue_url: str,
         client: "SQSClient",
-        message_handler: Handler[SqsMessage],
+        message_handler: AsyncHandler[SqsMessage],
         shutdown_scope: CancelScope,
         app_started: EventView,
     ):
@@ -290,7 +290,7 @@ class SqsQueueConsumer(ExposedServiceBase):
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def sqs_queue_consumer(
     queue_name_or_url: str, client_factory: ClientFactory | None = None, /, *, consumers: int = 1
-) -> Callable[[HandlerManager[SqsMessage]], SqsQueueConsumer]:
+) -> Callable[[AsyncHandlerManager[SqsMessage]], SqsQueueConsumer]:
     if "/" in queue_name_or_url:
         queue_url = queue_name_or_url
         queue_name = _queue_name_from_url(queue_url)
@@ -400,8 +400,9 @@ class LambdaInvocationContext:
 
 def lambda_handler(
     lambda_h: Callable[[LambdaEvent, LambdaInvocationContext], object], /
-) -> HandlerManager[SqsMessage | Sequence[SqsMessage]]:
+) -> FlowHandlerManager[SqsMessage | Sequence[SqsMessage]]:
     lambda_inv_context = LambdaInvocationContext()
+    async_lambda_h = ensure_async_callable(lambda_h)
 
     @flow.handler
     async def _handler(workload: SqsMessage | Sequence[SqsMessage]) -> None:
@@ -410,11 +411,11 @@ def lambda_handler(
             message = workload
             lambda_event["Records"] = [_message2lambda(message)]
             async with message:
-                await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
+                await async_lambda_h(lambda_event, lambda_inv_context)
         else:
             messages = SqsMessages(cast(Sequence[SqsMessage], workload))
             lambda_event["Records"] = [_message2lambda(m) for m in messages]
             async with messages:
-                await to_thread.run_sync(lambda_h, lambda_event, lambda_inv_context)
+                await async_lambda_h(lambda_event, lambda_inv_context)
 
     return _handler

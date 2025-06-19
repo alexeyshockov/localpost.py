@@ -16,7 +16,7 @@ from localpost._utils import (
     def_full_name,
     is_async_callable,
 )
-from localpost.flow import HandlerDecorator, HandlerManager
+from localpost.flow import AsyncHandlerManager, FlowHandlerManager, HandlerDecorator, ensure_async_handler_manager
 from localpost.hosting import (
     AbstractHost,
     ExposedService,
@@ -45,7 +45,7 @@ logger = logging.getLogger("localpost.scheduler")
 @dc.dataclass()
 class Task(
     Generic[T, R],
-    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],  # HandlerManager[T]
+    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],  # AsyncHandlerManager[T]
 ):
     name: str
     event_aware: bool
@@ -123,7 +123,7 @@ class ScheduledTaskTemplate(Generic[T]):
     def __init__(self, tf: TriggerFactory[T]):
         self._tf = tf
         self._tf_queue: tuple[TriggerFactoryDecorator, ...] = ()
-        self._handler_queue: tuple[HandlerDecorator, ...] = ()
+        self._handler_decorators: tuple[HandlerDecorator, ...] = ()
 
     # TriggerFactory[T]
     def __call__(self, *args, **kwargs) -> Trigger[T]:
@@ -141,14 +141,16 @@ class ScheduledTaskTemplate(Generic[T]):
 
     def __rshift__(self, decorator: HandlerDecorator) -> ScheduledTaskTemplate[T]:
         n = ScheduledTaskTemplate[T](self._tf)
-        n._handler_queue = self._handler_queue + (decorator,)
+        n._handler_decorators = self._handler_decorators + (decorator,)
         return n
 
-    def resolve_handler(self, task: Task[T, Any]) -> HandlerManager[T]:
-        handler: HandlerManager[T] = task
-        for decorator in self._handler_queue:
-            handler = decorator(handler)
-        return handler
+    def resolve_handler(self, task: Task[T, Any]) -> AsyncHandlerManager[T]:
+        if not self._handler_decorators:
+            return task
+        hm = FlowHandlerManager(lambda: task)
+        for decorator in self._handler_decorators:
+            hm = decorator(hm)
+        return ensure_async_handler_manager(hm)
 
     @property
     def tf(self) -> TriggerFactory[T]:
@@ -164,7 +166,7 @@ class ScheduledTask(ExposedService, Protocol[T, R]):
 
 
 @final
-class _ScheduledTask(ExposedServiceBase, Generic[T, R]):
+class _ScheduledTask(Generic[T, R], ExposedServiceBase):
     def __init__(self, task: Task[T, R], tf: TriggerFactory[T]):
         super().__init__()
         self.task = task

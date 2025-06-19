@@ -46,7 +46,7 @@ async def test_normal_case(local_kafka):
     }
 
     @kafka_consumer(topic_name, client_config)
-    @flow.sync_handler
+    @flow.handler
     def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
 

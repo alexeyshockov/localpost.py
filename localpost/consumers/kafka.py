@@ -12,7 +12,8 @@ from anyio import CapacityLimiter, create_task_group, from_thread, to_thread
 from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer
 
 from localpost._utils import EventView
-from localpost.flow import HandlerManager, SyncHandlerManager, ensure_sync_handler
+from localpost.flow import SyncHandlerManager, ensure_sync_handler_manager
+from localpost.flow._flow import AnyHandlerManager
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 __all__ = [
@@ -247,10 +248,10 @@ def kafka_config(**overrides) -> dict[str, Any]:
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def kafka_consumer(
     topics: str | Iterable[str], client_config: Mapping[str, Any] | None = None, /, *, consumers: int = 1
-) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], KafkaConsumer]:
-    def decorator(handler):
+) -> Callable[[AnyHandlerManager[KafkaMessage]], KafkaConsumer]:
+    def decorator(handler: AnyHandlerManager[KafkaMessage]):
         consumer = KafkaConsumer(
-            ensure_sync_handler(handler),
+            ensure_sync_handler_manager(handler),
             [topics] if isinstance(topics, str) else topics,
             client_config=client_config,
             consumers=consumers,

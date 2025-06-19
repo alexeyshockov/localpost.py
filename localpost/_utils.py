@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses as dc
 import functools
 import inspect
+import math
 import random
 import signal
 import sys
@@ -19,7 +20,6 @@ from typing import (
     Protocol,
     TypeAlias,
     TypedDict,
-    TypeVar,
     Union,
     cast,
     final,
@@ -27,16 +27,18 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, create_task_group, to_thread
+from anyio import CancelScope, WouldBlock, create_task_group, from_thread, to_thread
 from anyio.abc import TaskGroup, TaskStatus
-from typing_extensions import NotRequired, Self, TypeGuard
+from anyio.lowlevel import checkpoint
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, MemoryObjectStreamState
+from typing_extensions import NotRequired, Self, TypeGuard, TypeVar
 
 if sys.version_info >= (3, 11):
     from builtins import ExceptionGroup  # noqa
 else:
     from exceptiongroup import ExceptionGroup
 
-T = TypeVar("T")
+T = TypeVar("T", default=Any)
 P = ParamSpec("P")
 R = TypeVar("R")
 
@@ -150,10 +152,20 @@ def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[
     )
 
 
-def ensure_async_callable(func: Callable[P, Any], /) -> Callable[P, Awaitable[Any]]:
+def ensure_async_callable(
+    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
+) -> Callable[P, Awaitable[T]]:
     if is_async_callable(func):
         return func
-    return functools.partial(to_thread.run_sync, func)
+    return functools.partial(to_thread.run_sync, func)  # type: ignore[return-value]
+
+
+def ensure_sync_callable(
+    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
+) -> Callable[P, T]:
+    if is_async_callable(func):
+        return functools.partial(from_thread.run, func)
+    return func  # type: ignore[return-value]
 
 
 def def_full_name(func: Any, /) -> str:
@@ -256,6 +268,35 @@ def ensure_delay_factory(delay: DelayFactory, /) -> Callable[[], timedelta]:
 def sleep(i: timedelta | int | float | None, /) -> Coroutine[Any, Any, None]:
     interval_sec: float = i.total_seconds() if isinstance(i, timedelta) else 0 if i is None else i
     return anyio.sleep(interval_sec)
+
+
+@final
+@dc.dataclass(eq=False)
+class MemorySendStream(Generic[T], MemoryObjectSendStream[T]):
+    def send_or_drop(self, item: T) -> None:
+        try:
+            self.send_nowait(item)
+        except WouldBlock:
+            pass
+
+    async def send_or_drop_async(self, item: T) -> None:
+        await checkpoint()
+        try:
+            self.send_nowait(item)
+        except WouldBlock:
+            pass
+
+
+class MemoryStream(Generic[T]):
+    @staticmethod
+    def create(max_buffer_size: float = 0) -> tuple[MemorySendStream[T], MemoryObjectReceiveStream[T]]:
+        if max_buffer_size != math.inf and not isinstance(max_buffer_size, int):
+            raise ValueError("max_buffer_size must be either an integer or math.inf")
+        if max_buffer_size < 0:
+            raise ValueError("max_buffer_size cannot be negative")
+
+        state = MemoryObjectStreamState[T](max_buffer_size)
+        return MemorySendStream(state), MemoryObjectReceiveStream(state)
 
 
 class AsyncBackendConfig(TypedDict):

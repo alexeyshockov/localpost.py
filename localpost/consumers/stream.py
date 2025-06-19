@@ -4,7 +4,7 @@ from typing import TypeVar, final
 
 from anyio.streams.memory import MemoryObjectReceiveStream
 
-from localpost.flow import HandlerManager
+from localpost.flow import AsyncHandlerManager
 from localpost.flow._flow import stream_consumer
 from localpost.hosting import ServiceLifetimeManager
 
@@ -19,7 +19,7 @@ __all__ = [
 class StreamConsumer:
     def __init__(
         self,
-        handler: HandlerManager[T],
+        handler: AsyncHandlerManager[T],
         reader: MemoryObjectReceiveStream[T],
         *,
         concurrency: int = 1,
