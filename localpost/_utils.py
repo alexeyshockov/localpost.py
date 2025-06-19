@@ -123,9 +123,13 @@ class Result(Generic[T]):
 
 def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
     try:
-        desc = typing.get_type_hints(func)
-    except TypeError:  # <object> is not a module, class, method, or function
-        desc = typing.get_type_hints(func.__call__)  # type: ignore
+        desc = typing.get_type_hints(func, globalns=getattr(func, '__globals__', None))
+    except (TypeError, NameError):
+        try:
+            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, '__globals__', None))
+        except (TypeError, NameError, AttributeError):
+            return type(None)
+
     if ret_type := desc.get("return", None):
         return typing.get_origin(ret_type) or ret_type
     return type(None)

@@ -16,10 +16,10 @@ from typing_extensions import TypeVar
 
 from localpost._utils import MemoryStream, start_task_soon
 
-from . import FlowHandler
 from ._flow import (
     AsyncHandler,
     HandlerDecorator,
+    FlowHandler,
     ensure_async_handler,
     handler_middleware,
     logger,

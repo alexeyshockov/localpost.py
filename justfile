@@ -4,11 +4,10 @@ default:
     just --list
 
 deps:
-    pdm install --group :all
+    uv sync --all-groups --all-extras
 
 deps-upgrade:
-    pdm lock --group :all -v
-    pdm sync --group :all --clean
+    uv sync --all-groups --all-extras --upgrade
 
 check: check-style types
 
@@ -57,3 +56,9 @@ why package:
 
 test:
     pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
+
+unit-tests:
+    pytest -m "not integration" --cov-report=term --cov-report=xml --cov-branch --cov -v
+
+integration-tests:
+    pytest -m "integration" --cov-report=term --cov-report=xml --cov-branch --cov -v

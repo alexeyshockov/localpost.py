@@ -12,8 +12,7 @@ from anyio import CapacityLimiter, create_task_group, from_thread, to_thread
 from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer
 
 from localpost._utils import EventView
-from localpost.flow import SyncHandlerManager, ensure_sync_handler_manager
-from localpost.flow._flow import AnyHandlerManager
+from localpost.flow import AnyHandlerManager, SyncHandlerManager, ensure_sync_handler_manager
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 __all__ = [

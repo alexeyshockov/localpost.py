@@ -124,9 +124,7 @@ def ensure_async_handler_manager(source: AnyHandlerManager[T]) -> AsyncHandlerMa
     @asynccontextmanager
     async def _async_handler_manager():
         async with source as h:
-            if isinstance(h, FlowHandler):
-                yield h.async_h
-            yield ensure_async_callable(h)
+            yield h.async_h if isinstance(h, FlowHandler) else ensure_async_callable(h)
 
     return _async_handler_manager()  # type: ignore[return-value]
 
@@ -141,9 +139,7 @@ def ensure_sync_handler_manager(source: AnyHandlerManager[T]) -> SyncHandlerMana
     @asynccontextmanager
     async def _sync_handler_manager():
         async with source as h:
-            if isinstance(h, FlowHandler):
-                yield h.sync_h
-            yield ensure_sync_callable(h)
+            yield h.sync_h if isinstance(h, FlowHandler) else ensure_sync_callable(h)
 
     return _sync_handler_manager()  # type: ignore[return-value]
 
@@ -166,7 +162,7 @@ def _handler_middleware(m: HandlerMiddleware[T, T2]) -> _HandlerMiddleware[T, T2
 
 
 @final
-@dc.dataclass(slots=True, eq=False, kw_only=True)
+@dc.dataclass(eq=False, kw_only=True)
 class FlowHandler(Generic[T]):
     is_async: bool
     async_h: Callable[[T], Awaitable[None]]

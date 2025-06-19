@@ -1,5 +1,6 @@
 from ._batching import batch
 from ._flow import (
+    AnyHandlerManager,
     AsyncHandler,
     AsyncHandlerManager,
     FlowHandler,
@@ -19,6 +20,7 @@ from ._ops import buffer, delay, log_errors, skip_first
 __all__ = [
     "handler",
     "handler_manager",
+    "AnyHandlerManager",
     # async
     "AsyncHandler",
     "AsyncHandlerManager",
