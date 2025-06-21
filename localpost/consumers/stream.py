@@ -10,9 +10,7 @@ from localpost.hosting import ServiceLifetimeManager
 
 T = TypeVar("T")
 
-__all__ = [
-    "StreamConsumer",
-]
+__all__ = ["StreamConsumer"]
 
 
 @final

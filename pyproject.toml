@@ -103,20 +103,25 @@ dev-types = [
 examples = [
     "fast-depends ~=2.4",
     "fastapi-slim ~=0.111",
-    "pydantic ~=2.10",
     'psycopg[binary,pool] ~=3.2',
 ]
-unit-tests = [
+tests = [
     "pytest ~=8.1",
     "anyio[test]",
+    "pytest-xdist",
+]
+unit-tests = [
     "pytest-mock ~=3.14",
     "pytest-cov ~=6.0",
     "coverage[toml] ~=7.6",
 ]
 integration-tests = [
-    "pytest ~=8.1",
     "testcontainers[kafka,localstack,nats] ~=4.8",
 ]
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
 
 [tool.pyright]
 include = ["localpost"]

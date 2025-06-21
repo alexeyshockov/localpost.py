@@ -38,16 +38,17 @@ def create_message_tracer(
 
     @contextmanager
     def call_tracer(message: SqsMessage | Sequence[SqsMessage]):
+        is_batch = not isinstance(message, SqsMessage)
         queue_name = message.queue_name if isinstance(message, SqsMessage) else message[0].queue_name
         attrs: dict[str, AttributeValue] = {
             "messaging.operation.type": "process",
             "messaging.system": "aws_sqs",
             "messaging.destination.name": queue_name,
         }
-        if not isinstance(message, SqsMessage):
+        if is_batch:
             attrs["messaging.batch.message_count"] = len(message)
 
-        messages_consumed.add(1 if isinstance(message, SqsMessage) else len(message), attrs)
+        messages_consumed.add(len(message) if is_batch else 1, attrs)
         with tracer.start_as_current_span(f"process {queue_name}", kind=SpanKind.CONSUMER, attributes=attrs):
             with rec_duration(m_process_duration, attrs):
                 yield

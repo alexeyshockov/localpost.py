@@ -123,10 +123,10 @@ class Result(Generic[T]):
 
 def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
     try:
-        desc = typing.get_type_hints(func, globalns=getattr(func, '__globals__', None))
+        desc = typing.get_type_hints(func, globalns=getattr(func, "__globals__", None))
     except (TypeError, NameError):
         try:
-            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, '__globals__', None))
+            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, "__globals__", None))
         except (TypeError, NameError, AttributeError):
             return type(None)
 
@@ -317,14 +317,16 @@ def choose_anyio_backend() -> AsyncBackendConfig:  # pragma: no cover
         return {"backend": "asyncio", "backend_options": {"use_uvloop": True}}
 
 
-class EventView(Protocol):
-    """
-    Read-only view on an async event.
-    """
+class AnyEventView(Protocol):
+    """Read-only view on an async event."""
 
     def is_set(self) -> bool: ...
 
     def wait(self) -> Awaitable[None]: ...
+
+
+class EventView(AnyEventView, Protocol):
+    """More convenient read-only view on an async event."""
 
     def __bool__(self) -> bool:
         return self.is_set()
@@ -334,7 +336,7 @@ class EventView(Protocol):
 
 
 @dc.dataclass(frozen=True, slots=True)
-class _Event(EventView):
+class Event(EventView):
     _source: anyio.Event
 
     def __init__(self) -> None:
@@ -355,18 +357,18 @@ class _Event(EventView):
 
 @dc.dataclass(slots=True)
 class EventViewProxy(EventView):
-    source: EventView | None
+    source: AnyEventView | None
 
     def __init__(self) -> None:
         self.source = None
         self._resolved = anyio.Event()
 
-    def resolve(self, source: EventView) -> None:
+    def resolve(self, source: AnyEventView) -> None:
         self.source = source.source if isinstance(source, EventViewProxy) else source
         self._resolved.set()
 
     def is_set(self) -> bool:
-        return bool(self.source)
+        return False if self.source is None else self.source.is_set()
 
     async def wait(self) -> None:
         if self.source is None:
@@ -375,12 +377,12 @@ class EventViewProxy(EventView):
         await self.source.wait()
 
 
-async def _cancel_when(trigger: EventView | Callable[[], Awaitable[Any]], scope: CancelScope) -> None:
-    await (trigger() if callable(trigger) else trigger)
+async def _cancel_when(trigger: AnyEventView | Callable[[], Awaitable[Any]], scope: CancelScope) -> None:
+    await (trigger() if callable(trigger) else trigger.wait())
     scope.cancel()
 
 
-def cancellable_from(*events: EventView):
+def cancellable_from(*events: AnyEventView):
     def _decorator(func: Callable[P, Awaitable[Any]]) -> Callable[P, Awaitable[None]]:
         @wraps(func)
         async def _wrapper(*args, **kwargs):
@@ -403,11 +405,7 @@ async def wait_all(events: Iterable[EventView]) -> None:
             start_task_soon(tg, event.wait)
 
 
-async def wait_any_from(targets: Iterable[EventView | Callable[[], Awaitable[Any]]]) -> None:
+async def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> None:
     async with create_task_group() as tg:
         for t in targets:
             tg.start_soon(_cancel_when, t, tg.cancel_scope)
-
-
-def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> Awaitable[None]:
-    return wait_any_from(targets)

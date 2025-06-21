@@ -40,9 +40,9 @@ from typing_extensions import Concatenate, Self
 
 from localpost._utils import (
     NO_OP_TS,
+    Event,
     EventView,
     EventViewProxy,
-    _Event,
     choose_anyio_backend,
     def_full_name,
     is_async_callable,
@@ -314,14 +314,14 @@ class _ServiceLifetime:
         self.tg = create_task_group()
         self.child_services: list[ServiceLifetime] = []
 
-        self.started = _Event()
+        self.started = Event()
         self.value: Any = None
 
         self.graceful_shutdown_scope: CancelScope | None = None
-        self.shutting_down = _Event()
+        self.shutting_down = Event()
         self.shutdown_reason: BaseException | str | None = None
 
-        self.stopped = _Event()
+        self.stopped = Event()
         self.exception: BaseException | None = None
 
     @property

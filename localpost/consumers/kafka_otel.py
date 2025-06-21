@@ -38,18 +38,19 @@ def create_message_tracer(
 
     @contextmanager
     def call_tracer(message: KafkaMessage | Sequence[KafkaMessage]):
+        is_batch = isinstance(message, KafkaMessage)
         topic = message.payload.topic() if isinstance(message, KafkaMessage) else message[0].payload.topic()
         attrs: dict[str, AttributeValue] = {
             "messaging.operation.type": "process",
             "messaging.system": "kafka",
             "messaging.destination.name": topic,
         }
-        if isinstance(message, KafkaMessage):
-            attrs["messaging.kafka.partition"] = (message.payload.partition(),)
-        else:
+        if is_batch:
             attrs["messaging.batch.message_count"] = len(message)
+        else:
+            attrs["messaging.kafka.partition"] = (message.payload.partition(),)
 
-        messages_consumed.add(1 if isinstance(message, KafkaMessage) else len(message), attrs)
+        messages_consumed.add(len(message) if is_batch else 1, attrs)
         with tracer.start_as_current_span(f"process {topic}", kind=SpanKind.CONSUMER, attributes=attrs):
             with rec_duration(m_process_duration, attrs):
                 yield

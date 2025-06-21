@@ -18,8 +18,8 @@ from localpost._utils import MemoryStream, start_task_soon
 
 from ._flow import (
     AsyncHandler,
-    HandlerDecorator,
     FlowHandler,
+    HandlerDecorator,
     ensure_async_handler,
     handler_middleware,
     logger,

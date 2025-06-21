@@ -6,22 +6,21 @@ import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Generic, TypeVar, cast, final
+from typing import Any, Generic, TypeVar, final
 
 from anyio import (
     BrokenResourceError,
     EndOfStream,
     WouldBlock,
-    create_memory_object_stream,
     create_task_group,
     get_cancelled_exc_class,
 )
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
     TD_ZERO,
     ClosingContext,
     EventView,
+    MemoryStream,
     cancellable_from,
     ensure_td,
     sleep,
@@ -39,9 +38,7 @@ logger = logging.getLogger("localpost.scheduler.cond")
 
 @asynccontextmanager
 async def wait_trigger(time_spans: Iterable[timedelta], shutting_down: EventView):
-    events, events_reader = cast(  # For PyCharm to recognize the types
-        tuple[MemoryObjectSendStream[None], MemoryObjectReceiveStream[None]], create_memory_object_stream(0)
-    )
+    events, events_reader = MemoryStream[None].create(0)
 
     @cancellable_from(shutting_down)  # DO NOT cancel the main task group
     async def generate():
@@ -68,12 +65,11 @@ async def wait_trigger(time_spans: Iterable[timedelta], shutting_down: EventView
     # Order matters, the reader should be closed first (so the run loop can stop by itself)
     async with create_task_group() as main_tg, events_reader:
         start_task_soon(main_tg, generate)
-        # yield events_reader
         try:
             yield events_reader
         except GeneratorExit:
             # Can happen, if a trigger is wrapped in a middleware, backed by a generator
-            # (otherwise, if we don't do that, it will be an unhandled exception in the task group)
+            # (if we don't do that, it will be an unhandled exception in the task group)
             pass
 
 

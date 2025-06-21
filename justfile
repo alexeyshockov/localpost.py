@@ -61,4 +61,4 @@ unit-tests:
     pytest -m "not integration" --cov-report=term --cov-report=xml --cov-branch --cov -v
 
 integration-tests:
-    pytest -m "integration" --cov-report=term --cov-report=xml --cov-branch --cov -v
+    pytest -m "integration" -n auto -v

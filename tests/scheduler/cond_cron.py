@@ -5,7 +5,8 @@ import anyio
 import pytest
 from croniter import croniter
 
-from localpost._utils import _Event
+# noinspection PyProtectedMember
+from localpost._utils import Event
 from localpost.scheduler import ScheduledTask
 from localpost.scheduler.cond.cron import cron
 
@@ -22,7 +23,7 @@ async def test_cron_trigger():
     # https://docs.python.org/3/library/unittest.mock.html#where-to-patch
     # https://pytest-mock.readthedocs.io/en/latest/usage.html#where-to-patch
     with patch("anyio.sleep", new=AsyncMock(side_effect=_real_anyio_sleep)) as mock_sleep:
-        shutting_down = _Event()
+        shutting_down = Event()
         scheduled_task = Mock(ScheduledTask, shutting_down=shutting_down)
         trigger_factory = scheduled_task_tpl(scheduled_task)
         async with trigger_factory as trigger_events:

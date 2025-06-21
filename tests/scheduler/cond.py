@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import anyio
 import pytest
 
-from localpost._utils import _Event
+# noinspection PyProtectedMember
+from localpost._utils import Event
 from localpost.scheduler import ScheduledTask, every
 
 pytestmark = pytest.mark.anyio
@@ -18,7 +19,7 @@ async def test_every_trigger():
     # https://docs.python.org/3/library/unittest.mock.html#where-to-patch
     # https://pytest-mock.readthedocs.io/en/latest/usage.html#where-to-patch
     with patch("anyio.sleep", new=AsyncMock(side_effect=_real_anyio_sleep)) as mock_sleep:
-        shutting_down = _Event()
+        shutting_down = Event()
         scheduled_task = Mock(ScheduledTask, shutting_down=shutting_down)
         trigger_factory = scheduled_task_tpl(scheduled_task)
         async with trigger_factory as trigger_events:
