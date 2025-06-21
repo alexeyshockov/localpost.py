@@ -110,8 +110,8 @@ class After(Generic[ResT]):
                     res = await task_exec_results.receive()
                     if res.error:
                         logger.warning("Target task failed, skipping")  # TODO extra
-                        continue
-                    yield res.value
+                    else:
+                        yield res.value
             except EndOfStream:
                 logger.info("Target task completed, stopping")
             finally:

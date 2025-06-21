@@ -109,12 +109,16 @@ class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncC
 # Actually immutable, but frozen=True has noticeable performance impact
 @dc.dataclass(slots=True, eq=True, unsafe_hash=True)
 class Result(Generic[T]):
-    value: T
-    error: BaseException | None = None
+    value: T  # | NOT_SET
+    error: BaseException  # | None
+
+    @property
+    def is_failure(self) -> bool:
+        return self.error is not None
 
     @classmethod
     def ok(cls, value: T) -> Result[T]:
-        return cls(value)
+        return cls(value, None)  # type: ignore
 
     @classmethod
     def failure(cls, error: BaseException) -> Result[T]:
@@ -194,7 +198,10 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
             try:
                 # Make sure to get timedelta, not relativedelta from dateutil
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = False
-                return cast(timedelta, pytimeparse2.parse(value, as_timedelta=True))
+                result = pytimeparse2.parse(value, as_timedelta=True)
+                if result is None:
+                    raise ValueError(f"Invalid time period: {value!r}")
+                return result  # type: ignore[return-value]
             finally:
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = use_dateutil
         except ImportError:

@@ -1,3 +1,4 @@
+from ._debug import debug
 from ._run import arun, run
 
 try:
@@ -6,4 +7,4 @@ except ImportError:
     __version__ = "dev"
 
 
-__all__ = ["__version__", "arun", "run"]
+__all__ = ["__version__", "arun", "run", "debug"]

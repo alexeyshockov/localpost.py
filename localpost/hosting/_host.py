@@ -38,6 +38,7 @@ from anyio.abc import TaskGroup, TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 from typing_extensions import Concatenate, Self
 
+from localpost._debug import debug
 from localpost._utils import (
     NO_OP_TS,
     Event,
@@ -428,6 +429,8 @@ async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLif
         exc = unwrap_exc(exc)
         svc_lifetime.exception = exc
         logger.exception(f"{svc_name} crashed", exc_info=exc)
+        if debug:
+            raise
     finally:
         svc_lifetime.stopped.set()
 
