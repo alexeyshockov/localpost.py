@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses as dc
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, cast, final
 
@@ -11,16 +11,13 @@ from anyio import CancelScope, create_task_group
 
 from localpost import flow
 from localpost._utils import EventView, ensure_async_callable
-from localpost.flow import AsyncHandler, AsyncHandlerManager, FlowHandlerManager
+from localpost.flow import AnyHandlerManager, AsyncHandlerManager, FlowHandlerManager, ensure_async_handler_manager
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 if TYPE_CHECKING:
     from types_aiobotocore_sqs import SQSClient
     from types_aiobotocore_sqs.literals import MessageSystemAttributeNameType
-    from types_aiobotocore_sqs.type_defs import (
-        MessageTypeDef,
-        ReceiveMessageRequestTypeDef,
-    )
+    from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef
 
 __all__ = [
     "delete_messages",
@@ -186,6 +183,7 @@ class SqsQueueConsumer(ExposedServiceBase):
     def __init__(
         self,
         handler: AsyncHandlerManager[SqsMessage],
+        /,
         queue_name: str,
         *,
         queue_url: str | None = None,
@@ -212,7 +210,7 @@ class SqsQueueConsumer(ExposedServiceBase):
         self,
         queue_url: str,
         client: "SQSClient",
-        message_handler: AsyncHandler[SqsMessage],
+        message_handler: Callable[[SqsMessage], Awaitable[None]],
         shutdown_scope: CancelScope,
         app_started: EventView,
     ):
@@ -259,38 +257,11 @@ class SqsQueueConsumer(ExposedServiceBase):
                 scope.cancel()
 
 
-# @final
-# class SqsBroker:
-#     def __init__(self, *, client_factory: ClientFactory | None = None):
-#         self.client_factory = client_factory or create_client
-#
-#     def queue_consumer(
-#         self, queue_name_or_url: str, /, *, consumers: int = 1
-#     ) -> Callable[[HandlerManager[SqsMessage]], HostedService]:
-#         if "/" in queue_name_or_url:
-#             queue_url = queue_name_or_url
-#             queue_name = _queue_name_from_url(queue_url)
-#         else:
-#             queue_url = None
-#             queue_name = queue_name_or_url
-#
-#         def _decorator(handler) -> HostedService:
-#             consumer = SqsQueueConsumer(
-#                 handler,
-#                 queue_name=queue_name,
-#                 queue_url=queue_url,
-#                 client_factory=self.client_factory,
-#                 consumers=consumers,
-#             )
-#             return HostedService(consumer, name=f"SqsQueueConsumer({queue_name!r})")
-#
-#         return _decorator
-
-
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def sqs_queue_consumer(
     queue_name_or_url: str, client_factory: ClientFactory | None = None, /, *, consumers: int = 1
-) -> Callable[[AsyncHandlerManager[SqsMessage]], SqsQueueConsumer]:
+) -> Callable[[AnyHandlerManager[SqsMessage]], SqsQueueConsumer]:
+    """ Decorator to create an SQS queue consumer hosted service. """
     if "/" in queue_name_or_url:
         queue_url = queue_name_or_url
         queue_name = _queue_name_from_url(queue_url)
@@ -298,17 +269,13 @@ def sqs_queue_consumer(
         queue_url = None
         queue_name = queue_name_or_url
 
-    def decorator(handler):
-        consumer = SqsQueueConsumer(
-            handler,
-            queue_name=queue_name,
-            queue_url=queue_url,
-            client_factory=client_factory,
-            consumers=consumers,
-        )
-        return consumer
-
-    return decorator
+    return lambda handler: SqsQueueConsumer(
+        ensure_async_handler_manager(handler),
+        queue_name=queue_name,
+        queue_url=queue_url,
+        client_factory=client_factory,
+        consumers=consumers,
+    )
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):

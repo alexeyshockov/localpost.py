@@ -216,45 +216,14 @@ def kafka_config(**overrides) -> dict[str, Any]:
     return conf_from_env | conf_from_args
 
 
-# @final
-# class KafkaBroker:
-#     """
-#     Convenient way to create and register Kafka consumers.
-#     """
-#
-#     def __init__(self, **config):
-#         conf_from_args = {k.replace("_", "."): v for k, v in config.items()}
-#         conf_from_env = kafka_conf_from_env()
-#         self.client_config = conf_from_env | conf_from_args
-#
-#     def topic_consumer(
-#         self, topics: str | Iterable[str], /, *, consumers: int = 1
-#     # ) -> Callable[[HandlerManager[KafkaMessage] | SyncHandlerManager[KafkaMessage]], HostedService]:
-#     ) -> Callable[[T], T]:
-#         def _decorator(handler):
-#             consumer = KafkaTopicConsumer(
-#                 ensure_sync_handler(handler),
-#                 [topics] if isinstance(topics, str) else topics,
-#                 client_config=self.client_config,
-#                 consumers=consumers,
-#             )
-#             # return HostedService(consumer, name=f"KafkaTopicConsumer({topics!r})")
-#             return handler
-#
-#         return _decorator
-
-
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def kafka_consumer(
     topics: str | Iterable[str], client_config: Mapping[str, Any] | None = None, /, *, consumers: int = 1
 ) -> Callable[[AnyHandlerManager[KafkaMessage]], KafkaConsumer]:
-    def decorator(handler: AnyHandlerManager[KafkaMessage]):
-        consumer = KafkaConsumer(
-            ensure_sync_handler_manager(handler),
-            [topics] if isinstance(topics, str) else topics,
-            client_config=client_config,
-            consumers=consumers,
-        )
-        return consumer
-
-    return decorator
+    """ Decorator to create a Kafka consumer hosted service. """
+    return lambda handler: KafkaConsumer(
+        ensure_sync_handler_manager(handler),
+        [topics] if isinstance(topics, str) else topics,
+        client_config=client_config,
+        consumers=consumers,
+    )

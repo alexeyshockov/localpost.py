@@ -9,8 +9,6 @@ deps:
 deps-upgrade:
     uv sync --all-groups --all-extras --upgrade
 
-check: check-style types
-
 [doc("Check types (using both PyRight and MyPy)")]
 types:
     -pyright --pythonpath $(which python) \
@@ -38,10 +36,6 @@ types-all: types
 type-coverage:
     pyright --pythonpath $(which python) --verifytypes localpost localpost/*
 
-check-style:
-    ruff check localpost
-    ruff check examples tests
-
 format:
     ruff check --fix localpost
     ruff format localpost
@@ -50,15 +44,20 @@ format-all: format
     ruff check --fix examples tests
     ruff format examples tests
 
-[doc("Inverse dependency tree for a package, to understand why it is installed")]
-why package:
-    uv tree --invert --package {{ package }}
+check file:
+    -ruff check --fix {{ file }}
+    -pyright --pythonpath $(which python) {{ file }}
+    -mypy --pretty --strict-bytes --python-executable $(which python) {{ file }}
 
-test:
+tests:
     pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
 
 unit-tests:
-    pytest -m "not integration" --cov-report=term --cov-report=xml --cov-branch --cov -v
+    pytest -m "not integration" --cov-report=term --cov-branch --cov -v
 
 integration-tests:
     pytest -m "integration" -n auto -v
+
+[doc("Inverse dependency tree for a package, to understand why it is installed")]
+why package:
+    uv tree --invert --package {{ package }}

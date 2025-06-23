@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses as dc
 import inspect
 import logging
-import math
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import (
     AbstractAsyncContextManager,
@@ -14,8 +13,7 @@ from contextlib import (
 )
 from typing import Any, Generic, ParamSpec, TypeAlias, cast, final
 
-from anyio import ClosedResourceError, EndOfStream, create_task_group, to_thread
-from anyio.abc import ObjectReceiveStream
+from anyio import to_thread
 from typing_extensions import TypeVar
 
 from localpost._utils import ensure_async_callable, ensure_sync_callable, is_async_callable
@@ -90,6 +88,7 @@ def handler(func: AnyHandler[T]) -> FlowHandlerManager[T]:
     Wrap a function, so it can be used as a flow handler.
     """
     assert callable(func)
+    assert not inspect.isgeneratorfunction(func) and not inspect.isasyncgenfunction(func)
     return FlowHandlerManager(lambda: nullcontext(FlowHandler.ensure(func)))
 
 
@@ -283,43 +282,3 @@ class FlowHandlerManager(  # AnyHandlerManager[T]
             return await self._resolved_hm.__aexit__(exc_type, exc_value, traceback)
         finally:
             self._resolved_hm = None
-
-
-@asynccontextmanager
-async def stream_consumer(
-    source: ObjectReceiveStream[T],
-    h: AsyncHandler[T],
-    concurrency: int = 1,
-    process_leftovers: bool = True,
-):
-    async def consume(handle_soon: bool):
-        while True:
-            try:
-                item = await source.receive()
-
-                if handle_soon:  # Infinite concurrency, just spawn a new task for each item
-                    tg.start_soon(h, item)
-                else:
-                    await h(item)
-            except EndOfStream:
-                logger.debug("Source stream has been completed, no more items to consume")
-                break
-            except ClosedResourceError:
-                logger.debug("Receiver has been closed (according to consumer's process_leftovers setting)")
-                break
-
-    async with source, create_task_group() as tg:
-        if math.isinf(concurrency):
-            tg.start_soon(consume, True)
-        else:
-            for _ in range(concurrency):
-                tg.start_soon(consume, False)
-
-        yield
-
-        if process_leftovers:
-            # Process all the remaining items (until the source stream is completed)
-            pass
-        else:
-            # Immediately stop consuming (close the receiver) and ignore the remaining items
-            await source.aclose()

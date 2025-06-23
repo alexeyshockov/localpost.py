@@ -48,7 +48,20 @@ TBD
 
 TBD
 
-### Decorators (middlewares & wrappers)
+### Building pipelines
+
+TBD, including:
+- decorator style
+- `<<` operator
+
+### Built-in ops
+
+TBD, including:
+- map, filter, flatmap
+- buffer
+- batch
+
+### Custom middlewares
 
 TBD
 
@@ -58,7 +71,10 @@ TBD
 
 ### Hosted services
 
-TBD
+TBD, including:
+- combining multiple service together
+  - run services in parallel
+  - wrap service(s) with another one
 
 ### Running multiple services
 
