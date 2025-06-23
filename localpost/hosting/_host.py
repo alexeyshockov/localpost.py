@@ -430,7 +430,7 @@ async def _run_service(func, func_args: Iterable[Any], svc_lifetime: _ServiceLif
         svc_lifetime.exception = exc
         logger.exception(f"{svc_name} crashed", exc_info=exc)
         if debug:
-            raise
+            raise exc from exc.__cause__  # Re-raise the original exception for debugging
     finally:
         svc_lifetime.stopped.set()
 
