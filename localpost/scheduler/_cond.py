@@ -26,6 +26,7 @@ from localpost._utils import (
     sleep,
     start_task_soon,
     td_str,
+    Result
 )
 
 from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Task, Trigger
@@ -125,3 +126,33 @@ def after(target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTempl
     Trigger an event every time the target task completes successfully.
     """
     return ScheduledTaskTemplate(After(target if isinstance(target, Task) else target.task))
+
+
+@final
+@dc.dataclass(frozen=True, slots=True)
+class AfterAll(Generic[ResT]):
+    target: Task[Any, ResT]
+
+    def __repr__(self):
+        return f"after_all({self.target!r})"
+
+    def __call__(self, this_task: ScheduledTask) -> Trigger[Result[ResT]]:
+        task_exec_results = self.target.subscribe()
+
+        async def run():
+            try:
+                while True:
+                    yield await task_exec_results.receive()
+            except EndOfStream:
+                logger.info("Target task completed, stopping")
+            finally:
+                task_exec_results.close()
+
+        return ClosingContext(run())
+
+
+def after_all(target: ScheduledTask[Any, Result[T]] | Task[Any, Result[T]], /) -> ScheduledTaskTemplate[Result[T]]:
+    """
+    Trigger an event every time the target task completes (successfully or not).
+    """
+    return ScheduledTaskTemplate(AfterAll(target if isinstance(target, Task) else target.task))

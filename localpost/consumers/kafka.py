@@ -1,38 +1,58 @@
-from __future__ import annotations
-
 import dataclasses as dc
 import logging
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractContextManager, AsyncExitStack, asynccontextmanager
-from typing import Any, final
+from collections.abc import Callable, Iterable, Mapping, Sequence, Collection
+from contextlib import AbstractContextManager, AbstractAsyncContextManager, asynccontextmanager, AsyncExitStack
+from functools import partial
+from typing import Any, final, Final, TypeAlias
 
 import confluent_kafka
-from anyio import CapacityLimiter, create_task_group, from_thread, to_thread
-from confluent_kafka import TIMESTAMP_NOT_AVAILABLE, Consumer
+from anyio import from_thread, to_thread, create_task_group, CapacityLimiter
+from confluent_kafka import TIMESTAMP_NOT_AVAILABLE
 
 from localpost._utils import EventView
-from localpost.flow import AnyHandlerManager, SyncHandlerManager, ensure_sync_handler_manager
+from localpost.flow import AnyHandlerManager, ensure_sync_handler, SyncHandler
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
 
 __all__ = [
     "KafkaMessage",
     "KafkaMessages",
-    "KafkaConsumer",
-    # "KafkaBroker",
-    "kafka_config",
+    "kafka_config_from_env",
     "kafka_consumer",
 ]
 
 logger = logging.getLogger(__name__)
 
+CHECK_INTERVAL: Final = 0.5  # seconds
+
 
 @final
-@dc.dataclass(frozen=True, slots=True, eq=False)
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class ConsumerClient:
+    config: Mapping[str, Any]
+    topics: Sequence[str]
+    _client: confluent_kafka.Consumer
+
+    def subscribe(self) -> None:
+        self._client.subscribe(self.topics)
+
+    def poll(self) -> confluent_kafka.Message | None:
+        return self._client.poll(CHECK_INTERVAL)  # Interrupt periodically, so we can respect the cancellation
+
+    def store_offset(self, message: confluent_kafka.Message) -> None:
+        """
+        Store the offset of the message, so it won't be redelivered (but only when `enable.auto.offset.store` is
+        actually disabled).
+        """
+        if not self.config.get("enable.auto.offset.store", True):
+            self._client.store_offsets(message)
+
+
+@final
+@dc.dataclass(frozen=True, eq=False, slots=True)
 class KafkaMessage(AbstractContextManager[bytes, None]):
     payload: confluent_kafka.Message
-    _client: Consumer
-    _client_config: Mapping[str, Any]
+    _client: ConsumerClient
 
     def __repr__(self):
         return f"{self.__class__.__name__}(topic={self.payload.topic()!r}"
@@ -60,9 +80,9 @@ class KafkaMessage(AbstractContextManager[bytes, None]):
     def try_ack(self) -> None:
         """
         Store the offset of the message, so it won't be redelivered (but only when `enable.auto.offset.store` is
-        actually disabled.
+        actually disabled).
         """
-        if not self._client_config.get("enable.auto.offset.store", True):
+        if not self._client.config.get("enable.auto.offset.store", True):
             self.ack()
 
     def ack(self) -> None:
@@ -71,7 +91,7 @@ class KafkaMessage(AbstractContextManager[bytes, None]):
 
         Works only if 'enable.auto.offset.store' is set to False!
         """
-        self._client.store_offsets(self.payload)  # Actual commit is done in the background
+        self._client.store_offset(self.payload)  # Actual commit is done in the background
 
 
 @final
@@ -81,16 +101,18 @@ class KafkaMessages(Sequence[KafkaMessage], AbstractContextManager[Sequence[byte
     Non-empty batch of Kafka messages.
     """
 
-    payload: Sequence[KafkaMessage]
+    source: Sequence[KafkaMessage]
 
-    def __init__(self, payload: Sequence[KafkaMessage]):
-        if isinstance(payload, KafkaMessages):
-            payload = payload.payload
-        assert payload
-        object.__setattr__(self, "payload", payload)
+    def __post_init__(self):
+        if len(self.source) == 0:
+            raise ValueError(f"{self.__class__.__name__} must not be empty")
+
+    @property
+    def payload(self) -> Sequence[confluent_kafka.Message]:
+        return [msg.payload for msg in self.source]
 
     def __enter__(self) -> Sequence[bytes]:
-        return [msg.value for msg in self.payload]
+        return [msg.value for msg in self.source]
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         if exc_type is None:
@@ -111,88 +133,96 @@ class KafkaMessages(Sequence[KafkaMessage], AbstractContextManager[Sequence[byte
             message.ack()
 
 
-@final
-class KafkaConsumer(ExposedServiceBase):
-    def __init__(
-        self,
-        handler: SyncHandlerManager[KafkaMessage],
-        topics: Iterable[str],
-        /,
-        *,
-        client_config: Mapping[str, Any] | None = None,
-        consumers: int = 1,
-    ):
-        super().__init__()
-        if consumers < 1:
-            raise ValueError("At least one consumer is required")
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class KafkaConsumerThread:
+    client: ConsumerClient
+    handler: SyncHandler[KafkaMessage]
 
-        self.client_config: dict[str, Any] = dict(client_config or {})
-        self.topics = list(topics)
-        self.handler = handler
-        self.consumers = consumers
-        self.poll_timeout = 0.5
-
-    @asynccontextmanager
-    async def _create_client(self):
-        # TODO stats_cb, to provide detailed debug information
-        # https://docs.confluent.io/platform/current/clients/confluent-kafka-python/html/index.html#kafka-client-configuration
-        # https://github.com/confluentinc/librdkafka/blob/master/STATISTICS.md
-        client = Consumer(
-            self.client_config,
-            logger=logger,  # noqa
-        )
-        await to_thread.run_sync(client.subscribe, self.topics)  # type: ignore
-        try:
-            yield client
-        finally:
-            await to_thread.run_sync(client.close)  # type: ignore
-
-    def _run_consumer(
-        self,
-        client: Consumer,
-        message_handler: Callable[[KafkaMessage], None],
-        shutting_down: EventView,
-    ) -> None:
+    def __call__(self, shutting_down: EventView) -> None:
         while not shutting_down:
             from_thread.check_cancelled()
-            poll_res = client.poll(self.poll_timeout)  # Poll with a short timeout, so we can respect the cancellation
+            poll_res = self.client.poll()
             if poll_res is None:
-                continue  # Empty poll, check for cancellation and continue
+                continue
             if error := poll_res.error():
                 if error.retriable():
                     logger.warning("Kafka (non-fatal) error: [%s] %s", error.code(), error.str())
                     continue
                 if error.fatal():
                     raise RuntimeError(error.str())
-            message = KafkaMessage(poll_res, client, self.client_config)
-            message_handler(message)
+            message = KafkaMessage(poll_res, self.client)
+            self.handler(message)
 
-    async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        assert self.consumers > 0
-        threads_limiter = CapacityLimiter(self.consumers)
-        self._lifetime = service_lifetime
 
-        def _consumer_thread(c):
-            return to_thread.run_sync(
-                self._run_consumer,
-                c,
-                message_handler,
-                service_lifetime.shutting_down,
-                # A custom limiter, to not reduce the global capacity permanently
-                limiter=threads_limiter,
-            )
+@final
+class KafkaConsumerService(ExposedServiceBase):
+    def __init__(
+        self,
+        cf: Callable[[], AbstractAsyncContextManager[ConsumerClient]],
+        handler_m: AnyHandlerManager[KafkaMessage],
+        /,
+        *,
+        consumers: int,
+    ):
+        super().__init__()
 
-        # Make sure to create a task group _after_ resolving the handler, so we exit it only after all the consumer
-        # tasks are done
-        async with AsyncExitStack() as clients, self.handler as message_handler, create_task_group() as tg:
+        if consumers < 1:
+            raise ValueError("Number of consumers must be at least 1")
+
+        self.handler_m = handler_m
+        self.client_factory = cf
+        self.num_consumers = consumers
+
+    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
+        assert self.num_consumers > 0
+        self._lifetime = service_lifetime  # Expose service lifetime events
+        threads_limiter = CapacityLimiter(self.num_consumers)
+        run_thread = partial(to_thread.run_sync, limiter=threads_limiter)
+        clients = []
+        # Although Confluent Kafka's Consumer is thread-safe, it's not intended to be used concurrently:
+        #  - by default, a message received from poll() is automatically acknowledged
+        #  - OTEL instrumentation stores the current span in an object field, so concurrent calls to poll() will mess
+        #    up the traces
+        async with AsyncExitStack() as client_stack, self.handler_m as handler:
+            logger.debug("Creating Kafka clients (1 per consumer)...")
+            for _ in range(self.num_consumers):
+                clients.append(await client_stack.enter_async_context(self.client_factory()))
+            logger.debug("Subscribing Kafka clients to topics...")
+            async with create_task_group() as tg:
+                for c in clients:
+                    tg.start_soon(run_thread, c.subscribe)
+            message_handler = ensure_sync_handler(handler)
             service_lifetime.set_started()
-            await service_lifetime.host.started  # Start pulling messages only after the whole app is started
-            for _ in range(self.consumers):
-                client = await clients.enter_async_context(self._create_client())
-                tg.start_soon(_consumer_thread, client)
+            # Start pulling messages only after the whole app is started
+            await service_lifetime.host.started
+            async with create_task_group() as tg:
+                for c in clients:
+                    tg.start_soon(
+                        run_thread,
+                        KafkaConsumerThread(c, message_handler), service_lifetime.shutting_down
+                    )
+                # Consumer threads will complete on shutdown
 
 
-def kafka_config_from_env() -> dict[str, Any]:
+@dc.dataclass(frozen=True, slots=True)
+class ClientFactory:
+    config: Mapping[str, Any]
+    topics: Collection[str]
+
+    @asynccontextmanager
+    async def __call__(self):
+        transport =  confluent_kafka.Consumer(
+            self.config,
+            logger=logger,  # noqa
+        )
+        client = ConsumerClient(dict(self.config), list(self.topics), transport)
+        try:
+            yield client
+        finally:
+            await to_thread.run_sync(transport.close)
+
+
+def kafka_config_from_env(**overrides) -> dict[str, Any]:
     """
     Construct a configuration dictionary for KAFKA_* environment variables.
 
@@ -207,23 +237,21 @@ def kafka_config_from_env() -> dict[str, Any]:
             if var_name.startswith("KAFKA_"):
                 yield var_name[6:].lower().replace("_", "."), var_val
 
-    return dict(_read_env_vars())
-
-
-def kafka_config(**overrides) -> dict[str, Any]:
+    conf_from_env = dict(_read_env_vars())
     conf_from_args = {k.replace("_", "."): v for k, v in overrides.items()}
-    conf_from_env = kafka_config_from_env()
     return conf_from_env | conf_from_args
 
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def kafka_consumer(
     topics: str | Iterable[str], client_config: Mapping[str, Any] | None = None, /, *, consumers: int = 1
-) -> Callable[[AnyHandlerManager[KafkaMessage]], KafkaConsumer]:
+) -> Callable[[AnyHandlerManager[KafkaMessage]], KafkaConsumerService]:
     """ Decorator to create a Kafka consumer hosted service. """
-    return lambda handler: KafkaConsumer(
-        ensure_sync_handler_manager(handler),
-        [topics] if isinstance(topics, str) else topics,
-        client_config=client_config,
+    return lambda handler_m: KafkaConsumerService(
+        ClientFactory(
+            kafka_config_from_env(**(client_config or {})),
+            [topics] if isinstance(topics, str) else topics
+        ),
+        handler_m,
         consumers=consumers,
     )

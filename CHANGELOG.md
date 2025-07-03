@@ -15,7 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-## [0.4.0] - 2025-04-03
+## [0.5.0] - 2025-06-25
+
+### Added
+
+- `localpost.consumers.stream` for in-memory queues
+- `localpost.debug` context manager, to simplify debugging
+- More tests
+
+### Changed
+
+- `localpost.consumers.kafka` reworked
+
+## [0.4.0] - 2025-06-23
 
 ### Fixed
 
@@ -24,28 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `HostedService` class, to represent a named hosted service
-- Hosted service middlewares: start_timeout, stop_timeout, and lifespan
+- Hosted service middlewares: start_timeout, shutdown_timeout, and lifespan
 - Ability to combine multiple hosted services (`+` operator)
 - Ability to wrap a hosted service (or a set of services) by another one (`>>` operator)
 - `Host.state` (similar to `ServiceLifetime.state`)
+- More tests
 
 ### Changed
 
-- `EventView.__bool__()` instead of `EventView.is_set()`
-- `app_host.AppService` instead of `app_host.HostedService`
-- `localpost.flow_ops` has been merged into `localpost.flow`
+- `EventView.__bool__()` in addition to `EventView.is_set()`
+- `AppHost` reworked (simplified)
+- `localpost.flow_ops` merged into `localpost.flow`
 
 ### Removed
 
 - `localpost.scheduler.serve()` & `localpost.scheduler.aserve()` (just use `Host` instead)
 
-## [0.3.1] - 2025-03-13
-
-### Added
-
-- More tests
-
-## [0.3.0] - 2025-03-11
+## [0.3.0] - 2025-03-12
 
 ### Changed
 

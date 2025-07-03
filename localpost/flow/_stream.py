@@ -1,105 +1,92 @@
+import dataclasses as dc
 import math
-from collections.abc import Sequence, Callable
+from collections.abc import Callable, Collection
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Generic
 
 from anyio import EndOfStream, ClosedResourceError, create_task_group, move_on_after
 from anyio.abc import ObjectReceiveStream
 from typing_extensions import TypeVar
 
-from ._flow import (
-    AsyncHandler,
-    logger,
-)
-from .._utils import start_task_soon
+from localpost._utils import start_task_soon, EventView, Event
+from ._flow import AsyncHandler, logger
 
 T = TypeVar("T", default=Any)
-TC = TypeVar("TC", bound=Sequence[object], default=Sequence[object])  # A collection of T objects (for batching)
+TC = TypeVar("TC", bound=Collection[object], default=Collection[object])
+
+
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class StreamConsumerState:
+    closed: EventView
 
 
 @asynccontextmanager
-async def stream_consumer(
-    source: ObjectReceiveStream[T],
+async def create_stream_consumer(
+    stream: ObjectReceiveStream[T],
     h: AsyncHandler[T],
+    /,
+    *,
     concurrency: int = 1,
-    process_leftovers: bool = True,
+    process_leftovers: bool = True,  # FIXME Remove
 ):
-    async def consume(handle_soon: bool):
-        while True:
-            try:
-                item = await source.receive()
+    if math.isinf(concurrency):
+        async def handle(item: T) -> None:
+            # Infinite concurrency, just spawn a new task for each item
+            tg.start_soon(h, item)
+    else:
+        handle = h
 
-                if handle_soon:  # Infinite concurrency, just spawn a new task for each item
-                    tg.start_soon(h, item)
-                else:
-                    await h(item)
-            except EndOfStream:
-                logger.debug("Source stream has been completed, no more items to consume")
-                break
-            except ClosedResourceError:
-                logger.debug("Receiver has been closed (according to consumer's process_leftovers setting)")
-                break
-
-    async with source, create_task_group() as tg:
-        if math.isinf(concurrency):
-            tg.start_soon(consume, True)
-        else:
-            for _ in range(concurrency):
-                tg.start_soon(consume, False)
-
-        yield
-
-        if process_leftovers:
-            # Process all the remaining items (until the source stream is completed)
-            pass
-        else:
-            # Immediately stop consuming (close the receiver) and ignore the remaining items
-            await source.aclose()
-
-
-@asynccontextmanager
-async def stream_batch_consumer(  # noqa: C901 (ignore complexity)
-    source: ObjectReceiveStream[T],
-    h: AsyncHandler[Sequence[object]],
-    items_f: Callable[[Sequence[T]], TC] | None,
-    batch_size: int,
-    batch_window: int | float,  # Seconds
-    process_leftovers: bool = True,
-):
-    async def read_batch() -> Sequence[T]:
-        items: list[T] = []
+    async def source_items():
         try:
-            with move_on_after(batch_window):
-                while len(items) < batch_size:
-                    message = await source.receive()
-                    items.append(message)
-            return items
+            while True:
+                yield await stream.receive()
         except EndOfStream:
-            if items:
-                return items  # Return the last batch first
-            raise
+            logger.debug("Source stream has been completed, no more items to process")
+        except ClosedResourceError:
+            logger.debug("Receiver has been closed (according to consumer's process_leftovers setting)")
+        finally:
+            closed.set()
 
     async def consume():
+        async for item in source_items():
+            await handle(item)
+
+    closed = Event()
+    async with stream, create_task_group() as tg:
+        for _ in range(1 if math.isinf(concurrency) else concurrency):
+            start_task_soon(tg, consume)
+        yield StreamConsumerState(closed)
+
+
+
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class BatchReceiver(Generic[T, TC], ObjectReceiveStream[TC]):
+    source: ObjectReceiveStream[T]
+    batch_size: int
+    batch_window: float
+    items_f: Callable[[list[T]], TC] = lambda x: x
+
+    def __post_init__(self):
+        if self.batch_size < 1:
+            raise ValueError("Batch size must be at least 1")
+        if self.batch_window <= 0:
+            raise ValueError("Batch window must be greater than 0 seconds")
+
+    async def receive(self) -> TC:
         while True:
+            items = []
             try:
-                items = await read_batch()
-                if items:
-                    await h(items_f(items) if items_f is not None else items)
+                with move_on_after(self.batch_window):
+                    while len(items) < self.batch_size:
+                        message = await self.source.receive()
+                        items.append(message)
+                if not items:
+                    continue
+                return self.items_f(items)
             except EndOfStream:
-                logger.debug("Source stream has been completed, no more items to consume")
-                break
-            except ClosedResourceError:
-                logger.debug("Receiver has been closed (according to consumer's process_leftovers setting)")
-                break
+                if items:
+                    return self.items_f(items)  # Return the last batch first
+                raise
 
-    async with source, create_task_group() as tg:
-        start_task_soon(tg, consume)
-
-        yield
-
-        if process_leftovers:
-            # Process all the remaining items (until the source stream is completed)
-            pass
-        else:
-            # Immediately stop consuming (close the receiver) and ignore the remaining items
-            await source.aclose()
+    async def aclose(self) -> None:
+        await self.source.aclose()

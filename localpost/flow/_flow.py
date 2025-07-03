@@ -6,14 +6,13 @@ import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import (
     AbstractAsyncContextManager,
-    AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
     nullcontext,
 )
 from typing import Any, Generic, ParamSpec, TypeAlias, cast, final
 
-from anyio import to_thread
+from anyio import CapacityLimiter
 from typing_extensions import TypeVar
 
 from localpost._utils import ensure_async_callable, ensure_sync_callable, is_async_callable
@@ -60,17 +59,6 @@ HandlerDecorator: TypeAlias = Callable[
 logger = logging.getLogger("localpost.flow")
 
 
-class _ThreadContext(AbstractAsyncContextManager):
-    def __init__(self, cm: AbstractContextManager):
-        self._source = cm
-
-    async def __aenter__(self):
-        return await to_thread.run_sync(self._source.__enter__)  # type: ignore
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        return await to_thread.run_sync(self._source.__exit__, exc_type, exc_value, traceback)
-
-
 # Too complex case, maybe for the future
 # def handler_manager_factory(
 #     func: Union[
@@ -80,7 +68,7 @@ class _ThreadContext(AbstractAsyncContextManager):
 #         Callable[P, Generator[Handler[T]]],
 #     ],
 # ) -> Callable[P, HandlerManager[T]]:
-#     return cast(Callable[P, HandlerManager[T]], _HandlerManagerFactory.ensure(func))
+#     ...
 
 
 def handler(func: AnyHandler[T]) -> FlowHandlerManager[T]:
@@ -113,10 +101,14 @@ def _ensure_handler_manager_factory(
     return _handler_manager
 
 
-def ensure_async_handler(source: AnyHandler[T]) -> AsyncHandler[T]:
-    if isinstance(source, FlowHandler):
-        return source.async_h
-    return ensure_async_callable(source)
+def ensure_async_handler(
+    h: AnyHandler[T], /, *, max_threads: int | float | CapacityLimiter | None = None,
+) -> AsyncHandler[T]:
+    if isinstance(h, FlowHandler):
+        handle_async = h.async_h if h.is_async else ensure_async_callable(h.sync_h, max_threads=max_threads)
+    else:
+        handle_async = ensure_async_callable(h, max_threads=max_threads)
+    return handle_async
 
 
 def ensure_async_handler_manager(source: AnyHandlerManager[T]) -> AsyncHandlerManager[T]:
@@ -152,12 +144,23 @@ class _HandlerMiddlewareDecorator(Generic[T, T2]):
 
 
 def handler_middleware(m: HandlerMiddleware[T, T2], /) -> HandlerDecorator[T, T2]:
-    assert inspect.isasyncgenfunction(m)
     return _HandlerMiddlewareDecorator(_handler_middleware(m))
 
 
 def _handler_middleware(m: HandlerMiddleware[T, T2]) -> _HandlerMiddleware[T, T2]:
-    return _ensure_handler_manager_factory(asynccontextmanager(m))
+    assert inspect.isasyncgenfunction(m)
+    source = asynccontextmanager(m)
+
+    @asynccontextmanager
+    async def _handler_manager(next_h: FlowHandler[T]):
+        async with source(next_h) as h:
+            if isinstance(h, tuple) and len(h) == 2:
+                async_h, sync_h = h  # If the handler is a tuple, it should be (async_h, sync_h)
+                yield next_h.create(async_h=async_h, sync_h=sync_h)
+            else:
+                yield FlowHandler.ensure(h)
+
+    return _handler_manager
 
 
 @final
@@ -175,6 +178,7 @@ class FlowHandler(Generic[T]):
 
     @classmethod
     def ensure(cls, h: AnyHandler[T]) -> FlowHandler[T]:
+        assert callable(h)
         if isinstance(h, FlowHandler):
             return h
         if is_async_callable(h):
@@ -258,7 +262,6 @@ class FlowHandlerManager(  # AnyHandlerManager[T]
         return cast(FlowHandlerManager[T2], f)
 
     def use(self, m: HandlerMiddleware[T, T2], /) -> FlowHandlerManager[T2]:
-        assert inspect.isasyncgenfunction(m)
         return self._use(_handler_middleware(m))
 
     # handler << handler_decorator

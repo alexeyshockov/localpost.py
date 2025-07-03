@@ -1,59 +1,53 @@
-from __future__ import annotations
-
+import math
 from collections.abc import Callable
-from typing import TypeVar, final, Generic
+from typing import TypeVar, Generic
 
-from anyio.streams.memory import MemoryObjectReceiveStream
+from anyio.abc import ObjectReceiveStream
 
-from localpost.flow import AnyHandlerManager, ensure_async_handler_manager, AsyncHandlerManager
-from localpost.flow._stream import stream_consumer as _stream_consumer
+from localpost._utils import wait_any
+from localpost.flow import AnyHandlerManager, ensure_async_handler
+from localpost.flow._stream import create_stream_consumer
 from localpost.hosting import ServiceLifetimeManager
 
 T = TypeVar("T")
 
-__all__ = ["StreamConsumer", "stream_consumer"]
+__all__ = ["stream_consumer"]
 
 
-@final
-class StreamConsumer(Generic[T]):
+class StreamConsumerService(Generic[T]):
     def __init__(
         self,
-        handler: AsyncHandlerManager[T],
-        reader: MemoryObjectReceiveStream[T],
+        target: ObjectReceiveStream[T],
+        handler: AnyHandlerManager[T],
         /,
         *,
-        concurrency: int = 1,
-        process_leftovers: bool = True,
+        concurrency: int,
+        process_leftovers: bool,
     ):
-        if concurrency < 1:
+        if not (math.isinf(concurrency) or (isinstance(concurrency, int) and concurrency >= 1)):
             raise ValueError("Number of consumers must be at least 1")
 
-        self.handler = handler
-        self.reader = reader
+        self.target = target
+        self.handler_m = handler
         self.concurrency = concurrency
         self.process_leftovers = process_leftovers
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        async with (
-            self.handler as message_handler,
-            _stream_consumer(
-                self.reader,
-                message_handler,
-                self.concurrency,
-                self.process_leftovers,
-            ),
-        ):
+        async with self.handler_m as handler, create_stream_consumer(
+            self.target, ensure_async_handler(handler, max_threads=self.concurrency), concurrency=self.concurrency,
+        ) as consumer_state:
             service_lifetime.set_started()
-            # Wait until the source channel is closed
+            if not self.process_leftovers:
+                await wait_any(service_lifetime.shutting_down, consumer_state.closed)
+                await self.target.aclose()
+            # Otherwise just wait for the stream to be exhausted and closed
 
 
 def stream_consumer(
-    reader: MemoryObjectReceiveStream[T], /, *, concurrency: int = 1, process_leftovers: bool = True,
-) -> Callable[[AnyHandlerManager[T]], StreamConsumer[T]]:
+    target: ObjectReceiveStream[T], /, *, concurrency: int = 1, process_leftovers: bool = True,
+) -> Callable[[AnyHandlerManager[T]], StreamConsumerService[T]]:
     """ Decorator to create a stream consumer hosted service. """
-    return lambda handler: StreamConsumer(
-        ensure_async_handler_manager(handler),
-        reader,
-        concurrency=concurrency,
-        process_leftovers=process_leftovers
+    return lambda handler_m: StreamConsumerService(
+        target, handler_m,
+        concurrency=concurrency, process_leftovers=process_leftovers
     )

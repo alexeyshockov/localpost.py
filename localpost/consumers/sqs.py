@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import dataclasses as dc
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, AsyncExitStack
+import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, AbstractContextManager
 from typing import TYPE_CHECKING, Final, TypeAlias, TypedDict, cast, final
 
 from aiobotocore.session import get_session
 from anyio import CancelScope, create_task_group
 
 from localpost import flow
-from localpost._utils import EventView, ensure_async_callable
-from localpost.flow import AnyHandlerManager, AsyncHandlerManager, FlowHandlerManager, ensure_async_handler_manager
+from localpost._utils import ensure_async_callable, MemoryStream
+from localpost.flow import AnyHandlerManager, AsyncHandlerManager, FlowHandlerManager, ensure_async_handler_manager, \
+    AsyncHandler, ensure_async_handler
+from localpost.flow._stream import create_stream_consumer, BatchReceiver
 from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
+from localpost.hosting.utils import ThreadSafeMemorySendStream
 
 if TYPE_CHECKING:
     from types_aiobotocore_sqs import SQSClient
@@ -20,81 +24,104 @@ if TYPE_CHECKING:
     from types_aiobotocore_sqs.type_defs import MessageTypeDef, ReceiveMessageRequestTypeDef
 
 __all__ = [
-    "delete_messages",
     "SqsMessage",
     "SqsMessages",
-    "SqsQueueConsumer",
-    # "SqsBroker",
-    "lambda_handler",
     "sqs_queue_consumer",
+    "lambda_handler",
 ]
-
-ClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager["SQSClient"]]
 
 logger = logging.getLogger(__name__)
 
-
-async def _delete_message_chunk(messages: Sequence[SqsMessage]):
-    client = messages[0]._client  # noqa
-    queue_url = messages[0].queue_url
-    await client.delete_message_batch(
-        QueueUrl=queue_url,
-        Entries=[
-            {
-                "Id": str(i),
-                "ReceiptHandle": message.receipt_handle,
-            }
-            for i, message in enumerate(messages)
-        ],
-    )
-
-
-def _split_messages(messages: Sequence[SqsMessage]) -> Iterable[Sequence[SqsMessage]]:
-    partitions: dict[str, list[SqsMessage]] = {}
-    for message in messages:
-        partitions.setdefault(message.queue_url, []).append(message)
-    for queue_messages in partitions.values():
-        for i in range(0, len(queue_messages), 10):
-            yield queue_messages[i : i + 10]
-
-
-async def delete_messages(messages: Sequence[SqsMessage]):
-    """
-    Delete multiple messages from the queue.
-
-    AWS supports batches up to 10 messages. If the input list is longer, it will be split into chunks, and all the
-    chunks will be processed simultaneously.
-    """
-    async with create_task_group() as tg:
-        for chunk in _split_messages(messages):
-            tg.start_soon(_delete_message_chunk, chunk)
-
-
-# See also https://github.com/aio-libs/aiobotocore/blob/master/examples/sqs_queue_consumer.py
+_EMPTY_RECEIVE: Final[Sequence["MessageTypeDef"]] = ()
 
 
 @final
-@dc.dataclass(frozen=True, slots=True, eq=False)
-class SqsMessage(AbstractAsyncContextManager[str, None]):
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class ConsumerClient:
+    queue_name: str
+    queue_url: str
+    _client: object
+
+    @classmethod
+    def create(cls, queue_name: str, queue_url: str) -> Self:
+        import boto3
+        client = boto3.client("sqs")
+
+    def receive(self, receive_req: "ReceiveMessageRequestTypeDef") -> Sequence["MessageTypeDef"]:
+        receive_req = receive_req | {"QueueUrl": self.queue_url}
+        # TODO Check HTTP status and retry on errors (exponential backoff)
+        pull_resp = await self._client.receive_message(**receive_req)
+        return pull_resp.get("Messages", _EMPTY_RECEIVE)
+
+    def delete(self, messages: SqsMessage | Iterable[SqsMessage]) -> None:
+        if isinstance(message := messages, SqsMessage):
+            await self._client.delete_message(
+                QueueUrl=self.queue_url,
+                ReceiptHandle=message.receipt_handle,
+            )
+        else:
+            await self._client.delete_message_batch(
+                QueueUrl=self.queue_url,
+                Entries=[  # type: ignore
+                    {"Id": str(i), "ReceiptHandle": message.receipt_handle}
+                    for i, message in enumerate(messages)
+                ],
+            )
+
+
+@final
+@dc.dataclass(frozen=True, eq=False, slots=True)
+class AsyncConsumerClient:
+    queue_name: str
+    queue_url: str
+    _client: "SQSClient"
+
+    async def receive(self, receive_req: "ReceiveMessageRequestTypeDef") -> Sequence["MessageTypeDef"]:
+        receive_req = receive_req | {"QueueUrl": self.queue_url}
+        # TODO Check HTTP status and retry on errors (exponential backoff)
+        pull_resp = await self._client.receive_message(**receive_req)
+        return pull_resp.get("Messages", _EMPTY_RECEIVE)
+
+    async def delete(self, messages: SqsMessage | Iterable[SqsMessage]) -> None:
+        if isinstance(message := messages, SqsMessage):
+            await self._client.delete_message(
+                QueueUrl=self.queue_url,
+                ReceiptHandle=message.receipt_handle,
+            )
+        else:
+            await self._client.delete_message_batch(
+                QueueUrl=self.queue_url,
+                Entries=[  # type: ignore
+                    {"Id": str(i), "ReceiptHandle": message.receipt_handle}
+                    for i, message in enumerate(messages)
+                ],
+            )
+
+
+AsyncClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager[AsyncConsumerClient]]
+
+
+@final
+@dc.dataclass(frozen=True, slots=True)
+class SqsMessage(AbstractContextManager["SqsMessage", None]):
     payload: "MessageTypeDef"
     """
     Raw message data from the SQS queue.
 
     See https://docs.aws.amazon.com/AWSSimpleQueueService/latest/APIReference/API_Message.html.
     """
-    queue_name: str
-    queue_url: str
-    _client: "SQSClient"
+    client: AsyncConsumerClient
+    ack_queue: ThreadSafeMemorySendStream[SqsMessage]
 
     def __repr__(self):
-        return f"{self.__class__.__name__}(queue_name={self.queue_name!r})"
+        return f"{self.__class__.__name__}(queue_name={self.client.queue_name!r})"
 
-    async def __aenter__(self) -> str:
-        return self.body
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         if exc_type is None:
-            await self.ack()
+            self.ack()
+
+    def ack(self):
+        self.ack_queue.send_nowait(self)
 
     @property
     def receipt_handle(self):
@@ -110,56 +137,38 @@ class SqsMessage(AbstractAsyncContextManager[str, None]):
     def attributes(self):
         return self.payload.get("MessageAttributes", {})
 
-    async def ack(self) -> None:
-        """
-        Delete the message from the queue (acknowledge), otherwise it will reappear after the visibility timeout.
-        """
-        await self._client.delete_message(
-            QueueUrl=self.queue_url,
-            ReceiptHandle=self.receipt_handle,
-        )
-
 
 @final
 @dc.dataclass(frozen=True, slots=True)
-class SqsMessages(Sequence[SqsMessage], AbstractAsyncContextManager[Sequence[str], None]):
-    """
-    Non-empty batch of SQS messages.
-    """
+class SqsMessages(Sequence[SqsMessage], AbstractContextManager[Sequence[SqsMessage], None]):
+    """ Non-empty batch of SQS messages. """
 
-    payload: Sequence[SqsMessage]
+    source: Sequence[SqsMessage]
+
+    def __init__(self, source: Sequence[SqsMessage]):
+        if isinstance(source, SqsMessages):
+            source = source.source
+        if len(source) == 0:
+            raise ValueError(f"{self.__class__.__name__} must not be empty")
+        object.__setattr__(self, "source", source)
 
     def __repr__(self):
         return f"{self.__class__.__name__}(len={len(self)})"
 
-    def __init__(self, payload: Sequence[SqsMessage]):
-        if isinstance(payload, SqsMessages):
-            payload = payload.payload
-        assert payload
-        object.__setattr__(self, "payload", payload)
-
-    async def __aenter__(self) -> Sequence[str]:
-        return [m.body for m in self.payload]
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
         if exc_type is None:
-            await self.ack()
-
-    def __getitem__(self, item):
-        return self.payload[item]
-
-    def __len__(self):
-        return len(self.payload)
+            for message in self.source:
+                message.ack()
 
     @property
-    def queue_name(self) -> str:
-        return self.payload[0].queue_name
+    def payload(self) -> Sequence["MessageTypeDef"]:
+        return [msg.payload for msg in self.source]
 
-    async def ack(self) -> None:
-        """
-        Delete the messages from the queue (acknowledge), otherwise they will reappear after the visibility timeout.
-        """
-        await delete_messages(self.payload)
+    def __getitem__(self, item):
+        return self.source[item]
+
+    def __len__(self):
+        return len(self.source)
 
 
 def _queue_name_from_url(url: str) -> str:
@@ -169,35 +178,46 @@ def _queue_name_from_url(url: str) -> str:
     return parse_result.path.split("/")[-1]
 
 
-def create_client() -> AbstractAsyncContextManager["SQSClient"]:
-    """
-    Default SQS client factory.
-    """
-    return get_session().create_client("sqs")
+async def _queue_url_from_name(name: str, c: "SQSClient") -> str:
+    resolve_resp = await c.get_queue_url(QueueName=name)
+    return resolve_resp["QueueUrl"]
+
+
+def client_factory(queue_name_or_url: str, /) -> AsyncClientFactory:
+    """ Default SQS client factory. """
+    @asynccontextmanager
+    async def with_client():
+        if "/" in queue_name_or_url:
+            queue_url = queue_name_or_url
+            queue_name = _queue_name_from_url(queue_url)
+        else:
+            queue_url = None
+            queue_name = queue_name_or_url
+        async with get_session().create_client("sqs") as transport:
+            if queue_url is None:
+                queue_url = await _queue_url_from_name(queue_name, transport)
+            client = AsyncConsumerClient(queue_name, queue_url, transport)
+            yield client
+
+    return with_client  # type: ignore[return-value]
 
 
 @final
-class SqsQueueConsumer(ExposedServiceBase):
-    _EMPTY_RECEIVE: Final[Sequence["MessageTypeDef"]] = ()
-
+class SqsConsumerService(ExposedServiceBase):
     def __init__(
         self,
-        handler: AsyncHandlerManager[SqsMessage],
+        cf: AsyncClientFactory,
+        handler_m: AsyncHandlerManager[SqsMessage],
         /,
-        queue_name: str,
         *,
-        queue_url: str | None = None,
-        client_factory: ClientFactory | None = None,
-        consumers: int = 1,
+        consumers: int,
     ):
         super().__init__()
         if consumers < 1:
             raise ValueError("Number of consumers must be at least 1")
 
-        self.queue_name = queue_name
-        self.queue_url = queue_url
-        self.handler = handler
-        self.client_factory: ClientFactory = client_factory or create_client
+        self.handler_m = handler_m
+        self.client_factory = cf
         self.consumers = consumers
         self.receive_req_template: "ReceiveMessageRequestTypeDef" = {
             "QueueUrl": "",  # Will be filled in later
@@ -206,74 +226,56 @@ class SqsQueueConsumer(ExposedServiceBase):
             "WaitTimeSeconds": 20,
         }
 
-    async def _run_consumer(
+    # See also https://github.com/aio-libs/aiobotocore/blob/master/examples/sqs_queue_consumer.py
+    async def _consume(
         self,
-        queue_url: str,
-        client: "SQSClient",
-        message_handler: Callable[[SqsMessage], Awaitable[None]],
+        client: AsyncConsumerClient,
+        message_handler: AsyncHandler[SqsMessage],
+        ack_queue: ThreadSafeMemorySendStream[SqsMessage],
         shutdown_scope: CancelScope,
-        app_started: EventView,
     ):
-        async def pull_messages() -> Sequence["MessageTypeDef"]:
-            # TODO Check HTTP status and retry on errors (exponential backoff)
-            pull_resp = await client.receive_message(**receive_req)
-            return pull_resp.get("Messages", self._EMPTY_RECEIVE)
-
-        receive_req: "ReceiveMessageRequestTypeDef" = self.receive_req_template | {"QueueUrl": queue_url}
-        messages = self._EMPTY_RECEIVE
-        with shutdown_scope:
-            await app_started  # Start pulling messages only after the whole app is started
         while not shutdown_scope.cancel_called:
+            messages = _EMPTY_RECEIVE
             with shutdown_scope:
-                messages = await pull_messages()
-            if shutdown_scope.cancel_called:
-                break
+                messages = await client.receive(self.receive_req_template)
             if not messages:
-                logger.debug("No messages in the queue (empty receive)")
-                continue
+                continue  # No messages received (empty queue or shutdown)
             for m in messages:
-                await message_handler(SqsMessage(m, self.queue_name, queue_url, client))
+                await message_handler(SqsMessage(m, client, ack_queue))
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        self._lifetime = service_lifetime
+        self._lifetime = service_lifetime  # Expose service lifetime events
 
-        async def _resolve_url_from_name():
-            async with self.client_factory() as c:
-                resolve_resp = await c.get_queue_url(QueueName=self.queue_name)
-                return resolve_resp["QueueUrl"]
+        ack_queue_writer, ack_queue_reader = MemoryStream.create(math.inf)
+        batched_ack_queue_reader = BatchReceiver(ack_queue_reader, batch_size=10, batch_window=1.0)
 
-        queue_url = self.queue_url or await _resolve_url_from_name()
+        # Graceful shutdown scopes, one per consumer
         consumer_scopes = [CancelScope() for _ in range(self.consumers)]
-        app_started = service_lifetime.host.started
-        # Make sure to create a task group _after_ resolving the handler, so we exit it only after all the consumer
-        # tasks are done
-        async with AsyncExitStack() as clients, self.handler as mh, create_task_group() as tg:
-            for shutdown_scope in consumer_scopes:
-                client = await clients.enter_async_context(self.client_factory())
-                tg.start_soon(self._run_consumer, queue_url, client, mh, shutdown_scope, app_started)
+        async with (
+            self.client_factory() as client,
+            create_stream_consumer(batched_ack_queue_reader, client.delete, concurrency=math.inf),
+            ack_queue_writer,
+            self.handler_m as handler,
+            create_task_group() as tg):
+            message_handler = ensure_async_handler(handler)
+            robust_ack_queue = ThreadSafeMemorySendStream(ack_queue_writer, service_lifetime.host)
             service_lifetime.set_started()
+            # Start pulling messages only after the whole app is started
+            await service_lifetime.host.started
+            for consumer_scope in consumer_scopes:
+                tg.start_soon(self._consume, client, message_handler, robust_ack_queue, consumer_scope)
             await service_lifetime.shutting_down
-            for scope in consumer_scopes:
-                scope.cancel()
+            for consumer_scope in consumer_scopes:
+                consumer_scope.cancel()
 
 
 # PyCharm (at least 2024.3) does not infer the changed type if it's a method, only when it's a function
 def sqs_queue_consumer(
-    queue_name_or_url: str, client_factory: ClientFactory | None = None, /, *, consumers: int = 1
-) -> Callable[[AnyHandlerManager[SqsMessage]], SqsQueueConsumer]:
+    cf: AsyncClientFactory, /, *, consumers: int = 1
+) -> Callable[[AnyHandlerManager[SqsMessage]], SqsConsumerService]:
     """ Decorator to create an SQS queue consumer hosted service. """
-    if "/" in queue_name_or_url:
-        queue_url = queue_name_or_url
-        queue_name = _queue_name_from_url(queue_url)
-    else:
-        queue_url = None
-        queue_name = queue_name_or_url
-
-    return lambda handler: SqsQueueConsumer(
-        ensure_async_handler_manager(handler),
-        queue_name=queue_name,
-        queue_url=queue_url,
-        client_factory=client_factory,
+    return lambda handler: SqsConsumerService(
+        cf, ensure_async_handler_manager(handler),
         consumers=consumers,
     )
 

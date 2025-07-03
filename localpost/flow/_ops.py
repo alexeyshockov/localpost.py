@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterable, Sequence, AsyncGenerator
+from collections.abc import Awaitable, Callable, Iterable, Sequence, Collection
 from typing import Any, Literal, overload
 
+from anyio import fail_after
 from typing_extensions import TypeVar
 
 from localpost._utils import (
@@ -22,11 +23,11 @@ from ._flow import (
     handler_middleware,
     logger,
 )
-from ._stream import stream_batch_consumer, stream_consumer
+from ._stream import create_stream_consumer, BatchReceiver
 
 T = TypeVar("T", default=Any)
 T2 = TypeVar("T2", default=Any)
-TC = TypeVar("TC", bound=Sequence[object], default=Sequence[object])  # A collection of T objects (for batching)
+TC = TypeVar("TC", bound=Collection[object], default=Collection[object])
 R = TypeVar("R", Awaitable[None], None)
 
 
@@ -45,7 +46,7 @@ def delay(value: DelayFactory, /) -> HandlerDecorator[Any, Any]:
             time.sleep(item_jitter.total_seconds())
             next_h.sync_h(item)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware
 
@@ -67,7 +68,7 @@ def log_errors(custom_logger=None, /) -> HandlerDecorator[Any, Any]:
             except Exception:  # noqa
                 h_logger.exception("Error while processing a message")
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware
 
@@ -98,7 +99,7 @@ def skip_first(n: int, /) -> HandlerDecorator[Any, Any]:
             else:
                 next_h.sync_h(item)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware
 
@@ -111,9 +112,7 @@ def buffer(
     process_leftovers: bool = True,
     full_mode: Literal["wait", "drop"] = "wait",
 ) -> HandlerDecorator[Any, Any]:
-    """
-    Buffer items in an in-memory stream.
-    """
+    """ Buffer items in an async in-memory stream. """
     if capacity < 0:
         raise ValueError("Buffer capacity must be greater than or equal to 0")
     if concurrency < 1:
@@ -122,15 +121,27 @@ def buffer(
     @handler_middleware
     async def middleware(next_h: FlowHandler):
         buffer_writer, buffer_reader = MemoryStream.create(capacity)
-        stream_h = ensure_async_handler(next_h)
-        consumer = stream_consumer(buffer_reader, stream_h, concurrency, process_leftovers)
+        stream_h = ensure_async_handler(next_h, max_threads=concurrency)
+        consumer = create_stream_consumer(buffer_reader, stream_h, concurrency, process_leftovers)
         async with consumer, buffer_writer:  # As usual, order matters
             if math.isinf(capacity) or full_mode == "drop":
-                yield next_h.create(async_h=buffer_writer.send_or_drop_async, sync_h=buffer_writer.send_or_drop)
+                yield buffer_writer.send_or_drop_async, buffer_writer.send_or_drop
             else:
-                yield FlowHandler.create_async(async_h=buffer_writer.send)
+                yield buffer_writer.send
 
     return middleware
+
+
+# Implement later
+# def sync_buffer(
+#     capacity: float,
+#     /,
+#     *,
+#     consumers: int = 1,
+#     process_leftovers: bool = True,
+#     full_mode: Literal["wait", "drop"] = "wait",
+# ) -> HandlerDecorator[Any, Any]:
+#     pass
 
 
 @overload
@@ -181,17 +192,34 @@ def batch(
         raise ValueError("Buffer capacity must be greater than or equal to 0")
 
     @handler_middleware
-    async def _middleware(next_h: FlowHandler[Sequence[object]]) -> AsyncGenerator[FlowHandler[T]]:
-        buffer_writer, buffer_reader = MemoryStream.create(capacity)
+    async def _middleware(next_h: FlowHandler[Sequence[object]]):
+        buffer_writer, buffer_reader = MemoryStream[T].create(capacity)
+        buffer_batch_reader = BatchReceiver(buffer_reader,
+                                            batch_size, batch_window, items_f=items_f or (lambda x: x))
         stream_h = ensure_async_handler(next_h)
-        consumer = stream_batch_consumer(buffer_reader, stream_h, items_f, batch_size, batch_window, process_leftovers)
+        consumer = create_stream_consumer(buffer_batch_reader, stream_h,
+                                          concurrency=1,
+                                          process_leftovers=process_leftovers)
         async with consumer, buffer_writer:  # As usual, order matters
             if math.isinf(capacity) or full_mode == "drop":
-                yield next_h.create(async_h=buffer_writer.send_or_drop_async, sync_h=buffer_writer.send_or_drop)
+                yield buffer_writer.send_or_drop_async, buffer_writer.send_or_drop
             else:
-                yield FlowHandler.create_async(async_h=buffer_writer.send)
+                yield buffer_writer.send
 
     return _middleware
+
+
+def timeout(duration: float, /) -> HandlerDecorator[T, T]:
+    """ Async timeout middleware. """
+    @handler_middleware
+    async def middleware(next_h: FlowHandler[T]):
+        async def _handle_async(item: T):
+            with fail_after(duration):
+                await next_h.async_h(item)
+
+        yield _handle_async
+
+    return middleware
 
 
 def filter(  # noqa
@@ -210,7 +238,7 @@ def filter(  # noqa
             if sync_filter(item):
                 next_h.sync_h(item)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware
 
@@ -231,7 +259,7 @@ def map(  # noqa
             mapped = sync_mapper(item)
             next_h.sync_h(mapped)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware
 
@@ -254,6 +282,6 @@ def flatmap(
             for mapped_item in mapped:
                 next_h.sync_h(mapped_item)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware

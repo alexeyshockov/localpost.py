@@ -1,5 +1,6 @@
 from ._debug import debug
 from ._run import arun, run
+from ._utils import Result
 
 try:
     from .__meta__ import version as __version__  # noqa

@@ -6,6 +6,7 @@ import boto3
 import pytest
 from aiobotocore.session import get_session
 from testcontainers.localstack import LocalStackContainer
+from types_boto3_sqs.client import SQSClient
 
 from localpost import flow
 from localpost.consumers.sqs import SqsMessage, SqsMessages, sqs_queue_consumer
@@ -44,9 +45,10 @@ async def test_normal_case(local_sqs):
     # Arrange
 
     sent = ["hello", "world", "!"]
-    sqs_queue = boto3.resource("sqs", **local_sqs).create_queue(QueueName=queue_name)
+    sqs_client: SQSClient = boto3.client("sqs", **local_sqs)
+    sqs_queue = sqs_client.create_queue(QueueName=queue_name)
     for message in sent:
-        sqs_queue.send_message(MessageBody=message)
+        sqs_client.send_message(QueueUrl=sqs_queue["QueueUrl"], MessageBody=message)
 
     # Act
 
@@ -78,9 +80,10 @@ async def test_batching(local_sqs):
     # Arrange
 
     sent = ["hello", "world", "!"]
-    sqs_queue = boto3.resource("sqs", **local_sqs).create_queue(QueueName=queue_name)
+    sqs_client: SQSClient = boto3.client("sqs", **local_sqs)
+    sqs_queue = sqs_client.create_queue(QueueName=queue_name)
     for message in sent:
-        sqs_queue.send_message(MessageBody=message)
+        sqs_client.send_message(QueueUrl=sqs_queue["QueueUrl"], MessageBody=message)
 
     # Act
 

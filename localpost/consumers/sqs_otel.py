@@ -69,6 +69,6 @@ def trace(tp: TracerProvider | None = None, mp: MeterProvider | None = None, /) 
             with call_tracer(item):
                 next_h.sync_h(item)
 
-        yield next_h.create(async_h=_handle_async, sync_h=_handle_sync)
+        yield _handle_async, _handle_sync
 
     return middleware

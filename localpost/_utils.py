@@ -27,7 +27,7 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, WouldBlock, create_task_group, from_thread, to_thread
+from anyio import CancelScope, WouldBlock, create_task_group, from_thread, to_thread, CapacityLimiter
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, MemoryObjectStreamState
@@ -69,10 +69,22 @@ def start_task_soon(tg: TaskGroup, func: Callable[[], Awaitable[Any]], name: obj
     tg.start_soon(func, name=name)  # type: ignore
 
 
-def unwrap_exc(exc: Exception) -> Exception:
+def unwrap_exc(exc: BaseException) -> BaseException:
     if isinstance(exc, ExceptionGroup) and len(exc.exceptions) == 1:
         return unwrap_exc(exc.exceptions[0])
     return exc
+
+
+@dc.dataclass(frozen=True, slots=True)
+class AsyncContextManagerAdapter(Generic[T]):
+    source: AbstractContextManager[T]
+    limiter: CapacityLimiter = dc.field(default_factory=lambda: CapacityLimiter(1))
+
+    def __aenter__(self) -> T:
+        return to_thread.run_sync(self.source.__enter__, limiter=self.limiter)
+
+    def __aexit__(self, exc_type, exc_value, traceback):
+        return to_thread.run_sync(self.source.__exit__, exc_type, exc_value, traceback, limiter=self.limiter)
 
 
 class _SupportsClose(Protocol):
@@ -161,11 +173,15 @@ def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[
 
 
 def ensure_async_callable(
-    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
+    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T],
+    /,
+    *,
+    max_threads: int | float | CapacityLimiter | None = None,
 ) -> Callable[P, Awaitable[T]]:
     if is_async_callable(func):
         return func
-    return functools.partial(to_thread.run_sync, func)  # type: ignore[return-value]
+    limiter = CapacityLimiter(max_threads) if isinstance(max_threads, int | float) else max_threads
+    return functools.partial(to_thread.run_sync, func, limiter=limiter)  # type: ignore[return-value]
 
 
 def ensure_sync_callable(
@@ -344,10 +360,7 @@ class EventView(AnyEventView, Protocol):
 
 @dc.dataclass(frozen=True, slots=True)
 class Event(EventView):
-    _source: anyio.Event
-
-    def __init__(self) -> None:
-        object.__setattr__(self, "_source", anyio.Event())
+    _source: anyio.Event = dc.field(default_factory=anyio.Event)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(is_set={self._source.is_set()})"

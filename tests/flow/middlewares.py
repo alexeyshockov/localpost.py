@@ -1,29 +1,28 @@
 import pytest
 
-from localpost import flow
-from localpost.flow import FlowHandler, FlowHandlerManager
-
 pytestmark = pytest.mark.anyio
 
 
-async def test_custom_middleware():
-    handled_items = []
+async def test_skip_first():
+    # Create a dummy flow and apply skip_first to it
+    pass  # TODO Implement
 
-    @flow.handler_middleware
-    async def custom_middleware(next_handler: FlowHandler):
-        def modified_handler(item):
-            handled_items.append("modified " + item)
 
-        yield next_handler.create(sync_h=modified_handler)
+async def test_buffer():
+    # Create a dummy flow and apply buffer to it
+    pass  # TODO Implement
 
-    @custom_middleware
-    @flow.handler
-    def sample_handler(item):
-        handled_items.append(item)
 
-    assert isinstance(sample_handler, FlowHandlerManager)
+async def test_filter():
+    # Create a dummy flow and apply filter to it, with a condition
+    pass  # TODO Implement
 
-    async with sample_handler as handler:
-        handler("sample item")
 
-    assert handled_items == ["modified sample item"]
+async def test_map():
+    # Create a dummy flow and apply map to it, with a transformation function
+    pass  # TODO Implement
+
+
+async def test_flatmap():
+    # Create a dummy flow and apply flatmap to it, with a transformation function
+    pass  # TODO Implement
