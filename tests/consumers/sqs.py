@@ -39,7 +39,7 @@ def local_sqs():
         yield conn_params
 
 
-async def test_normal_case(local_sqs):
+async def test_happy_path(local_sqs):
     queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange
@@ -72,6 +72,11 @@ async def test_normal_case(local_sqs):
 
     assert host.status["exception"] is None
     assert received == sent
+
+
+async def test_handler_manager(local_sqs):
+    # Test handler lifecycle (via handler manager)
+    pass
 
 
 async def test_batching(local_sqs):

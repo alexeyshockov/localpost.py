@@ -4,10 +4,10 @@ import os
 from collections.abc import Callable, Iterable, Mapping, Sequence, Collection
 from contextlib import AbstractContextManager, AbstractAsyncContextManager, asynccontextmanager, AsyncExitStack
 from functools import partial
-from typing import Any, final, Final, TypeAlias
+from typing import Any, final, Final
 
 import confluent_kafka
-from anyio import from_thread, to_thread, create_task_group, CapacityLimiter
+from anyio import from_thread, to_thread, create_task_group, CapacityLimiter, CancelScope
 from confluent_kafka import TIMESTAMP_NOT_AVAILABLE
 
 from localpost._utils import EventView
@@ -50,12 +50,18 @@ class ConsumerClient:
 
 @final
 @dc.dataclass(frozen=True, eq=False, slots=True)
-class KafkaMessage(AbstractContextManager[bytes, None]):
+class KafkaMessage(Sequence["KafkaMessage"], AbstractContextManager[bytes, None]):
     payload: confluent_kafka.Message
     _client: ConsumerClient
 
     def __repr__(self):
         return f"{self.__class__.__name__}(topic={self.payload.topic()!r}"
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, _):
+        return self
 
     def __enter__(self) -> bytes:
         return self.value
@@ -133,25 +139,24 @@ class KafkaMessages(Sequence[KafkaMessage], AbstractContextManager[Sequence[byte
             message.ack()
 
 
-@dc.dataclass(frozen=True, eq=False, slots=True)
-class KafkaConsumerThread:
-    client: ConsumerClient
-    handler: SyncHandler[KafkaMessage]
-
-    def __call__(self, shutting_down: EventView) -> None:
-        while not shutting_down:
-            from_thread.check_cancelled()
-            poll_res = self.client.poll()
-            if poll_res is None:
+def _consume_sync(
+    client: ConsumerClient,
+    message_handler: SyncHandler[KafkaMessage],
+    shutdown_scope: CancelScope
+) -> None:
+    while not shutdown_scope.cancel_called:
+        from_thread.check_cancelled()
+        poll_res = client.poll()
+        if poll_res is None:
+            continue
+        if error := poll_res.error():
+            if error.retriable():
+                logger.warning("Kafka (non-fatal) error: [%s] %s", error.code(), error.str())
                 continue
-            if error := poll_res.error():
-                if error.retriable():
-                    logger.warning("Kafka (non-fatal) error: [%s] %s", error.code(), error.str())
-                    continue
-                if error.fatal():
-                    raise RuntimeError(error.str())
-            message = KafkaMessage(poll_res, self.client)
-            self.handler(message)
+            if error.fatal():
+                raise RuntimeError(error.str())
+        message = KafkaMessage(poll_res, client)
+        message_handler(message)
 
 
 @final
@@ -176,16 +181,21 @@ class KafkaConsumerService(ExposedServiceBase):
     async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
         assert self.num_consumers > 0
         self._lifetime = service_lifetime  # Expose service lifetime events
+
         threads_limiter = CapacityLimiter(self.num_consumers)
         run_thread = partial(to_thread.run_sync, limiter=threads_limiter)
-        clients = []
+
+        # Graceful shutdown scopes, one per consumer task (thread)
+        consumer_scopes = [CancelScope() for _ in range(self.num_consumers)]
         # Although Confluent Kafka's Consumer is thread-safe, it's not intended to be used concurrently:
         #  - by default, a message received from poll() is automatically acknowledged
         #  - OTEL instrumentation stores the current span in an object field, so concurrent calls to poll() will mess
         #    up the traces
+        clients = []
+
         async with AsyncExitStack() as client_stack, self.handler_m as handler:
             logger.debug("Creating Kafka clients (1 per consumer)...")
-            for _ in range(self.num_consumers):
+            for _ in consumer_scopes:
                 clients.append(await client_stack.enter_async_context(self.client_factory()))
             logger.debug("Subscribing Kafka clients to topics...")
             async with create_task_group() as tg:
@@ -196,12 +206,11 @@ class KafkaConsumerService(ExposedServiceBase):
             # Start pulling messages only after the whole app is started
             await service_lifetime.host.started
             async with create_task_group() as tg:
-                for c in clients:
-                    tg.start_soon(
-                        run_thread,
-                        KafkaConsumerThread(c, message_handler), service_lifetime.shutting_down
-                    )
-                # Consumer threads will complete on shutdown
+                for c, cs in zip(clients, consumer_scopes):
+                    tg.start_soon(run_thread,_consume_sync, c, message_handler, cs)
+                await service_lifetime.shutting_down
+                for cs in consumer_scopes:
+                    cs.cancel()
 
 
 @dc.dataclass(frozen=True, slots=True)
@@ -250,7 +259,7 @@ def kafka_consumer(
     return lambda handler_m: KafkaConsumerService(
         ClientFactory(
             kafka_config_from_env(**(client_config or {})),
-            [topics] if isinstance(topics, str) else topics
+            [topics] if isinstance(topics, str) else list(topics)
         ),
         handler_m,
         consumers=consumers,

@@ -93,5 +93,14 @@ TBD, including:
 - FastAPI-like
   - decorators to create scheduled tasks & hosted services
   - middlewares
-- Async first
-  - AnyIO backed (mainly for structured concurrency, compatibility with Trio as a bonus)
+- async first
+  - AnyIO backed
+    - structured concurrency
+    - compatibility with Trio as a bonus
+    - easy threading (to support both sync and async consumers)
+
+
+## Git Branch Policy
+
+The **only** stable branch is `master`.  There will *never* be a `git push -f` on master. On the other hand, all other 
+branches are not considered stable; they may be deleted, rebased, force-pushed, and any other manner of funky business.

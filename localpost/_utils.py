@@ -80,7 +80,7 @@ class AsyncContextManagerAdapter(Generic[T]):
     source: AbstractContextManager[T]
     limiter: CapacityLimiter = dc.field(default_factory=lambda: CapacityLimiter(1))
 
-    def __aenter__(self) -> T:
+    def __aenter__(self) -> Awaitable[T]:
         return to_thread.run_sync(self.source.__enter__, limiter=self.limiter)
 
     def __aexit__(self, exc_type, exc_value, traceback):

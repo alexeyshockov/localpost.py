@@ -26,7 +26,7 @@ async def create_stream_consumer(
     h: AsyncHandler[T],
     /,
     *,
-    concurrency: int = 1,
+    concurrency: int | float = 1,
     process_leftovers: bool = True,  # FIXME Remove
 ):
     if math.isinf(concurrency):

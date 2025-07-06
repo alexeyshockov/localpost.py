@@ -235,12 +235,6 @@ class ServiceLifetimeManager(Protocol):
         name: str | None = None,
     ) -> ServiceLifetime: ...
 
-    @asynccontextmanager
-    async def run_services(self, targets: Iterable[ServiceFunc], /) -> AsyncGenerator[ServiceLifetime]: ...
-
-    @asynccontextmanager
-    async def run_service(self, target: ServiceFunc, /) -> AsyncGenerator[ServiceLifetime]: ...
-
 # Everything that can be used as a hosted service, see HostedService.create()
 ServiceFunc: TypeAlias = Union[
     Callable[..., Awaitable[None]],
@@ -414,19 +408,6 @@ class _ServiceLifetime:
             return svc_lifetime
 
         return in_host_thread(self.host, start_service)
-
-    @asynccontextmanager
-    async def run_services(self, targets: Iterable[ServiceFunc]):
-        services = [HostedService.create(s) for s in targets]
-        service_lifetimes = [_ServiceLifetime(s.name, self.host, self.tg) for s in services]
-        async with create_task_group() as tg:
-            for s, sl in zip(services, service_lifetimes):
-                tg.start_soon(_run_service, sl, s, (), True, name=s.name)
-            await wait_all(sl.started for sl in service_lifetimes)
-            yield service_lifetimes
-            for sl in service_lifetimes:
-                sl.shutdown()
-
 
 
 async def _run_service(
