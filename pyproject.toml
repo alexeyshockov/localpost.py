@@ -47,12 +47,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-http = [  # Hosting service
-    "uvicorn ~=0.30",
-]
-grpc = [  # Hosting service
-    "grpcio ~=1.68",
-]
 cron = [
     "croniter >=2.0,<4.0",
 ]
@@ -62,13 +56,13 @@ scheduler = [  # TODO Better name
     "pytimeparse2 ~=1.6",
 ]
 sqs = [
-    "aiobotocore ~=2.15",
-    "botocore ~=1.37",
-#    "aws-lambda-powertools",  # To migrate from Lambda
+    "botocore ~=1.38",  # Sync SQS client (default)
+#    "boto3 ~=1.38",  # In case boto3 is available, the default session will be used
+#    "aiobotocore",  # Async SQS client
+#    "aioboto3 >=14.1",  # In case aioboto3 is available, the default session will be used
 ]
 kafka = [
     "confluent-kafka ~=2.4",
-#    "confluent-kafka[schemaregistry,protobuf] ~=2.4",
 ]
 nats = [
     "nats-py ~=2.8",
@@ -80,9 +74,12 @@ rabbitmq = [
 pubsub = [
     "google-cloud-pubsub ~=2.28",
 ]
-azure = [
+azure-queue = [
     "azure-identity",
     "azure-storage-queue ~=12.8",
+]
+azure-servicebus = [
+    "azure-identity",
     "azure-servicebus ~=7.10",
 ]
 
@@ -93,35 +90,47 @@ dev = [
     "icecream ~=2.1",
     "structlog ~=25.0",
 ]
+dev-hosting-http = [
+    "uvicorn ~=0.30",
+    "hypercorn ~=0.17",
+]
+dev-hosting-grpc = [
+    "grpcio ~=1.68",
+]
 dev-consumers = [
-    "aws-lambda-powertools",
+    "boto3 ~=1.38",
+    "aws-lambda-powertools ~=3.10",
+    "aiobotocore ~=2.21",
+    "aioboto3 >=14.1",
     "confluent-kafka[schemaregistry,protobuf]",
     "grpcio-tools ~=1.68",
 ]
 dev-otel = [
     "opentelemetry-exporter-otlp",  # Both gRPC and HTTP
     "opentelemetry-instrumentation-confluent-kafka >=0.50b0",
-    "opentelemetry-instrumentation-aiokafka >=0.50b0",
+#    "opentelemetry-instrumentation-aiokafka >=0.50b0",
     "opentelemetry-instrumentation-botocore >=0.50b0",
-    "protobuf ~=5.0",  # See https://github.com/open-telemetry/opentelemetry-python/issues/4639#issuecomment-2997003823
+    "protobuf ~=6.29",  # See https://github.com/open-telemetry/opentelemetry-python/issues/4639#issuecomment-2997003823
 ]
 dev-types = [
     "types-croniter",
 #    "types-confluent-kafka",  # Many signatures do not match to the actual implementation
-#    "types-protobuf",
-#    "grpc-stubs",  # Hasn't been updated for 2+ years...
-    "types-boto3-lite[sqs] ~=1.37",
-    "types-aiobotocore[sqs] ~=2.15",
+    "types-protobuf ~=6.29",  # Must be in sync with protobuf version, see above
+    "types-grpcio",  # Replaces grpc-stubs, see: https://github.com/python/typeshed/pull/11204
+    "types-boto3-lite[sqs] ~=1.38",
+    "types-aiobotocore-lite[sqs] ~=2.21",
+    "types-aioboto3-lite[sqs] >=14.1",
 ]
 examples = [
     "fast-depends ~=2.4",
     "fastapi-slim ~=0.111",
-    'psycopg[binary,pool] ~=3.2',
+    "psycopg[binary,pool] ~=3.2",
 ]
 tests = [
     "pytest ~=8.1",
     "anyio[test]",
     "pytest-xdist",
+    "setproctitle",  # For pytest-xdist, to have descriptive process names
 ]
 unit-tests = [
     "pytest-mock ~=3.14",
@@ -148,6 +157,8 @@ line-length = 120
 format.docstring-code-format = true
 
 [tool.ruff.lint]
+pyupgrade.keep-runtime-typing = true
+pydocstyle.convention = "google"
 # For the reference, check https://docs.astral.sh/ruff/rules/
 select = [
     "F",  # pyflakes
@@ -192,10 +203,16 @@ select = [
 ]
 
 ignore = [
+    "ASYNC109",  # Async function definition with a `timeout` parameter
+    "RUF022",  # `__all__` is not sorted
+    "PGH003", "PGH004",  # Use specific rule codes when ignoring type issues
+    "RUF005",
+    "PERF203",  # Enforced for Python versions prior to 3.11, which introduced "zero-cost" exception handling
+    "TID252",  # Prefer absolute imports over relative imports from parent modules
     "S101",  # Use of `assert` detected
     "S311",  # Standard pseudo-random generators are not suitable for cryptographic purposes
     "B011",  # Do not `assert False`
-    "SIM108",  # Use ternary operator
+    "SIM105",  # Use `contextlib.suppress(GeneratorExit)` instead of `try`-`except`-`pass`
     # TODO Remove when we drop support for Python <=3.10
     "SIM117",  # Use a single `with` statement with multiple contexts
     "PLR0913",  # Too many arguments in function definition
@@ -208,14 +225,6 @@ ignore = [
     "TRY400",  # Use `logging.exception` instead of `logging.error`
     "RUF012",  # Mutable class attributes should be annotated with `typing.ClassVar`
 ]
-
-pyupgrade.keep-runtime-typing = true
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.format]
-docstring-code-format = true
 
 [tool.pdm]
 distribution = true

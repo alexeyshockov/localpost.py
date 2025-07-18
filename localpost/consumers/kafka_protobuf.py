@@ -7,7 +7,8 @@ Mainly to show the approach on how to create a custom deserializer. Not intended
 from __future__ import annotations
 
 import warnings
-from typing import Callable, ParamSpec, TypeAlias, TypeVar
+from collections.abc import Callable
+from typing import ParamSpec, TypeAlias, TypeVar
 
 from confluent_kafka.schema_registry.protobuf import ProtobufDeserializer
 from confluent_kafka.serialization import MessageField, SerializationContext

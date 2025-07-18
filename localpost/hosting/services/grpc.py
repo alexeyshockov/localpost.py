@@ -4,7 +4,7 @@ import grpc
 
 from localpost._utils import wait_any
 
-from ._host import ServiceLifetimeManager
+from .._host import ServiceLifetimeManager
 
 
 @final

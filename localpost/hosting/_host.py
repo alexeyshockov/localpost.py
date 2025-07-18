@@ -15,6 +15,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Concatenate,
     Final,
     Literal,
     ParamSpec,
@@ -22,7 +23,6 @@ from typing import (
     TypeAlias,
     TypedDict,
     TypeVar,
-    Union,
     cast,
     final,
     overload,
@@ -37,9 +37,9 @@ from anyio import (
 )
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
-from typing_extensions import Concatenate, Self
+from typing_extensions import Self
 
-from localpost._debug import debug
+from localpost._debug import DebugState, debug
 from localpost._utils import (
     NO_OP_TS,
     Event,
@@ -98,8 +98,8 @@ class Stopped:
     exception: BaseException | None = None
 
 
-ServiceState = Union[Starting, Running, ShuttingDown, Stopped]
-HostState = Union[Created, Starting, Running, ShuttingDown, Stopped]
+ServiceState = Starting | Running | ShuttingDown | Stopped
+HostState = Created | Starting | Running | ShuttingDown | Stopped
 
 
 # Just a dict, ready for (JSON) serialization
@@ -223,23 +223,9 @@ class ServiceLifetimeManager(Protocol):
         name: str | None = None,
     ) -> ServiceLifetime: ...
 
-    # 1. PyCharm (at least 2024.03) has a bug when calling a TypeVarTuple-parameterized function with 0 arguments (see
-    # https://youtrack.jetbrains.com/issue/PY-63820),
-    # 2. mypy (at least 1.15.0) does not like overloads ("error: Incompatible return value type ...  [return-value]"),
-    # So just skip complex typing here, for now
-    def start_child_service(  # type: ignore[misc]
-        self,
-        func: ServiceFunc,
-        /,
-        *func_args,
-        name: str | None = None,
-    ) -> ServiceLifetime: ...
 
 # Everything that can be used as a hosted service, see HostedService.create()
-ServiceFunc: TypeAlias = Union[
-    Callable[..., Awaitable[None]],
-    Callable[..., None],
-]
+ServiceFunc: TypeAlias = Callable[..., Awaitable[None]] | Callable[..., None]
 
 if TYPE_CHECKING:
     HostedServiceFunc: TypeAlias = Callable[Concatenate[ServiceLifetimeManager, ...], Awaitable[None]]
@@ -411,13 +397,13 @@ class _ServiceLifetime:
 
 
 async def _run_service(
-    svc_lifetime: _ServiceLifetime, svc_func, func_args: Iterable[Any], raise_on_error: bool
+    svc_lifetime: _ServiceLifetime, svc_func, svc_func_args: Iterable[Any], raise_on_error: bool | DebugState
 ) -> None:
     svc_name = svc_lifetime.name
     logger.debug(f"Starting {svc_name}...")
     try:
         async with svc_lifetime.tg:  # Used for the service itself and its child services
-            await svc_func(svc_lifetime, *func_args)
+            await svc_func(svc_lifetime, *svc_func_args)
             svc_lifetime.set_shutting_down()
             for child in svc_lifetime.child_services:
                 child.shutdown()
@@ -513,7 +499,7 @@ class HostedService:  # Also a HostedServiceFunc, see __call__() below
             del attrs["name"]
         source, attrs = self._unwrap(s, attrs)
         if not callable(source):
-            raise ValueError(f"Invalid service source: {source}")
+            raise TypeError(f"Invalid service source: {source}")
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "_attrs", attrs)
 
@@ -859,7 +845,7 @@ class AbstractHost(ExposedServiceBase, abc.ABC):
     @asynccontextmanager
     async def _aserve_in(self, portal: BlockingPortal, exec_tg: TaskGroup | None = None):
         # A premature optimization, to save one task group nesting level
-        tg: TaskGroup = exec_tg if exec_tg else portal._task_group  # noqa
+        tg: TaskGroup = exec_tg if exec_tg else portal._task_group
         self._lifetime = sl = _ServiceLifetime(self.name, self, tg)
         self._exec_context = _HostExecContext(sl, portal, threading.get_ident(), sl.tg.cancel_scope)
         tg.start_soon(_run_service, sl, self._prepare_for_run(), (), debug)

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from typing import TypeVar
 
 from opentelemetry.metrics import MeterProvider, get_meter_provider
-from opentelemetry.semconv._incubating.metrics.messaging_metrics import (  # noqa
+from opentelemetry.semconv._incubating.metrics.messaging_metrics import (
     create_messaging_client_consumed_messages,
     create_messaging_client_operation_duration,
 )
@@ -18,7 +18,6 @@ from localpost.consumers.kafka import KafkaMessage
 from localpost.flow import FlowHandler, HandlerDecorator, handler_middleware
 
 T = TypeVar("T", KafkaMessage, Sequence[KafkaMessage])
-R = TypeVar("R", Awaitable[None], None)
 
 __all__ = ["trace"]
 
@@ -37,20 +36,26 @@ def create_message_tracer(
     messages_consumed = create_messaging_client_consumed_messages(meter)
 
     @contextmanager
-    def call_tracer(message: KafkaMessage | Sequence[KafkaMessage]):
-        is_batch = isinstance(message, KafkaMessage)
-        topic = message.payload.topic() if isinstance(message, KafkaMessage) else message[0].payload.topic()
+    def call_tracer(messages: Sequence[KafkaMessage]):
+        assert len(messages) > 0, "Message batch must not be empty"
+        is_batch = isinstance(messages, KafkaMessage)
+        message = messages[0]
+        topic = message.payload.topic()
+        # https://opentelemetry.io/docs/specs/semconv/messaging/kafka/#apache-kafka-with-quarkus-or-spring-boot-example
         attrs: dict[str, AttributeValue] = {
-            "messaging.operation.type": "process",
             "messaging.system": "kafka",
+            "messaging.operation.name": "process",
+            "messaging.operation.type": "process",
             "messaging.destination.name": topic,
+            "messaging.consumer.group.name": message._client.config.get("group.id", "unknown"),
         }
         if is_batch:
-            attrs["messaging.batch.message_count"] = len(message)
+            attrs["messaging.batch.message_count"] = len(messages)
         else:
-            attrs["messaging.kafka.partition"] = (message.payload.partition(),)
+            attrs["messaging.kafka.offset"] = message.payload.offset()
+            attrs["messaging.kafka.partition"] = message.payload.partition()
 
-        messages_consumed.add(len(message) if is_batch else 1, attrs)
+        messages_consumed.add(len(messages), attrs)
         with tracer.start_as_current_span(f"process {topic}", kind=SpanKind.CONSUMER, attributes=attrs):
             with rec_duration(m_process_duration, attrs):
                 yield

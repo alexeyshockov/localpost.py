@@ -4,13 +4,17 @@ default:
     just --list
 
 deps:
-    uv sync --all-groups --all-extras
+    pdm install --group :all
+#    uv sync --all-groups --all-extras
 
 deps-upgrade:
-    uv sync --all-groups --all-extras --upgrade
+    pdm lock --group :all -v
+    pdm sync --group :all --clean
+#    uv sync --all-groups --all-extras --upgrade
 
 [doc("Check types (using both PyRight and MyPy)")]
 types:
+    -ty check localpost
     -pyright --pythonpath $(which python) \
       localpost
     -mypy --pretty --strict-bytes --python-executable $(which python) \
@@ -37,8 +41,8 @@ type-coverage:
     pyright --pythonpath $(which python) --verifytypes localpost localpost/*
 
 format:
-    ruff check --fix localpost
     ruff format localpost
+    ruff check --fix localpost
 
 format-all: format
     ruff check --fix examples tests

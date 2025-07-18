@@ -6,12 +6,13 @@ import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, Union, cast, final
+from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, to_thread
+from anyio import BrokenResourceError, WouldBlock, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
+    MemoryStream,
     Result,
     def_full_name,
     is_async_callable,
@@ -31,12 +32,7 @@ T2 = TypeVar("T2")
 R = TypeVar("R")
 DecF = TypeVar("DecF", bound=Callable[..., Any])
 
-TaskHandler: TypeAlias = Union[
-    Callable[[T], Awaitable[R]],
-    Callable[[], Awaitable[R]],
-    Callable[[T], R],
-    Callable[[], R],
-]
+TaskHandler: TypeAlias = Callable[[T], Awaitable[R]] | Callable[[], Awaitable[R]] | Callable[[T], R] | Callable[[], R]
 
 logger = logging.getLogger("localpost.scheduler")
 
@@ -74,7 +70,7 @@ class Task(
         # there is a free reader. We do not want to block the task execution flow in any way, so:
         #  - the buffer is unbounded by default
         #  - if the buffer is full, the result is dropped (see publish method below)
-        send_stream, receive_stream = create_memory_object_stream[Result[R]](buffer_max_size)
+        send_stream, receive_stream = MemoryStream[Result[R]].create(buffer_max_size)
         self._subscribers.append(self._cm.enter_context(send_stream))
         return receive_stream
 
@@ -130,7 +126,7 @@ class ScheduledTaskTemplate(Generic[T]):
         return self.tf(*args, **kwargs)
 
     def __truediv__(self, middleware: TriggerFactoryMiddleware[T, T2]) -> ScheduledTaskTemplate[T2]:
-        from ._trigger import trigger_factory_middleware
+        from ._trigger import trigger_factory_middleware  # noqa: PLC0415
 
         return self // trigger_factory_middleware(middleware)
 

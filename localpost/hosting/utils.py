@@ -1,5 +1,5 @@
 import dataclasses as dc
-from typing import TypeVar, final, Protocol
+from typing import Protocol, TypeVar, final
 
 from anyio.streams.memory import MemoryObjectSendStream
 
@@ -7,7 +7,7 @@ from localpost.hosting import AbstractHost
 
 T = TypeVar("T", contravariant=True)
 
-__all__ = ["ThreadSafeSendStream", "ThreadSafeMemorySendStream"]
+__all__ = ["ThreadSafeMemorySendStream", "ThreadSafeSendStream"]
 
 
 class ThreadSafeSendStream(Protocol[T]):

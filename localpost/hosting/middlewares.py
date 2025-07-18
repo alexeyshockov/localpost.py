@@ -9,8 +9,8 @@ from localpost.hosting._host import HostedService, HostedServiceDecorator, Hoste
 
 __all__ = [
     "lifespan",
-    "start_timeout",
     "shutdown_timeout",
+    "start_timeout",
 ]
 
 

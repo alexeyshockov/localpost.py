@@ -4,24 +4,14 @@ import string
 import anyio
 import boto3
 import pytest
-from aiobotocore.session import get_session
 from testcontainers.localstack import LocalStackContainer
 from types_boto3_sqs.client import SQSClient
 
-from localpost import flow
-from localpost.consumers.sqs import SqsMessage, SqsMessages, sqs_queue_consumer
+from localpost import flow, debug
+from localpost.consumers.sqs import SqsMessage, SqsMessages, sqs_queue_consumer, ConsumerClient
 from localpost.hosting import Host
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
-
-
-# See https://anyio.readthedocs.io/en/stable/testing.html#specifying-the-backends-to-run-on
-@pytest.fixture
-def anyio_backend():
-    """
-    SQS consumer uses aioboto3 which is asyncio only.
-    """
-    return "asyncio"
 
 
 @pytest.fixture(scope="module")
@@ -46,32 +36,40 @@ async def test_happy_path(local_sqs):
 
     sent = ["hello", "world", "!"]
     sqs_client: SQSClient = boto3.client("sqs", **local_sqs)
-    sqs_queue = sqs_client.create_queue(QueueName=queue_name)
+    queue_url = sqs_client.create_queue(
+        QueueName=queue_name, Attributes={"VisibilityTimeout": "1"}
+    )["QueueUrl"]
     for message in sent:
-        sqs_client.send_message(QueueUrl=sqs_queue["QueueUrl"], MessageBody=message)
+        sqs_client.send_message(QueueUrl=queue_url, MessageBody=message)
 
     # Act
 
     received = []
 
-    def create_client():
-        return get_session().create_client("sqs", **local_sqs)
-
-    @sqs_queue_consumer(queue_name, create_client)
+    @sqs_queue_consumer(lambda: ConsumerClient.create(queue_url, sqs_client))
     @flow.handler
     async def handle(m: SqsMessage):
         nonlocal received
-        received += [m.body]
+        with m as m_body:
+            received += [m_body]
 
     host = Host(handle)
-    async with host.aserve():
+    async with debug, host.aserve():
         await anyio.sleep(3)  # "App is working"
         host.shutdown()
 
     # Assert
 
+    # TODO Check messages are deleted from the queue
+    # (https://stackoverflow.com/questions/25351145/get-number-of-messages-in-an-amazon-sqs-queue)
     assert host.status["exception"] is None
     assert received == sent
+
+    queue_info = sqs_client.get_queue_attributes(
+        QueueUrl=queue_url,
+        AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"])
+    assert int(queue_info["Attributes"]["ApproximateNumberOfMessages"]) == 0
+    assert int(queue_info["Attributes"]["ApproximateNumberOfMessagesNotVisible"]) == 0
 
 
 async def test_handler_manager(local_sqs):
@@ -86,26 +84,26 @@ async def test_batching(local_sqs):
 
     sent = ["hello", "world", "!"]
     sqs_client: SQSClient = boto3.client("sqs", **local_sqs)
-    sqs_queue = sqs_client.create_queue(QueueName=queue_name)
+    queue_url = sqs_client.create_queue(
+        QueueName=queue_name, Attributes={"VisibilityTimeout": "2"}  # Should be greater than the batch window
+    )["QueueUrl"]
     for message in sent:
-        sqs_client.send_message(QueueUrl=sqs_queue["QueueUrl"], MessageBody=message)
+        sqs_client.send_message(QueueUrl=queue_url, MessageBody=message)
 
     # Act
 
     received = []
 
-    def create_client():
-        return get_session().create_client("sqs", **local_sqs)
-
-    @sqs_queue_consumer(queue_name, create_client)
+    @sqs_queue_consumer(lambda: ConsumerClient.create(queue_url, sqs_client))
     @flow.batch(10, 1, SqsMessages)
     @flow.handler
     async def handle(messages: SqsMessages):
         nonlocal received
-        received += [[m.body for m in messages]]
+        with messages:
+            received += [[m.body for m in messages]]
 
     host = Host(handle)
-    async with host.aserve():
+    async with debug, host.aserve():
         await anyio.sleep(3)  # "App is working"
         host.shutdown()
 
@@ -113,3 +111,9 @@ async def test_batching(local_sqs):
 
     assert host.status["exception"] is None
     assert received == [sent]
+
+    queue_info = sqs_client.get_queue_attributes(
+        QueueUrl=queue_url,
+        AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"])
+    assert int(queue_info["Attributes"]["ApproximateNumberOfMessages"]) == 0
+    assert int(queue_info["Attributes"]["ApproximateNumberOfMessagesNotVisible"]) == 0

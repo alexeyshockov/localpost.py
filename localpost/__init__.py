@@ -1,12 +1,18 @@
+import logging
+
 from ._debug import debug
 from ._run import arun, run
 from ._utils import Result
 
-
 try:
-    from .__meta__ import version as __version__  # noqa
+    from .__meta__ import version as __version__
 except ImportError:
     __version__ = "dev"
 
 
-__all__ = ["__version__", "arun", "run", "debug", "Result"]
+__all__ = ["Result", "__version__", "arun", "debug", "run"]
+
+
+# Set up logging according to the best practices:
+# https://docs.python.org/3/howto/logging.html#configuring-logging-for-a-library
+logging.getLogger("boto3").addHandler(logging.NullHandler())

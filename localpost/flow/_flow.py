@@ -44,7 +44,9 @@ AnyHandlerManager: TypeAlias = AbstractAsyncContextManager[
 
 HandlerMiddleware: TypeAlias = Callable[
     ["FlowHandler[T]"],  # Next handler, as FlowHandler[T]
-    AsyncGenerator[Callable[[T2], Awaitable[None] | None]],  # FlowHandler[T2] or a handler func
+    AsyncGenerator[
+        Callable[[T2], Awaitable[None] | None] | tuple[Callable[[T2], Awaitable[None]], Callable[[T2], None]], None
+    ],  # FlowHandler[T2] or a handler func
 ]
 _HandlerMiddleware: TypeAlias = Callable[
     ["FlowHandler[T]"],  # Next handler, as FlowHandler[T]
@@ -76,7 +78,8 @@ def handler(func: AnyHandler[T]) -> FlowHandlerManager[T]:
     Wrap a function, so it can be used as a flow handler.
     """
     assert callable(func)
-    assert not inspect.isgeneratorfunction(func) and not inspect.isasyncgenfunction(func)
+    assert not inspect.isgeneratorfunction(func)
+    assert not inspect.isasyncgenfunction(func)
     return FlowHandlerManager(lambda: nullcontext(FlowHandler.ensure(func)))
 
 
@@ -102,7 +105,10 @@ def _ensure_handler_manager_factory(
 
 
 def ensure_async_handler(
-    h: AnyHandler[T], /, *, max_threads: int | float | CapacityLimiter | None = None,
+    h: AnyHandler[T],
+    /,
+    *,
+    max_threads: int | float | CapacityLimiter | None = None,
 ) -> AsyncHandler[T]:
     if isinstance(h, FlowHandler):
         handle_async = h.async_h if h.is_async else ensure_async_callable(h.sync_h, max_threads=max_threads)
@@ -154,7 +160,8 @@ def _handler_middleware(m: HandlerMiddleware[T, T2]) -> _HandlerMiddleware[T, T2
     @asynccontextmanager
     async def _handler_manager(next_h: FlowHandler[T]):
         async with source(next_h) as h:
-            if isinstance(h, tuple) and len(h) == 2:
+            if isinstance(h, tuple):
+                assert len(h) == 2
                 async_h, sync_h = h  # If the handler is a tuple, it should be (async_h, sync_h)
                 yield next_h.create(async_h=async_h, sync_h=sync_h)
             else:

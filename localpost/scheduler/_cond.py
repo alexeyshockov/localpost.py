@@ -21,12 +21,12 @@ from localpost._utils import (
     ClosingContext,
     EventView,
     MemoryStream,
+    Result,
     cancellable_from,
     ensure_td,
     sleep,
     start_task_soon,
     td_str,
-    Result
 )
 
 from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Task, Trigger

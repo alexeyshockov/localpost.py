@@ -6,10 +6,9 @@ import anyio
 import pytest
 from confluent_kafka import Producer
 
-from localpost import flow
+from localpost import flow, debug
 from localpost.consumers.kafka import KafkaMessage, KafkaMessages, kafka_consumer
 from localpost.hosting import Host
-
 from .RedpandaContainer import RedpandaContainer
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -32,7 +31,7 @@ async def test_normal_case(local_kafka):
     # Arrange
 
     sent = ["London: cloudy", "Paris: rainy"]
-    p = Producer(local_kafka, logger=logger)
+    p = Producer(local_kafka)
     for message in sent:  # Redpanda creates a topic automatically if it doesn't exist
         p.produce(topic_name, message)
     p.flush()
@@ -45,13 +44,13 @@ async def test_normal_case(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_consumer(topic_name, client_config)
+    @kafka_consumer(topic_name, **client_config)
     @flow.handler
     def handle(m: KafkaMessage) -> None:
         received.append(m.value.decode())
 
     host = Host(handle)
-    async with host.aserve():
+    async with debug, host.aserve():
         await anyio.sleep(3)  # "App is working"
         host.shutdown()
 
@@ -67,7 +66,7 @@ async def test_batching(local_kafka):
     # Arrange
 
     sent = ["London: cloudy", "Paris: rainy"]
-    p = Producer(local_kafka, logger=logger)
+    p = Producer(local_kafka)
     for message in sent:
         p.produce(topic_name, message)
     p.flush()
@@ -80,7 +79,7 @@ async def test_batching(local_kafka):
         "auto.offset.reset": "earliest",
     }
 
-    @kafka_consumer(topic_name, client_config)
+    @kafka_consumer(topic_name, **client_config)
     @flow.batch(10, 1, KafkaMessages)
     @flow.handler
     async def handle(messages: KafkaMessages):
@@ -88,7 +87,7 @@ async def test_batching(local_kafka):
         received += [[m.value.decode() for m in messages]]
 
     host = Host(handle)
-    async with host.aserve():
+    async with debug, host.aserve():
         await anyio.sleep(3)  # "App is working"
         host.shutdown()
 

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from os import getenv
-from typing import Any, Callable, cast, final
+from typing import Any, cast, final
 
 import uvicorn
 from anyio import create_task_group
@@ -7,7 +10,7 @@ from typing_extensions import Self
 
 from localpost._utils import start_task_soon
 
-from ._host import ServiceLifetimeManager
+from .._host import ServiceLifetimeManager
 
 
 # Also see /health endpoint in http_app.py example
@@ -31,7 +34,7 @@ class UvicornService:
     # It is hard to use server.serve() directly, because it overrides the signal handlers. A possible workaround is
     # to call it in a separate thread, but currently it looks like an overkill.
     # See uvicorn.Server._serve() for the original implementation.
-    async def __call__(self, service_lifetime: ServiceLifetimeManager):
+    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
         config = self.config
         server = uvicorn.Server(config)
 

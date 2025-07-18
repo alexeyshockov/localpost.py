@@ -20,21 +20,21 @@ from typing import (
     Protocol,
     TypeAlias,
     TypedDict,
-    Union,
+    TypeGuard,
     cast,
     final,
     overload,
 )
 
 import anyio
-from anyio import CancelScope, WouldBlock, create_task_group, from_thread, to_thread, CapacityLimiter
+from anyio import CancelScope, CapacityLimiter, WouldBlock, create_task_group, from_thread, to_thread
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, MemoryObjectStreamState
-from typing_extensions import NotRequired, Self, TypeGuard, TypeVar
+from typing_extensions import NotRequired, Self, TypeVar
 
 if sys.version_info >= (3, 11):
-    from builtins import ExceptionGroup  # noqa
+    from builtins import ExceptionGroup
 else:
     from exceptiongroup import ExceptionGroup
 
@@ -117,6 +117,14 @@ class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncC
             cast(_SupportsClose, t).close()
 
 
+def ensure_int_or_inf(value: int | float, *, min_value: int = 0, name: str = "Value") -> int | float:
+    if math.isinf(value):
+        return value
+    if isinstance(value, int) and value >= min_value:
+        return value
+    raise ValueError(f"{name} must be an integer (>={min_value}) or infinity, got {value!r}")
+
+
 @final
 # Actually immutable, but frozen=True has noticeable performance impact
 @dc.dataclass(slots=True, eq=True, unsafe_hash=True)
@@ -142,7 +150,7 @@ def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
         desc = typing.get_type_hints(func, globalns=getattr(func, "__globals__", None))
     except (TypeError, NameError):
         try:
-            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, "__globals__", None))
+            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, "__globals__", None))  # type: ignore[operator]
         except (TypeError, NameError, AttributeError):
             return type(None)
 
@@ -208,7 +216,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
         return value
     if isinstance(value, str):
         try:
-            import pytimeparse2
+            import pytimeparse2  # noqa: PLC0415
 
             use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
             try:
@@ -227,7 +235,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
 
 def td_str(td: timedelta, /) -> str:
     try:
-        from humanize import precisedelta
+        from humanize import precisedelta  # noqa: PLC0415
 
         # 23 seconds or 0.24 seconds
         return precisedelta(td)
@@ -237,9 +245,7 @@ def td_str(td: timedelta, /) -> str:
 
 
 # TODO Rename to DurationFactory
-DelayFactory: TypeAlias = Union[
-    Callable[[], timedelta], tuple[int, int], tuple[float, float], int, float, timedelta, None
-]
+DelayFactory: TypeAlias = Callable[[], timedelta] | tuple[int | float, int | float] | int | float | timedelta | None
 
 
 @final
@@ -265,7 +271,7 @@ class FixedDelay:
     def create(cls, value: int | float | timedelta | None) -> Self:
         if value is None or value == 0:
             delay = TD_ZERO
-        elif isinstance(value, (int, float)):
+        elif isinstance(value, int | float):
             delay = timedelta(seconds=value)
         elif isinstance(value, timedelta):
             delay = value
@@ -300,13 +306,10 @@ def sleep(i: timedelta | int | float | None, /) -> Coroutine[Any, Any, None]:
 @final
 @dc.dataclass(eq=False)
 class MemorySendStream(Generic[T], MemoryObjectSendStream[T]):
-    def send_or_drop(self, item: T) -> None:
-        try:
-            self.send_nowait(item)
-        except WouldBlock:
-            pass
+    def send_or_drop_from_thread(self, item: T) -> None:
+        from_thread.run(self.send_or_drop, item)
 
-    async def send_or_drop_async(self, item: T) -> None:
+    async def send_or_drop(self, item: T) -> None:
         await checkpoint()
         try:
             self.send_nowait(item)
@@ -322,7 +325,7 @@ class MemoryStream(Generic[T]):
         if max_buffer_size < 0:
             raise ValueError("max_buffer_size cannot be negative")
 
-        state = MemoryObjectStreamState[T](max_buffer_size)
+        state: MemoryObjectStreamState[T] = MemoryObjectStreamState(max_buffer_size)
         return MemorySendStream(state), MemoryObjectReceiveStream(state)
 
 
@@ -426,6 +429,10 @@ async def wait_all(events: Iterable[EventView]) -> None:
 
 
 async def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> None:
-    async with create_task_group() as tg:
-        for t in targets:
-            tg.start_soon(_cancel_when, t, tg.cancel_scope)
+    try:
+        async with create_task_group() as tg:
+            for t in targets:
+                tg.start_soon(_cancel_when, t, tg.cancel_scope)
+    except ExceptionGroup as exc_group:
+        exc = unwrap_exc(exc_group)
+        raise exc from exc.__cause__

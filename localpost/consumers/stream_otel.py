@@ -1,30 +1,28 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Callable, Collection
 from contextlib import AbstractContextManager, contextmanager
-from typing import Any
+from typing import TypeVar
 
 from opentelemetry.metrics import MeterProvider, get_meter_provider
-from opentelemetry.semconv._incubating.metrics.messaging_metrics import (  # noqa
+from opentelemetry.semconv._incubating.metrics.messaging_metrics import (
     create_messaging_client_consumed_messages,
     create_messaging_client_operation_duration,
 )
 from opentelemetry.trace import SpanKind, TracerProvider, get_tracer_provider
 from opentelemetry.util.types import AttributeValue
-from typing_extensions import TypeVar
 
 from localpost import __version__
 from localpost._otel_utils import rec_duration
 from localpost.flow import FlowHandler, HandlerDecorator, handler_middleware
 
-T = TypeVar("T", default=Any)
-TC = TypeVar("TC", bound=Collection[object], default=Collection[object])
-R = TypeVar("R", Awaitable[None], None)
+T = TypeVar("T")
+TC = TypeVar("TC", bound=Collection[object])
 
 __all__ = ["trace", "trace_batch"]
 
 
-def create_message_tracer(
+def _create_message_tracer(
     queue_name: str,
     batched: bool,
     tp: TracerProvider | None,
@@ -40,8 +38,9 @@ def create_message_tracer(
     messages_consumed = create_messaging_client_consumed_messages(meter)
 
     @contextmanager
-    def call_tracer(message: T):
+    def call_tracer(message):
         attrs: dict[str, AttributeValue] = {
+            "messaging.operation.name": "process",
             "messaging.operation.type": "process",
             "messaging.system": "localpost_streams",
             "messaging.destination.name": queue_name,
@@ -62,7 +61,7 @@ def trace(
 ) -> HandlerDecorator[T, T]:
     @handler_middleware
     async def middleware(next_h: FlowHandler):
-        call_tracer = create_message_tracer(stream_name, False, tp, mp)
+        call_tracer = _create_message_tracer(stream_name, False, tp, mp)
 
         async def _handle_async(item):
             with call_tracer(item):
@@ -82,7 +81,7 @@ def trace_batch(
 ) -> HandlerDecorator[TC, TC]:
     @handler_middleware
     async def middleware(next_h: FlowHandler):
-        call_tracer = create_message_tracer(stream_name, False, tp, mp)
+        call_tracer = _create_message_tracer(stream_name, True, tp, mp)
 
         async def _handle_async(item):
             with call_tracer(item):

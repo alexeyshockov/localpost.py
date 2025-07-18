@@ -15,17 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-## [0.5.0] - 2025-06-25
+## [0.5.0] - 2025-07-18
 
 ### Added
 
 - `localpost.consumers.stream` for in-memory queues
+- `localpost.hosting.services.hypercorn` for Hypercorn HTTP server
 - `localpost.debug` context manager, to simplify debugging
 - More tests
 
 ### Changed
 
 - `localpost.consumers.kafka` reworked
+- `localpost.consumers.sqs` reworked (now with both `boto3` and `aioboto3` support)
 
 ## [0.4.0] - 2025-06-23
 

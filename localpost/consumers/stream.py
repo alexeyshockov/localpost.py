@@ -1,6 +1,6 @@
 import math
 from collections.abc import Callable
-from typing import TypeVar, Generic
+from typing import Generic, TypeVar
 
 from anyio.abc import ObjectReceiveStream
 
@@ -33,21 +33,31 @@ class StreamConsumerService(Generic[T]):
         self.process_leftovers = process_leftovers
 
     async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        async with self.handler_m as handler, create_stream_consumer(
-            self.target, ensure_async_handler(handler, max_threads=self.concurrency), concurrency=self.concurrency,
-        ) as consumer_state:
+        receiver = self.target
+        async with (
+            receiver,
+            self.handler_m as handler,
+            create_stream_consumer(
+                receiver,
+                ensure_async_handler(handler, max_threads=self.concurrency),
+                concurrency=self.concurrency,
+            ) as consumer_state,
+        ):
             service_lifetime.set_started()
             if not self.process_leftovers:
                 await wait_any(service_lifetime.shutting_down, consumer_state.closed)
-                await self.target.aclose()
+                await receiver.aclose()
             # Otherwise just wait for the stream to be exhausted and closed
 
 
 def stream_consumer(
-    target: ObjectReceiveStream[T], /, *, concurrency: int = 1, process_leftovers: bool = True,
+    target: ObjectReceiveStream[T],
+    /,
+    *,
+    concurrency: int = 1,
+    process_leftovers: bool = True,
 ) -> Callable[[AnyHandlerManager[T]], StreamConsumerService[T]]:
-    """ Decorator to create a stream consumer hosted service. """
+    """Decorator to create a stream consumer hosted service."""
     return lambda handler_m: StreamConsumerService(
-        target, handler_m,
-        concurrency=concurrency, process_leftovers=process_leftovers
+        target, handler_m, concurrency=concurrency, process_leftovers=process_leftovers
     )
