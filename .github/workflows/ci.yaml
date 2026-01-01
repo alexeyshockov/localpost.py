@@ -23,7 +23,7 @@ jobs:
       - name: pytest
         timeout-minutes: 5
         run: pdm run pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
-      - uses: SonarSource/sonarqube-scan-action@v5
+      - uses: SonarSource/sonarqube-scan-action@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
