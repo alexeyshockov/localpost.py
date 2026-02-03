@@ -39,9 +39,12 @@ def local_sqs():
         yield conn_params
 
 
-async def test_happy_path(local_sqs):
-    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+@pytest.fixture()
+def queue_name():
+    return "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
+
+async def test_happy_path(local_sqs, queue_name):
     # Arrange
 
     sent = ["hello", "world", "!"]
@@ -71,11 +74,10 @@ async def test_happy_path(local_sqs):
 
     # Assert
 
-    # TODO Check messages are deleted from the queue
-    # (https://stackoverflow.com/questions/25351145/get-number-of-messages-in-an-amazon-sqs-queue)
     assert host.status["exception"] is None
     assert received == sent
 
+    # Make sure that the messages were deleted from the queue
     queue_info = sqs_client.get_queue_attributes(
         QueueUrl=queue_url,
         AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"])
@@ -83,14 +85,12 @@ async def test_happy_path(local_sqs):
     assert int(queue_info["Attributes"]["ApproximateNumberOfMessagesNotVisible"]) == 0
 
 
-async def test_handler_manager(local_sqs):
+async def test_handler_manager():
     # Test handler lifecycle (via handler manager)
     pass
 
 
-async def test_batching(local_sqs):
-    queue_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
-
+async def test_batching(local_sqs, queue_name):
     # Arrange
 
     sent = ["hello", "world", "!"]
@@ -124,6 +124,7 @@ async def test_batching(local_sqs):
     assert host.status["exception"] is None
     assert received == [sent]
 
+    # Make sure that the messages were deleted from the queue
     queue_info = sqs_client.get_queue_attributes(
         QueueUrl=queue_url,
         AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"])

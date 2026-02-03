@@ -25,9 +25,12 @@ def local_kafka():
         yield conn_config
 
 
-async def test_normal_case(local_kafka):
-    topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
+@pytest.fixture()
+def topic_name():
+    return "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
+
+async def test_happy_path(local_kafka, topic_name):
     # Arrange
 
     sent = ["London: cloudy", "Paris: rainy"]
@@ -60,7 +63,7 @@ async def test_normal_case(local_kafka):
     assert received == sent
 
 
-async def test_batching(local_kafka):
+async def test_batching(local_kafka, topic_name):
     topic_name = "test_" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
     # Arrange

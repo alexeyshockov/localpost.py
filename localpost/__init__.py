@@ -15,4 +15,4 @@ __all__ = ["Result", "__version__", "arun", "debug", "run"]
 
 # Set up logging according to the best practices:
 # https://docs.python.org/3/howto/logging.html#configuring-logging-for-a-library
-logging.getLogger("boto3").addHandler(logging.NullHandler())
+logging.getLogger("localpost").addHandler(logging.NullHandler())
