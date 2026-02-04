@@ -1,12 +1,13 @@
 import logging
+from importlib.metadata import version
 
 from ._debug import debug
 from ._run import arun, run
 from ._utils import Result
 
 try:
-    from .__meta__ import version as __version__
-except ImportError:
+    __version__ = version("localpost")
+except Exception:
     __version__ = "dev"
 
 

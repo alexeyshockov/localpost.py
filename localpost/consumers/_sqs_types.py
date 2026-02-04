@@ -11,12 +11,6 @@ except ImportError:
     from typing import Any as BotoSqsClient  # type: ignore[assignment]  # noqa
 
 try:
-    from types_aiobotocore_sqs.client import SQSClient as AioBotoSqsClient
-except ImportError:
-    # Same trick as in types_boto3_sqs stubs
-    from typing import Any as AioBotoSqsClient  # type: ignore[assignment]  # noqa
-
-try:
     from types_boto3_sqs.literals import MessageSystemAttributeNameType
     from types_boto3_sqs.type_defs import (
         MessageAttributeValueOutputTypeDef,
@@ -24,19 +18,11 @@ try:
         ReceiveMessageRequestTypeDef,
     )
 except ImportError:
-    try:
-        from types_aiobotocore_sqs.literals import MessageSystemAttributeNameType
-        from types_aiobotocore_sqs.type_defs import (
-            MessageAttributeValueOutputTypeDef,
-            MessageTypeDef,
-            ReceiveMessageRequestTypeDef,
-        )
-    except ImportError:
-        # Same trick as in types_boto3_sqs stubs
-        from typing import Any as MessageSystemAttributeNameType  # type: ignore[assignment]  # noqa
-        from typing import Any as MessageAttributeValueOutputTypeDef  # type: ignore[assignment]  # noqa
-        from typing import Any as MessageTypeDef  # type: ignore[assignment]  # noqa
-        from typing import Any as ReceiveMessageRequestTypeDef  # type: ignore[assignment]  # noqa
+    # Same trick as in types_boto3_sqs stubs
+    from typing import Any as MessageSystemAttributeNameType  # type: ignore[assignment]  # noqa
+    from typing import Any as MessageAttributeValueOutputTypeDef  # type: ignore[assignment]  # noqa
+    from typing import Any as MessageTypeDef  # type: ignore[assignment]  # noqa
+    from typing import Any as ReceiveMessageRequestTypeDef  # type: ignore[assignment]  # noqa
 
 
 class LambdaEventRecordMessageAttributeValue(TypedDict):

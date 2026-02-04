@@ -4,13 +4,11 @@ default:
     just --list
 
 deps:
-    pdm install --group :all
-#    uv sync --all-groups --all-extras
+    uv sync --all-groups --all-extras
 
 deps-upgrade:
-    pdm lock --group :all -v
-    pdm sync --group :all --clean
-#    uv sync --all-groups --all-extras --upgrade
+    uv lock --upgrade
+    uv sync --all-groups --all-extras
 
 [doc("Check types (using both PyRight and MyPy)")]
 types:

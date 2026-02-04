@@ -6,27 +6,14 @@ import math
 from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from functools import partial
-from typing import Final, TypeAlias, cast, final, overload
+from typing import Final, cast, final, overload
 from urllib.parse import urlparse
 
 from anyio import CancelScope, CapacityLimiter, create_task_group, from_thread, to_thread
 
 from localpost import flow
 from localpost._utils import MemoryStream, is_async_callable
-from localpost.flow import (
-    AnyHandlerManager,
-    AsyncHandler,
-    FlowHandlerManager,
-    SyncHandler,
-    ensure_async_handler,
-    ensure_sync_handler,
-)
-from localpost.flow._stream import BatchReceiver, create_stream_consumer
-from localpost.hosting import ExposedServiceBase, ServiceLifetimeManager
-from localpost.hosting.utils import ThreadSafeMemorySendStream, ThreadSafeSendStream
-
 from ._sqs_types import (
-    AioBotoSqsClient,
     BotoSqsClient,
     LambdaEvent,
     LambdaEventRecord,
@@ -39,8 +26,6 @@ __all__ = [
     "SqsMessage",
     "SqsMessages",
     "ConsumerClient",
-    "AsyncConsumerClient",
-    "async_client_factory",
     "lambda_handler",
     "sqs_queue_consumer",
 ]
@@ -131,86 +116,6 @@ class ConsumerClient:
                     {"Id": str(i), "ReceiptHandle": message.receipt_handle} for i, message in enumerate(workload)
                 ],
             )
-
-
-@final
-class AsyncConsumerClient:
-    @classmethod
-    @asynccontextmanager
-    async def create(
-        cls,
-        queue_name_or_url: str,
-        client: AbstractAsyncContextManager[AioBotoSqsClient] | None = None,
-        /,
-        *,
-        req_template: ReceiveMessageRequestTypeDef | None = None,
-    ):
-        def get_client() -> AbstractAsyncContextManager[AioBotoSqsClient]:
-            if client is None:
-                try:
-                    import aioboto3
-
-                    return aioboto3.Session().client("sqs")
-                except ImportError:
-                    from aiobotocore.session import get_session
-
-                    return get_session().create_client("sqs")
-            return client
-
-        async with get_client() as transport:
-            if "/" in queue_name_or_url:
-                queue_url = queue_name_or_url
-                queue_name = _queue_name_from_url(queue_url)
-            else:
-                queue_name = queue_name_or_url
-                queue_url = (await transport.get_queue_url(QueueName=queue_name))["QueueUrl"]
-            yield cls(
-                transport,
-                queue_name,
-                queue_url,
-                req_template
-                or {
-                    "QueueUrl": queue_name,
-                    "MessageAttributeNames": ["All"],
-                    "MaxNumberOfMessages": 10,
-                    "WaitTimeSeconds": 20,
-                },
-            )
-
-    def __init__(
-        self,
-        client: AioBotoSqsClient,
-        queue_name: str,
-        queue_url: str,
-        receive_req: ReceiveMessageRequestTypeDef,
-        /,
-    ) -> None:
-        self._client = client
-        self.queue_name = queue_name
-        self.queue_url = queue_url
-        self.receive_req: ReceiveMessageRequestTypeDef = receive_req | {"QueueUrl": queue_url}
-
-    async def receive(self) -> Sequence[MessageTypeDef]:
-        # TODO Check HTTP status and retry on errors (exponential backoff)
-        pull_resp = await self._client.receive_message(**self.receive_req)
-        return pull_resp.get("Messages", _EMPTY_RECEIVE)
-
-    async def delete(self, workload: Iterable[SqsMessage], /) -> None:
-        if isinstance(workload, SqsMessage):
-            await self._client.delete_message(
-                QueueUrl=self.queue_url,
-                ReceiptHandle=workload.receipt_handle,
-            )
-        else:
-            await self._client.delete_message_batch(
-                QueueUrl=self.queue_url,
-                Entries=[  # type: ignore
-                    {"Id": str(i), "ReceiptHandle": message.receipt_handle} for i, message in enumerate(workload)
-                ],
-            )
-
-
-AnyClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager[ConsumerClient | AsyncConsumerClient]]
 
 
 @final
@@ -352,23 +257,6 @@ async def _consume_sync(
     # In Trio shutdown_scope.cancel_called can only be checked in async context
     with shutdown_scope:
         await to_thread.run_sync(consume, limiter=CapacityLimiter(1))
-
-
-# See also https://github.com/aio-libs/aiobotocore/blob/master/examples/sqs_queue_consumer.py
-async def _consume_async(
-    client: AsyncConsumerClient,
-    message_handler: AsyncHandler[SqsMessage],
-    ack_queue: ThreadSafeSendStream[SqsMessage],
-    shutdown_scope: CancelScope,
-):
-    while not shutdown_scope.cancel_called:
-        messages = _EMPTY_RECEIVE
-        with shutdown_scope:
-            messages = await client.receive()
-        if not messages:
-            continue  # No messages received (empty queue or shutdown)
-        for m in messages:
-            await message_handler(SqsMessage(m, client, ack_queue))
 
 
 @final

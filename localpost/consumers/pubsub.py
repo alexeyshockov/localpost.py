@@ -30,9 +30,7 @@ __all__ = [
     "PubSubMessage",
     "PubSubMessages",
     "ConsumerClient",
-    "AsyncConsumerClient",
     "client_factory",
-    "async_client_factory",
     "pubsub_consumer",
 ]
 
@@ -177,53 +175,6 @@ class ConsumerClient:
         return response.received_messages
 
 
-@final
-class AsyncConsumerClient:
-    @classmethod
-    @asynccontextmanager
-    async def create(
-        cls,
-        subscription_path: str,
-        client: SubscriberAsyncClient | None = None,
-        /,
-        *,
-        max_messages: int = 100,
-        retry_policy: retry.AsyncRetry | object = DEFAULT,
-    ):
-        client = client or SubscriberAsyncClient()
-        try:
-            yield cls(client, subscription_path, max_messages, retry_policy)
-        finally:
-            await client.transport.close()
-
-    def __init__(
-        self,
-        client: SubscriberAsyncClient,
-        subscription_path: str,
-        max_messages: int,
-        retry_policy: retry.AsyncRetry | object = DEFAULT,
-    ):
-        self.client = client
-        self.subscription_path = subscription_path
-        self.max_messages = max_messages
-        self.retry_policy = retry_policy
-
-    async def acknowledge(self, target: Iterable[PubSubMessage]) -> None:
-        request = {"subscription": self.subscription_path, "ack_ids": [msg.payload.ack_id for msg in target]}
-        await self.client.acknowledge(request)
-
-    async def pull(self):
-        # The actual number of messages pulled may be smaller than max_messages
-        response = await self.client.pull(
-            {"subscription": self.subscription_path, "max_messages": self.max_messages},
-            retry=self.retry_policy or DEFAULT,
-        )
-        return response.received_messages
-
-
-AnyClientFactory: TypeAlias = Callable[[], AbstractAsyncContextManager[ConsumerClient | AsyncConsumerClient]]
-
-
 # https://cloud.google.com/pubsub/docs/samples/pubsub-subscriber-sync-pull#pubsub_subscriber_sync_pull-python
 async def _consume_sync(
     client: ConsumerClient,
@@ -245,30 +196,9 @@ async def _consume_sync(
         await to_thread.run_sync(consume, limiter=CapacityLimiter(1))
 
 
-async def _consume_async(
-    client: AsyncConsumerClient,
-    message_handler: AsyncHandler[PubSubMessage],
-    ack_queue: ThreadSafeSendStream[PubSubMessage],
-    shutdown_scope: CancelScope,
-):
-    while not shutdown_scope.cancel_called:
-        messages = _EMPTY_RECEIVE
-        with shutdown_scope:
-            messages = await client.pull()
-        if not messages:
-            continue  # No messages received (empty queue or shutdown)
-        for m in messages:
-            await message_handler(PubSubMessage(m, client, ack_queue))
-
-
 def client_factory(subscription_path: str) -> Callable[[], AbstractAsyncContextManager[ConsumerClient]]:
     """Default PubSub client factory."""
     return partial(ConsumerClient.create, subscription_path)
-
-
-def async_client_factory(subscription_path: str) -> Callable[[], AbstractAsyncContextManager[AsyncConsumerClient]]:
-    """Default PubSub async client factory."""
-    return partial(AsyncConsumerClient.create, subscription_path)
 
 
 @final
