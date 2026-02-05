@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import final
@@ -12,17 +12,29 @@ from wsgiref.types import WSGIApplication
 import anyio
 from anyio import to_thread, CancelScope, from_thread, create_task_group
 
+from localpost._sync_utils import _acquire
 from .config import WorkerConfig
 from .server import start_http_server, ClientConn, Server
 
 __all__ = ['Worker', 'serve']
 
 
+class AbstractSyncWorker[T]:
+    def __init__(self, server: Iterable[T], max_concurrency: int) -> None:
+        self.server = server
+        self.max_concurrency = max_concurrency
+
+    def shutdown(self) -> None:
+        """Graceful shutdown (stop handling new connections, wait for in-flight requests)."""
+        self.server.shutdown()
+
+
+
 @asynccontextmanager
 async def serve(app: WSGIApplication, config: WorkerConfig, /):
     """Run multiple servers (workers)."""
-    threads_limiter = anyio.CapacityLimiter(config.max_concurrent_requests)
-    conn_sem = threading.BoundedSemaphore(config.max_concurrent_requests)
+    threads_limiter = anyio.CapacityLimiter(config.max_connections)
+    conn_sem = threading.BoundedSemaphore(config.max_connections)
 
     def handle_client(c: ClientConn) -> None:
         try:
@@ -37,17 +49,16 @@ async def serve(app: WSGIApplication, config: WorkerConfig, /):
         return to_thread.run_sync(handle_clients, limiter=anyio.CapacityLimiter(1))
 
     def handle_clients() -> None:
+        _acquire(conn_sem)
         for client_conn in server:
-            conn_sem.acquire()  # TODO Check from_thread.check_cancelled() periodically
             # Process the client in a separate thread, to support multiple concurrent connections
             from_thread.run_sync(tg.start_soon, handle_client_thread, client_conn)
+            _acquire(conn_sem)
 
-    with start_http_server(app, config.server) as server:
-        async with create_task_group() as tg:
+    async with create_task_group() as tg:
+        with start_http_server(app, config.server) as server:
             tg.start_soon(handle_clients_thread)
-            sm = Worker(server, config, tg.cancel_scope)
-            yield sm
-            sm.shutdown()
+            yield Worker(server, config, tg.cancel_scope)
 
 
 @final

@@ -1,0 +1,26 @@
+from __future__ import annotations
+
+import socket
+import threading
+from collections.abc import Callable
+from contextlib import suppress
+
+from anyio import from_thread
+
+CHECK_TIMEOUT: float = 1.0
+"""Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
+
+
+def _sock_op[**P, T](op: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Perform a socket operation with automatic retry on timeout."""
+    while True:
+        from_thread.check_cancelled()
+        with suppress(socket.timeout):
+            return op(*args, **kwargs)
+
+
+def _acquire(sem: threading.Semaphore):
+    while True:
+        from_thread.check_cancelled()
+        if sem.acquire(timeout=CHECK_TIMEOUT):
+            return

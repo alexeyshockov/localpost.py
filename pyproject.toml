@@ -101,6 +101,9 @@ dev-consumers = [
     "confluent-kafka[schemaregistry,protobuf]",
     "grpcio-tools ~=1.68",
 ]
+dev-http = [
+    "flask ~=3.1",
+]
 dev-sentry = [
     "sentry-sdk ~=2.51",
 ]
