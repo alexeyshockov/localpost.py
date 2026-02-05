@@ -98,11 +98,21 @@ def _build_environ(self, request: h11.Request, body: io.RawIOBase) -> dict[str, 
     return environ
 
 
-
-def _main():
+def _main_flask():
     logging.basicConfig(level=logging.DEBUG)
 
-    pass
+    from flask import Flask, request
+
+    app = Flask(__name__)
+
+    @app.route('/hello/<name>')
+    def hello(name):
+        user_agent = request.headers.get('User-Agent', 'Unknown')
+        return f'Hello, {name}! Your User-Agent is: {user_agent}\n'
+
+    with start_http_server(ServerConfig()) as server:
+        for client_conn in server:
+            client_conn(app)
 
 if __name__ == '__main__':
-    _main()
+    _main_flask()

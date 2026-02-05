@@ -12,8 +12,8 @@ import itertools
 import logging
 import socket
 from collections.abc import Iterator, Callable, Iterable
-from contextlib import contextmanager
-from io import DEFAULT_BUFFER_SIZE, RawIOBase
+from contextlib import contextmanager, suppress
+from io import DEFAULT_BUFFER_SIZE, RawIOBase, BufferedReader
 from typing import final
 
 import h11
@@ -44,16 +44,6 @@ def start_http_server(config: ServerConfig) -> Iterator[Server]:
         yield server
     finally:
         server.shutdown()
-
-
-@dc.dataclass(frozen=True, slots=True)
-class ConnectionActive:
-    pass
-
-
-@dc.dataclass(frozen=True, slots=True)
-class ConnectionIdle:
-    last_active_at: float
 
 
 @final
@@ -94,6 +84,70 @@ class Server:
 
 
 @final
+class RequestBodyStream(RawIOBase):
+    def __init__(self, conn: h11.Connection, sock: socket.socket) -> None:
+        self._conn = conn
+        self._sock = sock
+        self._finished = False
+
+    def writable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def readable(self) -> bool:
+        return True
+
+    def readall(self):
+        chunks = bytearray()
+        for chunk in self.receive_chunks():
+            chunks.extend(chunk)
+        return chunks
+
+    def readinto(self, b: bytearray, /) -> int:
+        try:
+            data = self.receive_chunk(len(b))
+            size = len(data)
+            b[:size] = data
+            return size
+        except EOFError:
+            return 0
+
+    def receive_chunks(self) -> Iterable[bytes]:
+        with suppress(EOFError):
+            while True:
+                yield self.receive_chunk(DEFAULT_BUFFER_SIZE)
+
+    def receive_chunk(self, size: int, /) -> bytes:
+        """Receive next chunk of body data from the socket via h11."""
+        conn, sock = self._conn, self._sock
+        while True:
+            if self.closed:
+                raise ValueError("Read on closed request body stream")
+            if self._finished:
+                raise EOFError("End of request body stream")
+            event = conn.next_event()
+            if event is h11.NEED_DATA:
+                data = _sock_op(sock.recv, size)
+                if not data:
+                    raise ConnectionAbortedError("Client closed connection unexpectedly")
+                conn.receive_data(data)
+            elif isinstance(event, h11.Data):
+                return event.data
+            elif isinstance(event, h11.EndOfMessage):
+                self._finished = True
+            else:
+                raise RuntimeError(f"Unexpected h11 event: {event!r}")
+
+    def drain(self) -> None:
+        """Consume any remaining body data. Required before starting next request cycle."""
+        with suppress(EOFError):
+            while not self._finished:
+                self.receive_chunk(DEFAULT_BUFFER_SIZE)
+
+
+@final
 class ClientConn:
     def __init__(
         self,
@@ -115,21 +169,16 @@ class ClientConn:
         with self.socket:
             self.socket.settimeout(self.config.rw_timeout)
             while True:
-                keep_alive = self._handle_request(h)
-                self._drain_body()
+                rb = RequestBodyStream(self.conn, self.socket)
+                keep_alive = self._handle_request(h, rb)
                 if not keep_alive:
                     return
+                rb.drain()
                 # Prepare for next request on this client's connection
                 self.conn.start_next_cycle()
+                # TODO Proper keep-alive timeout
 
-    def _read_body(self) -> RawIOBase:
-        pass # FIXME Implement
-
-    def _drain_body(self) -> None:
-        """Drain any unread body data before next request cycle."""
-        pass
-
-    def _handle_request(self, h: RequestHandler) -> bool:
+    def _handle_request(self, h: RequestHandler, body: RequestBodyStream) -> bool:
         conn, sock = self.conn, self.socket
         request: h11.Request | None = None
 
@@ -147,7 +196,6 @@ class ClientConn:
             elif isinstance(event, h11.Request):
                 request = event
 
-        body = self._read_body()
         keep_alive: bool = False
 
         def start_response(response: h11.Response) -> None:
@@ -156,8 +204,7 @@ class ClientConn:
             nonlocal keep_alive
             keep_alive = _should_keep_alive(request, response)
 
-            # TODO Add Connection header if not present
-
+            # Add Connection header if not present?..
             sock.sendall(conn.send(response))
 
         response_chunks = h(self, request, body, start_response)
@@ -203,23 +250,5 @@ def _main():
             client_conn(simple_app)
 
 
-def _main_flask():
-    logging.basicConfig(level=logging.DEBUG)
-
-    from flask import Flask, request
-
-    app = Flask(__name__)
-
-    @app.route('/hello/<name>')
-    def hello(name):
-        user_agent = request.headers.get('User-Agent', 'Unknown')
-        return f'Hello, {name}! Your User-Agent is: {user_agent}\n'
-
-    with start_http_server(ServerConfig()) as server:
-        for client_conn in server:
-            client_conn(app)
-
-
 if __name__ == '__main__':
     _main()
-    # _main_flask()
