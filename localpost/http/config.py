@@ -37,15 +37,3 @@ class WorkerConfig:
     """Max connections = max concurrent requests."""
     max_idle_connections: int = 5
     """Maximum number of idle (keep-alive) connections (<= max_connections)."""
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class ProcessWorkerConfig:
-    pass  # For the future
-
-
-@final
-@dataclass(frozen=True, slots=True)
-class InterpreterWorkerConfig:
-    pass  # For the future

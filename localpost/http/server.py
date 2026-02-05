@@ -11,20 +11,18 @@ from __future__ import annotations
 import itertools
 import logging
 import socket
-from collections.abc import Iterator, Callable, Iterable
-from contextlib import contextmanager, suppress
-from io import DEFAULT_BUFFER_SIZE, RawIOBase, BufferedReader
-from typing import final
+import time
+from collections.abc import Iterator, Callable, Iterable, Generator
+from contextlib import contextmanager, suppress, closing
+from io import DEFAULT_BUFFER_SIZE, RawIOBase
+from typing import final, Literal
 
 import h11
-from anyio import from_thread
 
-from localpost._sync_utils import _sock_op, CHECK_TIMEOUT
-from .config import ServerConfig, LOGGER_NAME
+from localpost._sync_utils import _sock_op, CHECK_TIMEOUT, check_cancelled
+from localpost.http.config import ServerConfig, LOGGER_NAME
 
-import dataclasses as dc
-
-__all__ = ['Server', 'ClientConn', 'RequestHandler', 'start_http_server']
+__all__ = ['Server', 'ClientConn', 'RequestHandler', 'StartResponse', 'start_http_server']
 
 
 @contextmanager
@@ -162,6 +160,8 @@ class ClientConn:
         self.address = client_addr
         self.conn = h11.Connection(h11.SERVER)
         self._logger = logger
+        self.state: Literal['active', 'idle', 'closed'] = 'idle'
+        self.last_active_at: float = time.monotonic()
 
     def __call__(self, h: RequestHandler) -> None:
         # TODO Assert it's not called concurrently
@@ -199,7 +199,7 @@ class ClientConn:
         keep_alive: bool = False
 
         def start_response(response: h11.Response) -> None:
-            from_thread.check_cancelled()
+            check_cancelled()
 
             nonlocal keep_alive
             keep_alive = _should_keep_alive(request, response)
@@ -207,15 +207,11 @@ class ClientConn:
             # Add Connection header if not present?..
             sock.sendall(conn.send(response))
 
-        response_chunks = h(self, request, body, start_response)
-        try:
-            from_thread.check_cancelled()
+        with closing(h(self, request, body, start_response)) as response_chunks:
+            check_cancelled()
             for chunk in response_chunks:
-                from_thread.check_cancelled()
+                check_cancelled()
                 sock.sendall(conn.send(chunk))
-        finally:
-            if hasattr(response_chunks, 'close'):
-                response_chunks.close()  # Generator cleanup
 
         sock.sendall(conn.send(h11.EndOfMessage()))
 
@@ -223,7 +219,7 @@ class ClientConn:
 
 
 StartResponse = Callable[[h11.Response], None]
-RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase, StartResponse], Iterable[h11.Data]]
+RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase, StartResponse], Generator[h11.Data]]
 
 
 def _should_keep_alive(request: h11.Request, response: h11.Response) -> bool:
@@ -240,10 +236,9 @@ def _should_keep_alive(request: h11.Request, response: h11.Response) -> bool:
 def _main():
     logging.basicConfig(level=logging.DEBUG)
 
-    def simple_app(_, start_response):
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        yield b'Hello, World!\n'
-        # return [b'Hello, World!\n']
+    def simple_app(c: ClientConn, r: h11.Request, rb: RawIOBase, start_response: StartResponse):
+        start_response(h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]))
+        yield h11.Data(data=b'Hello, World!\n')
 
     with start_http_server(ServerConfig()) as server:
         for client_conn in server:

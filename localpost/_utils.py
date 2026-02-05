@@ -30,7 +30,7 @@ import anyio
 from anyio import CancelScope, CapacityLimiter, WouldBlock, create_task_group, from_thread, to_thread
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, MemoryObjectStreamState
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, _MemoryObjectStreamState
 from typing_extensions import NotRequired, Self, TypeVar
 
 if sys.version_info >= (3, 11):
@@ -325,7 +325,7 @@ class MemoryStream(Generic[T]):
         if max_buffer_size < 0:
             raise ValueError("max_buffer_size cannot be negative")
 
-        state: MemoryObjectStreamState[T] = MemoryObjectStreamState(max_buffer_size)
+        state: _MemoryObjectStreamState[T] = _MemoryObjectStreamState(max_buffer_size)
         return MemorySendStream(state), MemoryObjectReceiveStream(state)
 
 

@@ -1,63 +1,65 @@
-"""
-Simple WSGI server implementation using h11 for HTTP protocol handling.
-
-Notes:
-- ISO-8859-1 is used for header encoding/decoding as per HTTP/1.1 specification.
-- The server supports keep-alive connections and graceful shutdown.
-"""
-
 from __future__ import annotations
 
-import io
 import logging
 import sys
-from io import BufferedReader
+from collections.abc import Callable
+from io import BufferedReader, RawIOBase
 from typing import Any
 from wsgiref.types import WSGIApplication
 
 import h11
 
-from .server import RequestHandler
+from localpost.http.server import ClientConn, RequestHandler, StartResponse
 
 
-def wrap_wsgi_app(app: WSGIApplication) -> RequestHandler:
-    # def start_response(status: str, headers: list[tuple[str, str]], /) -> None:
-    #     nonlocal keep_alive
-    #     keep_alive = _should_keep_alive(request, headers)
-    #
-    #     # Add Connection header if not present
-    #     if not any(name.lower() == 'connection' for name, _ in headers):
-    #         headers.append(('Connection', 'keep-alive' if keep_alive else 'close'))
-    #
-    #     # Send response headers immediately
-    #     status_code = int(status.split(' ', 1)[0])
-    #     response = h11.Response(
-    #         status_code=status_code,
-    #         headers=[(name.encode('ISO-8859-1'), value.encode('ISO-8859-1'))
-    #                  for name, value in headers])
-    #     sock.sendall(conn.send(response))
-    #
-    # response_body = self.server.app(environ, start_response)  # type: ignore
-    # try:
-    #     for chunk in response_body:
-    #         # TODO Check from_thread.check_cancelled()
-    #         if chunk:
-    #             sock.sendall(conn.send(h11.Data(data=chunk)))
-    # finally:
-    #     if hasattr(response_body, 'close'):
-    #         response_body.close()  # Generator cleanup
-    #
-    # sock.sendall(conn.send(h11.EndOfMessage()))
-    #
-    # # Drain any unread body data before next request cycle
-    # if keep_alive:
-    #     body.drain()
-    #
-    # return keep_alive
-    pass  # TODO Implement this function
+def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
+    """Wrap a WSGI application as a RequestHandler."""
+
+    def handler(client: ClientConn, request: h11.Request, body: RawIOBase, start_response: StartResponse):
+        environ = _build_environ(client, request, body)
+
+        def wsgi_start_response(
+            status: str,
+            headers: list[tuple[str, str]],
+            exc_info: Any = None,
+        ) -> Callable[[bytes], None]:
+            if exc_info:
+                try:
+                    raise exc_info[1].with_traceback(exc_info[2])
+                finally:
+                    exc_info = None
+
+            # Parse status code from "200 OK" format
+            status_code = int(status.split(' ', 1)[0])
+
+            # Convert headers to h11 format (bytes)
+            h11_headers = [
+                (name.encode('ISO-8859-1'), value.encode('ISO-8859-1'))
+                for name, value in headers
+            ]
+
+            response = h11.Response(status_code=status_code, headers=h11_headers)
+            start_response(response)
+
+            return _wsgi_response_write
+
+        response_body = app(environ, wsgi_start_response)
+        try:
+            for chunk in response_body:
+                if chunk:
+                    yield h11.Data(data=chunk)
+        finally:
+            if hasattr(response_body, 'close'):
+                response_body.close()
+
+    return handler
 
 
-def _build_environ(self, request: h11.Request, body: io.RawIOBase) -> dict[str, Any]:
+def _wsgi_response_write(_: bytes) -> None:
+    raise NotImplementedError("write() is deprecated and not supported")
+
+
+def _build_environ(client: ClientConn, request: h11.Request, body: RawIOBase) -> dict[str, Any]:
     # Decode path and parse query string
     path = request.target.decode('ISO-8859-1')
     if '?' in path:
@@ -76,8 +78,8 @@ def _build_environ(self, request: h11.Request, body: io.RawIOBase) -> dict[str, 
         'QUERY_STRING': query_string,
         'CONTENT_TYPE': headers_dict.get('content-type', ''),
         'CONTENT_LENGTH': headers_dict.get('content-length', ''),
-        'SERVER_NAME': self.config.host,  # TODO Actual name
-        'SERVER_PORT': str(self.server.port),
+        'SERVER_NAME': client.config.host,
+        'SERVER_PORT': str(client.server.port),
         'SERVER_PROTOCOL': f'HTTP/{request.http_version.decode("ascii")}',
         'wsgi.version': (1, 0),
         'wsgi.url_scheme': 'http',
@@ -101,18 +103,23 @@ def _build_environ(self, request: h11.Request, body: io.RawIOBase) -> dict[str, 
 def _main_flask():
     logging.basicConfig(level=logging.DEBUG)
 
-    from flask import Flask, request
+    from flask import Flask, request as flask_request
+
+    from localpost.http.config import ServerConfig
+    from localpost.http.server import start_http_server
 
     app = Flask(__name__)
 
     @app.route('/hello/<name>')
     def hello(name):
-        user_agent = request.headers.get('User-Agent', 'Unknown')
+        user_agent = flask_request.headers.get('User-Agent', 'Unknown')
         return f'Hello, {name}! Your User-Agent is: {user_agent}\n'
 
+    handler = wrap_wsgi(app)
     with start_http_server(ServerConfig()) as server:
         for client_conn in server:
-            client_conn(app)
+            client_conn(handler)
+
 
 if __name__ == '__main__':
     _main_flask()
