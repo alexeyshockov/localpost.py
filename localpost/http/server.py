@@ -152,10 +152,6 @@ class RequestBodyStream(RawIOBase):
                 self.receive_chunk(DEFAULT_BUFFER_SIZE)
 
 
-class ServerShutdown(Exception):
-    pass
-
-
 @dataclass(slots=True)
 class ClientSocket:
     server: Server
@@ -168,37 +164,32 @@ class ClientSocket:
     def __post_init__(self):
         self.sock.settimeout(CHECK_TIMEOUT)
 
-    def wait_for_req(self, timeout: float) -> None:
+    def wait_for_req(self, timeout: float) -> bool:
         for _ in range(int(timeout / CHECK_TIMEOUT)):
             check_cancelled()
             if not self.server.running:
-                raise ServerShutdown()
+                return False
             with suppress(TimeoutError):
                 self._recv_buf = self.sock.recv(DEFAULT_BUFFER_SIZE)
-                return
-        raise TimeoutError()  # TODO Message
+                return True
+        return False
 
     def recv(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        buf = self._recv_buf
-        if buf is not None:
+        if (buf := self._recv_buf) is not None:
             self._recv_buf = None
-        else:
-            for _ in range(int(self.timeout / CHECK_TIMEOUT)):
-                check_cancelled()
-                with suppress(TimeoutError):
-                    buf = self.sock.recv(size)
-        if buf is None:
-            raise TimeoutError()  # TODO Message
-        elif buf == b"":
-            raise ConnectionAbortedError("Client closed connection unexpectedly")
-        return buf
+            return buf
+        for _ in range(int(self.timeout / CHECK_TIMEOUT)):
+            check_cancelled()
+            with suppress(TimeoutError):
+                return self.sock.recv(size)
+        raise TimeoutError("receive timeout")
 
     def sendall(self, buf, /) -> None:
         for _ in range(int(self.timeout / CHECK_TIMEOUT)):
             check_cancelled()
             with suppress(TimeoutError):
                 return self.sock.sendall(buf)
-        raise TimeoutError()  # TODO Message
+        raise TimeoutError("send timeout")
 
     def close(self) -> None:
         self.sock.close()
@@ -227,35 +218,29 @@ class ClientConn:
         return 'active'
 
     def __call__(self, h: RequestHandler) -> None:
-        # TODO Assert it's not called concurrently
         conn, sock = self.conn, self.socket
-
         try:
-            # Only read until we get the Request headers - body is read lazily
-            while self.server.running:
-                if conn.our_state is h11.MUST_CLOSE:
-                    return
-                elif conn.our_state is h11.DONE:
-                    sock.wait_for_req(self.config.keep_alive_timeout)
+            while True:
                 event = conn.next_event()
                 if event is h11.NEED_DATA:
                     conn.receive_data(sock.recv())
                 elif isinstance(event, h11.Request):
                     body = RequestBodyStream(conn, sock)
                     self._handle_request(h, event, body)
-                    body.drain()
-                    if conn.our_state is h11.MUST_CLOSE:
+                    if conn.our_state is h11.MUST_CLOSE:  # IDLE | SEND_RESPONSE | DONE | MUST_CLOSE
                         return
-                    # conn.start_next_cycle()
-                elif event == h11.ConnectionClosed:
-                    # TODO Actually close, gracefully
+                    body.drain()
+                elif isinstance(event, h11.ConnectionClosed):
                     return  # Client closed connection
+                # elif isinstance(event, h11.EndOfMessage):
+                elif event is h11.PAUSED:
+                    conn.start_next_cycle()
+                    # if not sock.wait_for_req(self.config.keep_alive_timeout):
+                    #     break
                 else:
                     raise RuntimeError(f"Unexpected h11 event: {event!r}")
-        except ServerShutdown:
-            return
-        except TimeoutError | ConnectionAbortedError as exc:
-            self._logger.debug(exc.message)
+        except TimeoutError:
+            self._logger.debug("Client connection timed out", exc_info=True)
         finally:
             sock.close()
 
