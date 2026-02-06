@@ -14,12 +14,13 @@ import socket
 import time
 from collections.abc import Iterator, Callable, Iterable, Generator
 from contextlib import contextmanager, suppress, closing
+from dataclasses import dataclass
 from io import DEFAULT_BUFFER_SIZE, RawIOBase
 from typing import final, Literal
 
 import h11
 
-from localpost._sync_utils import _sock_op, CHECK_TIMEOUT, check_cancelled
+from localpost._sync_utils import CHECK_TIMEOUT, check_cancelled
 from localpost.http.config import ServerConfig, LOGGER_NAME
 
 __all__ = ['Server', 'ClientConn', 'RequestHandler', 'StartResponse', 'start_http_server']
@@ -61,32 +62,41 @@ class Server:
         Can be useful when port 0 is specified to auto-assign a free port.
         """
         self._logger = logger
-        self._closed = False
+        self._running = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
 
     def shutdown(self) -> None:
         """Stop accepting new connections and close the server socket."""
-        if self._closed:
+        if not self._running:
             return
-        self._closed = True
         self._socket.close()  # Safe to call if from another thread, will cause accept() to raise OSError
 
     def __iter__(self) -> Iterator[ClientConn]:
-        while not self._closed:
+        self._running = True
+        while True:
             try:
-                client_sock, client_addr = _sock_op(self._socket.accept)
-                yield ClientConn(self, client_sock, client_addr, self._logger)
+                check_cancelled()
+                client_sock, client_addr = self._socket.accept()
+                cs = ClientSocket(self, client_sock, client_addr, self.config.rw_timeout)
+                yield ClientConn(self, cs, self._logger)
+            except TimeoutError:
+                pass
             except OSError:
-                if self._closed:
+                if self._running:
+                    self._running = False
                     return  # Socket was closed, exit gracefully
                 raise  # Unexpected error
 
 
 @final
+@dataclass(slots=True)
 class RequestBodyStream(RawIOBase):
-    def __init__(self, conn: h11.Connection, sock: socket.socket) -> None:
-        self._conn = conn
-        self._sock = sock
-        self._finished = False
+    _conn: h11.Connection
+    _sock: ClientSocket
+    _finished: bool = False
 
     def writable(self):
         return False
@@ -127,10 +137,7 @@ class RequestBodyStream(RawIOBase):
                 raise EOFError("End of request body stream")
             event = conn.next_event()
             if event is h11.NEED_DATA:
-                data = _sock_op(sock.recv, size)
-                if not data:
-                    raise ConnectionAbortedError("Client closed connection unexpectedly")
-                conn.receive_data(data)
+                conn.receive_data(sock.recv(size))
             elif isinstance(event, h11.Data):
                 return event.data
             elif isinstance(event, h11.EndOfMessage):
@@ -145,65 +152,118 @@ class RequestBodyStream(RawIOBase):
                 self.receive_chunk(DEFAULT_BUFFER_SIZE)
 
 
+class ServerShutdown(Exception):
+    pass
+
+
+@dataclass(slots=True)
+class ClientSocket:
+    server: Server
+    sock: socket.socket
+    addr: tuple[str, int]
+    timeout: float = CHECK_TIMEOUT * 5
+    """Timeout for receive/send operations"""
+    _recv_buf: bytes | None = None
+
+    def __post_init__(self):
+        self.sock.settimeout(CHECK_TIMEOUT)
+
+    def wait_for_req(self, timeout: float) -> None:
+        for _ in range(int(timeout / CHECK_TIMEOUT)):
+            check_cancelled()
+            if not self.server.running:
+                raise ServerShutdown()
+            with suppress(TimeoutError):
+                self._recv_buf = self.sock.recv(DEFAULT_BUFFER_SIZE)
+                return
+        raise TimeoutError()  # TODO Message
+
+    def recv(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
+        buf = self._recv_buf
+        if buf is not None:
+            self._recv_buf = None
+        else:
+            for _ in range(int(self.timeout / CHECK_TIMEOUT)):
+                check_cancelled()
+                with suppress(TimeoutError):
+                    buf = self.sock.recv(size)
+        if buf is None:
+            raise TimeoutError()  # TODO Message
+        elif buf == b"":
+            raise ConnectionAbortedError("Client closed connection unexpectedly")
+        return buf
+
+    def sendall(self, buf, /) -> None:
+        for _ in range(int(self.timeout / CHECK_TIMEOUT)):
+            check_cancelled()
+            with suppress(TimeoutError):
+                return self.sock.sendall(buf)
+        raise TimeoutError()  # TODO Message
+
+    def close(self) -> None:
+        self.sock.close()
+
+
 @final
 class ClientConn:
     def __init__(
         self,
         server: Server,
-        client_sock: socket.socket,
-        client_addr: tuple[str, int],
+        client_sock: ClientSocket,
         logger: logging.Logger,
     ) -> None:
         self.server = server
         self.config = server.config
         self.socket = client_sock
-        self.address = client_addr
         self.conn = h11.Connection(h11.SERVER)
         self._logger = logger
-        self.state: Literal['active', 'idle', 'closed'] = 'idle'
-        self.last_active_at: float = time.monotonic()
+
+    @property
+    def state(self) -> Literal['active', 'idle', 'closed']:
+        if self.conn.our_state is h11.IDLE:
+            return 'idle'
+        elif self.conn.our_state is h11.MUST_CLOSE:
+            return 'closed'
+        return 'active'
 
     def __call__(self, h: RequestHandler) -> None:
         # TODO Assert it's not called concurrently
-
-        with self.socket:
-            self.socket.settimeout(self.config.rw_timeout)
-            while True:
-                rb = RequestBodyStream(self.conn, self.socket)
-                keep_alive = self._handle_request(h, rb)
-                if not keep_alive:
-                    return
-                rb.drain()
-                # Prepare for next request on this client's connection
-                self.conn.start_next_cycle()
-                # TODO Proper keep-alive timeout
-
-    def _handle_request(self, h: RequestHandler, body: RequestBodyStream) -> bool:
         conn, sock = self.conn, self.socket
-        request: h11.Request | None = None
 
-        # Only read until we get the Request headers - body is read lazily
-        while request is None:
-            event = conn.next_event()
-            if event is h11.NEED_DATA:
-                try:
-                    data = sock.recv(DEFAULT_BUFFER_SIZE)
-                except TimeoutError:
-                    return False  # Idle timeout, close connection
-                if not data:
-                    return False  # Client closed connection
-                conn.receive_data(data)
-            elif isinstance(event, h11.Request):
-                request = event
+        try:
+            # Only read until we get the Request headers - body is read lazily
+            while self.server.running:
+                if conn.our_state is h11.MUST_CLOSE:
+                    return
+                elif conn.our_state is h11.DONE:
+                    sock.wait_for_req(self.config.keep_alive_timeout)
+                event = conn.next_event()
+                if event is h11.NEED_DATA:
+                    conn.receive_data(sock.recv())
+                elif isinstance(event, h11.Request):
+                    body = RequestBodyStream(conn, sock)
+                    self._handle_request(h, event, body)
+                    body.drain()
+                    if conn.our_state is h11.MUST_CLOSE:
+                        return
+                    # conn.start_next_cycle()
+                elif event == h11.ConnectionClosed:
+                    # TODO Actually close, gracefully
+                    return  # Client closed connection
+                else:
+                    raise RuntimeError(f"Unexpected h11 event: {event!r}")
+        except ServerShutdown:
+            return
+        except TimeoutError | ConnectionAbortedError as exc:
+            self._logger.debug(exc.message)
+        finally:
+            sock.close()
 
-        keep_alive: bool = False
+    def _handle_request(self, h: RequestHandler, request: h11.Request, body: RequestBodyStream) -> None:
+        conn, sock = self.conn, self.socket
 
         def start_response(response: h11.Response) -> None:
             check_cancelled()
-
-            nonlocal keep_alive
-            keep_alive = _should_keep_alive(request, response)
-
             # Add Connection header if not present?..
             sock.sendall(conn.send(response))
 
@@ -215,22 +275,9 @@ class ClientConn:
 
         sock.sendall(conn.send(h11.EndOfMessage()))
 
-        return keep_alive
-
 
 StartResponse = Callable[[h11.Response], None]
 RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase, StartResponse], Generator[h11.Data]]
-
-
-def _should_keep_alive(request: h11.Request, response: h11.Response) -> bool:
-    """Determine if the connection should be kept alive."""
-    # Check if either request or response has an explicit Connection header
-    for name, value in itertools.chain(response.headers, request.headers):
-        if name.lower() == b'connection':
-            return value.lower() == 'keep-alive'
-
-    # HTTP/1.1 defaults to keep-alive
-    return request.http_version == b'1.1'
 
 
 def _main():
