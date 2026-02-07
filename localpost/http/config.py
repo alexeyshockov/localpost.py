@@ -21,7 +21,7 @@ class ServerConfig:
     port: int = 8000
     backlog: int = 16
     """Maximum number of queued connections."""
-    rw_timeout: float = 5.0
+    rw_timeout: float = 3.0
     """Timeout (seconds) for read/write operations."""
     keep_alive_timeout: float = 15.0
     """Timeout (seconds) for idle connections."""
