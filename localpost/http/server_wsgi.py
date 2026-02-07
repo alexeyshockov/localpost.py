@@ -2,55 +2,56 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from contextlib import closing, AbstractContextManager, suppress
 from io import BufferedReader, RawIOBase
 from typing import Any
 from wsgiref.types import WSGIApplication
 
 import h11
+from flask import stream_with_context
 
-from localpost.http.server import ClientConn, RequestHandler, StartResponse
+from localpost.http.server import ClientConn, RequestHandler
 
 
 def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
     """Wrap a WSGI application as a RequestHandler."""
 
-    def handler(client: ClientConn, request: h11.Request, body: RawIOBase, start_response: StartResponse):
+    def handler(
+        client: ClientConn, request: h11.Request, body: RawIOBase
+    ) -> tuple[h11.Response, AbstractContextManager[Iterable[h11.Data]]]:
         environ = _build_environ(client, request, body)
+        response: h11.Response | None = None
 
         def wsgi_start_response(
             status: str,
             headers: list[tuple[str, str]],
             exc_info: Any = None,
         ) -> Callable[[bytes], None]:
+            nonlocal response
             if exc_info:
                 try:
                     raise exc_info[1].with_traceback(exc_info[2])
                 finally:
-                    exc_info = None
-
-            # Parse status code from "200 OK" format
-            status_code = int(status.split(' ', 1)[0])
-
-            # Convert headers to h11 format (bytes)
-            h11_headers = [
+                    exc_info = None  # Avoid circular reference
+            status_code = int(status.split(' ', 1)[0])  # Parse from "200 OK" format
+            response = h11.Response(status_code=status_code, headers=[
                 (name.encode('ISO-8859-1'), value.encode('ISO-8859-1'))
                 for name, value in headers
-            ]
-
-            response = h11.Response(status_code=status_code, headers=h11_headers)
-            start_response(response)
-
+            ])
             return _wsgi_response_write
 
-        response_body = app(environ, wsgi_start_response)
-        try:
-            for chunk in response_body:
-                if chunk:
-                    yield h11.Data(data=chunk)
-        finally:
-            if hasattr(response_body, 'close'):
-                response_body.close()
+        def wsgi_run():
+            chunks = app(environ, wsgi_start_response)
+            yield  # Skip the first iteration, to call the app and set the response object
+            with closing(chunks) if hasattr(chunks, 'close') else suppress():  # type: ignore
+                for chunk in chunks:
+                    yield h11.Data(chunk)
+
+        response_body = wsgi_run()
+        next(response_body)
+        assert response, "WSGI app did not call start_response"
+        return response, closing(response_body)
 
     return handler
 
@@ -114,6 +115,14 @@ def _main_flask():
     def hello(name):
         user_agent = flask_request.headers.get('User-Agent', 'Unknown')
         return f'Hello, {name}! Your User-Agent is: {user_agent}\n'
+
+
+    @app.route('/hello-stream/<name>')
+    @stream_with_context
+    def hello_stream(name):
+        user_agent = flask_request.headers.get('User-Agent', 'Unknown')
+        yield f'Hello, {name}! '
+        yield f'Your User-Agent is: {user_agent}\n'
 
     handler = wrap_wsgi(app)
     with start_http_server(ServerConfig()) as server:

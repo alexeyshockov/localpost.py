@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import socket
 from collections.abc import Iterator, Callable, Iterable
-from contextlib import contextmanager, suppress, closing
+from contextlib import contextmanager, suppress, AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from io import DEFAULT_BUFFER_SIZE, RawIOBase
 from typing import final
@@ -177,10 +177,10 @@ class ClientConn:
         conn, sock = self.conn, self.socket
         body = RequestBodyStream(conn, sock)
         response, response_chunks = h(self, request, body)
-        with closing(response_chunks) if hasattr(response_chunks, 'close') else suppress():  # noqa
+        with response_chunks as chunks:
             sock.sendall(conn.send(response))
             check_cancelled()
-            for chunk in response_chunks:
+            for chunk in chunks:
                 check_cancelled()
                 sock.sendall(conn.send(chunk))
             sock.sendall(conn.send(h11.EndOfMessage()))
@@ -205,7 +205,7 @@ class RequestBodyStream(RawIOBase):
     def readall(self):
         chunks = bytearray()
         with suppress(EOFError):
-            while True:
+            while not self.finished:
                 chunks.extend(self._receive(DEFAULT_BUFFER_SIZE))
         return chunks
 
@@ -244,14 +244,18 @@ class RequestBodyStream(RawIOBase):
                 self._receive(DEFAULT_BUFFER_SIZE)
 
 
-RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase], tuple[h11.Response, Iterable[h11.Data]]]
+RequestHandler = Callable[
+    [ClientConn, h11.Request, RawIOBase],
+    tuple[h11.Response, AbstractContextManager[Iterable[h11.Data]]]
+]
 
 
 def _main():
     logging.basicConfig(level=logging.DEBUG)
 
     def simple_app(c: ClientConn, r: h11.Request, rb: RawIOBase):
-        return h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]), [h11.Data(b'Hello, World!\n')]
+        return (h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]),
+                nullcontext([h11.Data(b'Hello, World!\n')]))
 
     with start_http_server(ServerConfig()) as server:
         for client_conn in server:

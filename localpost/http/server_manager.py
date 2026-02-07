@@ -19,17 +19,6 @@ from .server import start_http_server, ClientConn, Server
 __all__ = ['Worker', 'serve']
 
 
-class AbstractSyncWorker[T]:
-    def __init__(self, server: Iterable[T], max_concurrency: int) -> None:
-        self.server = server
-        self.max_concurrency = max_concurrency
-
-    def shutdown(self) -> None:
-        """Graceful shutdown (stop handling new connections, wait for in-flight requests)."""
-        self.server.shutdown()
-
-
-
 @asynccontextmanager
 async def serve(app: WSGIApplication, config: WorkerConfig, /):
     """Run multiple servers (workers)."""
