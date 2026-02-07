@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import socket
-from collections.abc import Iterator, Callable, Generator
+from collections.abc import Iterator, Callable, Iterable
 from contextlib import contextmanager, suppress, closing
 from dataclasses import dataclass
 from io import DEFAULT_BUFFER_SIZE, RawIOBase
@@ -21,7 +21,7 @@ import h11
 from localpost._sync_utils import CHECK_TIMEOUT, check_cancelled
 from localpost.http.config import ServerConfig, LOGGER_NAME
 
-__all__ = ['Server', 'ClientConn', 'RequestHandler', 'StartResponse', 'start_http_server']
+__all__ = ['Server', 'ClientConn', 'RequestHandler', 'start_http_server']
 
 
 @contextmanager
@@ -94,8 +94,8 @@ class ClientSocket:
     server: Server
     sock: socket.socket
     addr: tuple[str, int]
-    timeout: float = CHECK_TIMEOUT * 5
-    """Timeout for receive/send operations"""
+    timeout: float
+    """Timeout for receive/send operations."""
     _recv_buf: bytes | None = None
 
     def __post_init__(self):
@@ -149,64 +149,109 @@ class ClientConn:
     def __call__(self, h: RequestHandler) -> None:
         conn, sock = self.conn, self.socket
         try:
-            request: h11.Request | None = None
-            body: bytearray = bytearray()
-            while True:
+            while conn.our_state is not h11.MUST_CLOSE:
+                if (prev_state := conn.our_state) is h11.DONE:
+                    conn.start_next_cycle()
                 event = conn.next_event()
                 if event is h11.NEED_DATA:
+                    if prev_state is h11.DONE:
+                        if not sock.wait_for_req(self.config.keep_alive_timeout):
+                            if self.server.running:
+                                self._logger.debug("Closing idle client connection (keep-alive timeout: %s seconds)",
+                                                   self.config.keep_alive_timeout)
+                            return
                     conn.receive_data(sock.recv())
-                elif isinstance(event, h11.Data):
-                    body.extend(event.data)
-                    # TODO Max body size check (by the header?..)
                 elif isinstance(event, h11.Request):
-                    request = event
-                elif isinstance(event, h11.ConnectionClosed):  # Client closed connection
-                    self._logger.debug("Client connection closed unexpectedly")
+                    self._handle_request(h, event)
+                elif isinstance(event, h11.ConnectionClosed):
+                    self._logger.debug("Client closed connection")
                     return
-                elif isinstance(event, h11.EndOfMessage):
-                    self._handle_request(h, request, body)
-                    request = None
-                    body.clear()
-                    conn.start_next_cycle()
-                    if not sock.wait_for_req(self.config.keep_alive_timeout):
-                        if self.server.running:
-                            self._logger.debug("Closing idle client connection (keep-alive timeout: %s seconds)",
-                                               self.config.keep_alive_timeout)
-                        return
-                else:
-                    raise RuntimeError(f"Unexpected h11 event: {event!r}")
+                else:  # h11.Data | h11.EndOfMessage should be handled while processing the request (body)
+                    raise RuntimeError(f"Unexpected {event!r} in the connection loop")
         except TimeoutError:
             self._logger.debug("Client connection timed out", exc_info=True)
         finally:
             sock.close()
 
-    def _handle_request(self, h: RequestHandler, request: h11.Request, body: bytearray) -> None:
+    def _handle_request(self, h: RequestHandler, request: h11.Request) -> None:
         conn, sock = self.conn, self.socket
-
-        def start_response(response: h11.Response) -> None:
-            check_cancelled()
-            # Add Connection header if not present?..
+        body = RequestBodyStream(conn, sock)
+        response, response_chunks = h(self, request, body)
+        with closing(response_chunks) if hasattr(response_chunks, 'close') else suppress():  # noqa
             sock.sendall(conn.send(response))
-
-        with closing(h(self, request, body, start_response)) as response_chunks:
             check_cancelled()
             for chunk in response_chunks:
                 check_cancelled()
                 sock.sendall(conn.send(chunk))
+            sock.sendall(conn.send(h11.EndOfMessage()))
+        body.drain()
 
-        sock.sendall(conn.send(h11.EndOfMessage()))
+
+@dataclass(slots=True)
+class RequestBodyStream(RawIOBase):
+    conn: h11.Connection
+    sock: ClientSocket
+    finished: bool = False
+
+    def writable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def readable(self):
+        return True
+
+    def readall(self):
+        chunks = bytearray()
+        with suppress(EOFError):
+            while True:
+                chunks.extend(self._receive(DEFAULT_BUFFER_SIZE))
+        return chunks
+
+    def readinto(self, b: bytearray, /) -> int:
+        try:
+            data = self._receive(len(b))
+            size = len(data)
+            b[:size] = data
+            return size
+        except EOFError:
+            return 0
+
+    def _receive(self, size: int, /) -> bytes:
+        """Receive next chunk of body data from the socket via h11."""
+        if self.finished:
+            raise EOFError()
+        conn, sock = self.conn, self.sock
+        while True:
+            event = conn.next_event()
+            if event is h11.NEED_DATA:
+                conn.receive_data(sock.recv(size))
+            elif isinstance(event, h11.Data):
+                return event.data
+            elif isinstance(event, h11.EndOfMessage):
+                self.finished = True
+                raise EOFError()
+            elif isinstance(event, h11.ConnectionClosed):
+                raise ConnectionAbortedError("Client closed connection unexpectedly")
+            else:
+                raise RuntimeError(f"Unexpected h11 event: {event!r}")
+
+    def drain(self) -> None:
+        """Consume any remaining body data. Required before starting next request cycle."""
+        with suppress(EOFError):
+            while not self.finished:
+                self._receive(DEFAULT_BUFFER_SIZE)
 
 
-StartResponse = Callable[[h11.Response], None]
-RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase, StartResponse], Generator[h11.Data]]
+RequestHandler = Callable[[ClientConn, h11.Request, RawIOBase], tuple[h11.Response, Iterable[h11.Data]]]
 
 
 def _main():
     logging.basicConfig(level=logging.DEBUG)
 
-    def simple_app(c: ClientConn, r: h11.Request, rb: RawIOBase, start_response: StartResponse):
-        start_response(h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]))
-        yield h11.Data(data=b'Hello, World!\n')
+    def simple_app(c: ClientConn, r: h11.Request, rb: RawIOBase):
+        return h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]), [h11.Data(b'Hello, World!\n')]
 
     with start_http_server(ServerConfig()) as server:
         for client_conn in server:

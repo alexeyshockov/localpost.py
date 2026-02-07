@@ -22,7 +22,7 @@ class ServerConfig:
     backlog: int = 16
     """Maximum number of queued connections."""
     rw_timeout: float = 3.0
-    """Timeout (seconds) for read/write operations."""
+    """Timeout (seconds) for receive/send operations on a client connection."""
     keep_alive_timeout: float = 15.0
     """Timeout (seconds) for idle connections."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB
@@ -33,7 +33,7 @@ class ServerConfig:
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
-    max_connections: int = 10
-    """Max connections = max concurrent requests."""
-    max_idle_connections: int = 5
-    """Maximum number of idle (keep-alive) connections (<= max_connections)."""
+    max_connections: int = 100
+    """Max open connections (including idle)."""
+    max_requests: int = 5
+    """Max parallel requests."""
