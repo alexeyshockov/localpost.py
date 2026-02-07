@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import socket
 import threading
-from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
 
 import anyio
 from anyio import from_thread

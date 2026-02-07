@@ -3,35 +3,38 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import final
 from wsgiref.types import WSGIApplication
 
 import anyio
-from anyio import to_thread, CancelScope, from_thread, create_task_group
+from anyio import CancelScope, create_task_group, from_thread, to_thread
 
 from localpost._sync_utils import _acquire
-from .config import WorkerConfig
-from .server import start_http_server, ClientConn, Server
 
-__all__ = ['Worker', 'serve']
+from .config import WorkerConfig
+from .server import Server, start_http_server
+from .server_wsgi import wrap_wsgi
+
+__all__ = ["Worker", "serve"]
 
 
 @asynccontextmanager
 async def serve(app: WSGIApplication, config: WorkerConfig, /):
     """Run multiple servers (workers)."""
+    handler = wrap_wsgi(app)
     threads_limiter = anyio.CapacityLimiter(config.max_connections)
     conn_sem = threading.BoundedSemaphore(config.max_connections)
 
-    def handle_client(c: ClientConn) -> None:
+    def handle_client(c) -> None:
         try:
-            c()
+            c(handler)
         finally:
             conn_sem.release()
 
-    def handle_client_thread(c: ClientConn) -> Awaitable[None]:
+    def handle_client_thread(c) -> Awaitable[None]:
         return to_thread.run_sync(handle_client, c, limiter=threads_limiter)
 
     def handle_clients_thread() -> Awaitable[None]:
@@ -40,12 +43,12 @@ async def serve(app: WSGIApplication, config: WorkerConfig, /):
     def handle_clients() -> None:
         _acquire(conn_sem)
         for client_conn in server:
-            # Process the client in a separate thread, to support multiple concurrent connections
+            # Handle each client connection in a separate thread
             from_thread.run_sync(tg.start_soon, handle_client_thread, client_conn)
             _acquire(conn_sem)
 
     async with create_task_group() as tg:
-        with start_http_server(app, config.server) as server:
+        with start_http_server(config.server) as server:
             tg.start_soon(handle_clients_thread)
             yield Worker(server, config, tg.cancel_scope)
 
@@ -66,8 +69,8 @@ def _sample_usage():
     logging.basicConfig(level=logging.DEBUG)
 
     def simple_app(_, start_response):
-        start_response('200 OK', [('Content-Type', 'text/plain')])
-        return [f'Hello from worker thread {threading.get_ident()}!\n'.encode('utf-8')]
+        start_response("200 OK", [("Content-Type", "text/plain")])
+        return [f"Hello from worker thread {threading.get_ident()}!\n".encode()]
 
     async def _run():
         async with serve(simple_app, WorkerConfig()) as w:
@@ -80,5 +83,5 @@ def _sample_usage():
     anyio.run(_run)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     _sample_usage()
