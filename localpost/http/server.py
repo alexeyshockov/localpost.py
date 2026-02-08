@@ -46,14 +46,12 @@ class Connections:
     _selector: selectors.BaseSelector = field(default_factory=selectors.DefaultSelector)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
+    # Add self-pipe wakeup trick and queue
     def register(self, conn: ClientConn) -> None:
         sock = conn.sock.sock
         sock.settimeout(0)
         with self._lock:
             self._selector.register(sock, selectors.EVENT_READ, data=conn)
-
-    # Add self-pipe wakeup trick and queue
-    register_back = register
 
     def unregister(self, conn: ClientConn) -> None:
         sock = conn.sock.sock
@@ -80,19 +78,17 @@ class Server:
         self,
         server_sock: socket.socket,
         config: ServerConfig,
-        handler: ConnHandler,
         logger: logging.Logger,
     ) -> None:
-        self.selector = Selector(self)
         self.sock = server_sock
-        self.config = config
-        self.handler = handler
         self.port = server_sock.getsockname()[1]
         """
         Actual port the server is listening on.
         
         Can be useful when port 0 is specified to auto-assign a free port.
         """
+        self.config = config
+        self.conns = Connections(self)
         self._logger = logger
         self._running = False
 
@@ -106,21 +102,25 @@ class Server:
             return
         self.sock.close()  # Safe to call if from another thread, will cause accept() to raise OSError
 
-    def serve_forever(self) -> None:
-        selector, conn_handler = self.selector, self.handler
+    def keep_alive(self, conn: ClientConn) -> None:
+        self.conns.register(conn)
+
+    def accept(self) -> Iterable[ClientConn]:
+        conns, server_sock = self.conns, self.sock
         self._running = True
-        for key in selector:
-            if key.fileobj is self.sock:
-                client_sock, client_addr = self.sock.accept()
+        for key in conns.select():
+            if key.fileobj is server_sock:
+                client_sock, client_addr = server_sock.accept()
                 cs = ClientSocket(client_sock, client_addr, self.config.rw_timeout)
-                selector.register(ClientConn(self, cs, self._logger))
+                yield ClientConn(self, self.config, cs, self._logger)
             elif (conn := key.data) and isinstance(conn, ClientConn):
-                if (event := conn.poke()) is not h11.NEED_DATA:
-                    selector.unregister(conn)
-                    conn_handler(conn, event)
+                conns.unregister(conn)
+                yield conn
+            else:
+                raise RuntimeError(f"Unexpected selector key: {key!r}")
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class ClientSocket:
     sock: socket.socket
     addr: tuple[str, int]
@@ -142,95 +142,48 @@ class ClientSocket:
         raise TimeoutError("send timeout")
 
     def close(self) -> None:
-        # TODO Unregister from selector
         self.sock.close()
 
 
 @final
+@dataclass(slots=True)
 class ClientConn:
-    def __init__(
-        self,
-        server: Server,
-        client_sock: ClientSocket,
-        logger: logging.Logger,
-    ) -> None:
-        self.server = server
-        self.config = server.config
-        self.sock = client_sock
-        self.conn = h11.Connection(h11.SERVER)
-        self._logger = logger
+    server: Server
+    config: ServerConfig
+    sock: ClientSocket
+    _logger: logging.Logger
+    _conn: h11.Connection = field(default_factory=lambda: h11.Connection(h11.SERVER))
 
-    def poke(self) -> h11.Event | type[h11.NEED_DATA]:
-        conn, sock = self.conn, self.sock
-        while True:
-            try:
-                conn.receive_data(sock.recv())
-                if (event := conn.next_event()) is not h11.NEED_DATA:
-                    return event
-            except BlockingIOError:
-                return h11.NEED_DATA
-
-    def register_back(self) -> None:
-        self.server.selector.register_back(self)
-
-    def __old__call__(self, h: RequestHandler) -> None:
-        conn, sock = self.conn, self.sock
+    def __call__(self, h: RequestHandler) -> None:
+        conn, sock = self._conn, self.sock
         try:
-            while conn.our_state is not h11.MUST_CLOSE:
+            while True:
                 if (prev_state := conn.our_state) is h11.DONE:
                     conn.start_next_cycle()
                 event = conn.next_event()
-                if event is h11.NEED_DATA:
-                    if prev_state is h11.DONE:
-                        if not sock.wait_for_req(self.config.keep_alive_timeout):
-                            if self.server.running:
-                                self._logger.debug("Closing idle client connection (keep-alive timeout: %s seconds)",
-                                                   self.config.keep_alive_timeout)
-                            return
+                if event is h11.NEED_DATA and prev_state is h11.DONE:
+                    self.server.keep_alive(self)
+                    return
+                elif event is h11.NEED_DATA:
                     conn.receive_data(sock.recv())
                 elif isinstance(event, h11.Request):
                     self._handle_request(h, event)
+                    if conn.our_state is h11.MUST_CLOSE:
+                        sock.close()
+                        return
                 elif isinstance(event, h11.ConnectionClosed):
                     self._logger.debug("Client closed connection")
+                    sock.close()
                     return
                 else:  # h11.Data | h11.EndOfMessage should be handled while processing the request (body)
                     raise RuntimeError(f"Unexpected {event!r} in the connection loop")
         except TimeoutError:
             self._logger.debug("Client connection timed out", exc_info=True)
-        finally:
-            sock.close()
 
-@final
-@dataclass(frozen=True, slots=True)
-class DefaultConnHandler:
-    req_handler: RequestHandler
-    _logger: logging.Logger
-
-    def __call__(self, client_conn: ClientConn, event) -> None:
-        conn, sock = client_conn.conn, client_conn.sock
-        while True:
-            if isinstance(event, h11.Request):
-                self._handle_request(client_conn, event)
-                if conn.our_state is h11.MUST_CLOSE:
-                    sock.close()
-                    return
-                if conn.our_state is h11.DONE:
-                    conn.start_next_cycle()
-            elif event is h11.NEED_DATA:
-                client_conn.register_back()
-                return
-            elif isinstance(event, h11.ConnectionClosed):
-                self._logger.debug("Client closed connection")
-                sock.close()
-                return
-            else:  # h11.Data | h11.EndOfMessage should be handled while processing the request (body)
-                raise RuntimeError(f"Unexpected {event!r} in the connection loop")
-            event = conn.next_event()
-
-    def _handle_request(self, client_conn: ClientConn, request: h11.Request) -> None:
-        conn, sock, h = client_conn.conn, client_conn.sock, self.req_handler
+    def _handle_request(self, h: RequestHandler, request: h11.Request) -> None:
+        conn, sock = self._conn, self.sock
         body = RequestBodyStream(conn, sock)
-        response, response_chunks = h(client_conn, request, body)
+        response, response_chunks = h(self, request, body)
         with response_chunks as chunks:
             sock.sendall(conn.send(response))
             check_cancelled()
@@ -298,9 +251,6 @@ class RequestBodyStream(RawIOBase):
                 self._receive(DEFAULT_BUFFER_SIZE)
 
 
-ConnHandler = Callable[[ClientConn], None]
-
-
 RequestHandler = Callable[
     [ClientConn, h11.Request, IOBase],
     tuple[h11.Response, AbstractContextManager[Iterable[h11.Data]]]
@@ -315,7 +265,7 @@ def _main():
                 nullcontext([h11.Data(b'Hello, World!\n')]))
 
     with start_http_server(ServerConfig()) as server:
-        for client_conn in server:
+        for client_conn in server.accept():
             client_conn(simple_app)
 
 
