@@ -4,7 +4,7 @@ import logging
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import closing, AbstractContextManager, suppress
-from io import BufferedReader, RawIOBase
+from io import BufferedReader, RawIOBase, IOBase
 from typing import Any
 from wsgiref.types import WSGIApplication
 
@@ -18,7 +18,7 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
     """Wrap a WSGI application as a RequestHandler."""
 
     def handler(
-        client: ClientConn, request: h11.Request, body: RawIOBase
+        client: ClientConn, request: h11.Request, body: IOBase
     ) -> tuple[h11.Response, AbstractContextManager[Iterable[h11.Data]]]:
         environ = _build_environ(client, request, body)
         response: h11.Response | None = None
@@ -60,7 +60,7 @@ def _wsgi_response_write(_: bytes) -> None:
     raise NotImplementedError("write() is deprecated and not supported")
 
 
-def _build_environ(client: ClientConn, request: h11.Request, body: RawIOBase) -> dict[str, Any]:
+def _build_environ(client: ClientConn, request: h11.Request, body: IOBase) -> dict[str, Any]:
     # Decode path and parse query string
     path = request.target.decode('ISO-8859-1')
     if '?' in path:

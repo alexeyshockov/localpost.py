@@ -62,7 +62,7 @@ class Worker:
 
     def shutdown(self) -> None:
         """Graceful shutdown (stop handling new connections, wait for in-flight requests)."""
-        self.server.shutdown()
+        self.server.close()
 
 
 def _sample_usage():
