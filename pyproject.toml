@@ -85,6 +85,7 @@ azure-servicebus = [
 dev = [
     "icecream ~=2.1",
     "structlog ~=25.0",
+    "trio ~=0.32",
 ]
 dev-hosting-http = [
     "uvicorn ~=0.30",
@@ -103,6 +104,7 @@ dev-consumers = [
 ]
 dev-http = [
     "flask ~=3.1",
+    "a2wsgi",
 ]
 dev-sentry = [
     "sentry-sdk ~=2.51",

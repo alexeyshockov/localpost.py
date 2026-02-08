@@ -13,10 +13,9 @@ import anyio
 from anyio import CancelScope, create_task_group, from_thread, to_thread
 
 from localpost._sync_utils import _acquire
-
 from .config import WorkerConfig
 from .server import Server, start_http_server
-from .server_wsgi import wrap_wsgi
+from .wsgi import wrap_wsgi
 
 __all__ = ["Worker", "serve"]
 
@@ -25,8 +24,9 @@ __all__ = ["Worker", "serve"]
 async def serve(app: WSGIApplication, config: WorkerConfig, /):
     """Run multiple servers (workers)."""
     handler = wrap_wsgi(app)
+    # handler = _limit_requests(handler, threading.BoundedSemaphore(config.max_requests))
     threads_limiter = anyio.CapacityLimiter(config.max_connections)
-    conn_sem = threading.BoundedSemaphore(config.max_connections)
+    conn_sem = threading.BoundedSemaphore(config.max_connections)  # TODO AnyIO one, if the server is async
 
     def handle_client(c) -> None:
         try:
