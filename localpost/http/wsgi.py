@@ -126,7 +126,7 @@ def _main_flask():
 
     handler = wrap_wsgi(app)
     with start_http_server(ServerConfig()) as server:
-        for client_conn in server:
+        for client_conn in server.accept():
             client_conn(handler)
 
 

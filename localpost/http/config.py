@@ -19,7 +19,7 @@ LOGGER_NAME = "localpost.http"
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
-    backlog: int = 16
+    backlog: int = 1024
     """Maximum number of queued connections."""
     rw_timeout: float = 3.0
     """Timeout (seconds) for receive/send operations on a client connection."""

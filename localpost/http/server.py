@@ -12,18 +12,19 @@ import logging
 import selectors
 import socket
 import threading
-from collections.abc import Iterator, Callable, Iterable
-from contextlib import contextmanager, suppress, AbstractContextManager, nullcontext, closing
+import time
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, closing, nullcontext, suppress
 from dataclasses import dataclass, field
-from io import DEFAULT_BUFFER_SIZE, RawIOBase, IOBase
+from io import DEFAULT_BUFFER_SIZE, IOBase, RawIOBase
 from typing import final
 
 import h11
 
 from localpost._sync_utils import CHECK_TIMEOUT, check_cancelled
-from localpost.http.config import ServerConfig, LOGGER_NAME
+from localpost.http.config import LOGGER_NAME, ServerConfig
 
-__all__ = ['Server', 'ClientConn', 'RequestHandler', 'start_http_server']
+__all__ = ["Server", "ClientConn", "RequestHandler", "start_http_server"]
 
 
 def start_http_server(config: ServerConfig) -> AbstractContextManager[Server]:
@@ -42,22 +43,34 @@ def start_http_server(config: ServerConfig) -> AbstractContextManager[Server]:
 @dataclass(slots=True)
 class Connections:
     server: Server
-    keep_alive_conns: list[ClientConn] = field(default_factory=list)
     _selector: selectors.BaseSelector = field(default_factory=selectors.DefaultSelector)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # Add self-pipe wakeup trick and queue
     def register(self, conn: ClientConn) -> None:
-        sock = conn.sock.sock
+        conn.idle_since, sock = time.monotonic(), conn.sock.raw_sock
         sock.settimeout(0)
         with self._lock:
             self._selector.register(sock, selectors.EVENT_READ, data=conn)
 
     def unregister(self, conn: ClientConn) -> None:
-        sock = conn.sock.sock
+        sock = conn.sock.raw_sock
         with self._lock:
             self._selector.unregister(sock)
         sock.settimeout(CHECK_TIMEOUT)
+
+    def _find_stale(self):
+        now, timeout = time.monotonic(), self.server.config.keep_alive_timeout
+        for key in self._selector.get_map().values():
+            if (conn := key.data) and isinstance(conn, ClientConn):
+                if now - conn.idle_since > timeout:
+                    yield conn
+
+    def _cleanup_stale(self):
+        with self._lock:
+            for conn in list(self._find_stale()):
+                self._selector.unregister(conn.sock.raw_sock)
+                conn.sock.close()
 
     def select(self) -> Iterator[selectors.SelectorKey]:
         selector, server_sock = self._selector, self.server.sock
@@ -66,6 +79,7 @@ class Connections:
         try:
             while self.server.running:
                 check_cancelled()
+                self._cleanup_stale()
                 for key, _ in selector.select(timeout=CHECK_TIMEOUT):
                     yield key
         finally:
@@ -88,7 +102,7 @@ class Server:
         Can be useful when port 0 is specified to auto-assign a free port.
         """
         self.config = config
-        self.conns = Connections(self)
+        self._conns = Connections(self)
         self._logger = logger
         self._running = False
 
@@ -103,10 +117,10 @@ class Server:
         self.sock.close()  # Safe to call if from another thread, will cause accept() to raise OSError
 
     def keep_alive(self, conn: ClientConn) -> None:
-        self.conns.register(conn)
+        self._conns.register(conn)
 
     def accept(self) -> Iterable[ClientConn]:
-        conns, server_sock = self.conns, self.sock
+        conns, server_sock = self._conns, self.sock
         self._running = True
         for key in conns.select():
             if key.fileobj is server_sock:
@@ -122,7 +136,7 @@ class Server:
 
 @dataclass(frozen=True, slots=True)
 class ClientSocket:
-    sock: socket.socket
+    raw_sock: socket.socket
     addr: tuple[str, int]
     timeout: float
     """Timeout for receive/send operations."""
@@ -131,18 +145,18 @@ class ClientSocket:
         for _ in range(int(self.timeout / CHECK_TIMEOUT)):
             check_cancelled()
             with suppress(TimeoutError):
-                return self.sock.recv(size)
+                return self.raw_sock.recv(size)
         raise TimeoutError("receive timeout")
 
     def sendall(self, buf, /) -> None:
         for _ in range(int(self.timeout / CHECK_TIMEOUT)):
             check_cancelled()
             with suppress(TimeoutError):
-                return self.sock.sendall(buf)
+                return self.raw_sock.sendall(buf)
         raise TimeoutError("send timeout")
 
     def close(self) -> None:
-        self.sock.close()
+        self.raw_sock.close()
 
 
 @final
@@ -153,6 +167,7 @@ class ClientConn:
     sock: ClientSocket
     _logger: logging.Logger
     _conn: h11.Connection = field(default_factory=lambda: h11.Connection(h11.SERVER))
+    idle_since: float = 0.0
 
     def __call__(self, h: RequestHandler) -> None:
         conn, sock = self._conn, self.sock
@@ -191,7 +206,7 @@ class ClientConn:
                 check_cancelled()
                 sock.sendall(conn.send(chunk))
             sock.sendall(conn.send(h11.EndOfMessage()))
-        body.drain()
+        body.drain()  # TODO Finally?..
 
 
 @dataclass(slots=True)
@@ -245,7 +260,7 @@ class RequestBodyStream(RawIOBase):
                 raise RuntimeError(f"Unexpected h11 event: {event!r}")
 
     def drain(self) -> None:
-        """Consume any remaining body data. Required before starting next request cycle."""
+        """Consume any remaining body data (required before starting next request cycle)."""
         with suppress(EOFError):
             while not self.finished:
                 self._receive(DEFAULT_BUFFER_SIZE)
@@ -261,13 +276,13 @@ def _main():
     logging.basicConfig(level=logging.DEBUG)
 
     def simple_app(c: ClientConn, r: h11.Request, rb: IOBase):
-        return (h11.Response(status_code=200, headers=[('Content-Type', 'text/plain')]),
-                nullcontext([h11.Data(b'Hello, World!\n')]))
+        return (h11.Response(status_code=200, headers=[("Content-Type", "text/plain")]),
+                nullcontext([h11.Data(b"Hello, World!\n")]))
 
     with start_http_server(ServerConfig()) as server:
         for client_conn in server.accept():
             client_conn(simple_app)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     _main()

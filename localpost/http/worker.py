@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
-from collections.abc import Awaitable
+from collections.abc import Awaitable, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import final
@@ -13,39 +13,41 @@ import anyio
 from anyio import CancelScope, create_task_group, from_thread, to_thread
 
 from localpost._sync_utils import _acquire
-from .config import WorkerConfig
-from .server import Server, start_http_server
-from .wsgi import wrap_wsgi
+from localpost.http.config import WorkerConfig
+from localpost.http.server import Server, start_http_server
+from localpost.http.wsgi import wrap_wsgi
 
 __all__ = ["Worker", "serve"]
 
 
 @asynccontextmanager
-async def serve(app: WSGIApplication, config: WorkerConfig, /):
+async def serve(app: WSGIApplication, config: WorkerConfig, /) -> AsyncIterator[Worker]:
     """Run multiple servers (workers)."""
     handler = wrap_wsgi(app)
-    # handler = _limit_requests(handler, threading.BoundedSemaphore(config.max_requests))
-    threads_limiter = anyio.CapacityLimiter(config.max_connections)
-    conn_sem = threading.BoundedSemaphore(config.max_connections)  # TODO AnyIO one, if the server is async
+    req_threads = anyio.CapacityLimiter(config.max_requests)
+    req_sem = threading.BoundedSemaphore(config.max_requests)
 
-    def handle_client(c) -> None:
+    def handle_client(c):
         try:
             c(handler)
         finally:
-            conn_sem.release()
+            req_sem.release()
 
     def handle_client_thread(c) -> Awaitable[None]:
-        return to_thread.run_sync(handle_client, c, limiter=threads_limiter)
+        return to_thread.run_sync(handle_client, c, limiter=req_threads)
+
+    def schedule_client_handler(c):
+        # Handle each client connection in a separate thread
+        from_thread.run_sync(tg.start_soon, handle_client_thread, c)
+
+    def handle_clients():
+        _acquire(req_sem)
+        for c in server.accept():
+            schedule_client_handler(c)
+            _acquire(req_sem)
 
     def handle_clients_thread() -> Awaitable[None]:
         return to_thread.run_sync(handle_clients, limiter=anyio.CapacityLimiter(1))
-
-    def handle_clients() -> None:
-        _acquire(conn_sem)
-        for client_conn in server:
-            # Handle each client connection in a separate thread
-            from_thread.run_sync(tg.start_soon, handle_client_thread, client_conn)
-            _acquire(conn_sem)
 
     async with create_task_group() as tg:
         with start_http_server(config.server) as server:
