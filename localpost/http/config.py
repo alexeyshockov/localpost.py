@@ -27,13 +27,13 @@ class ServerConfig:
     """Timeout (seconds) for idle connections."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB
     """Maximum request body size (bytes)."""
+    max_connections: int = 100
+    """Max open connections (including idle)."""
 
 
 @final
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
-    max_connections: int = 100
-    """Max open connections (including idle)."""
     max_requests: int = 5
     """Max parallel requests."""
