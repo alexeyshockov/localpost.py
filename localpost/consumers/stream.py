@@ -1,63 +1,69 @@
 import math
-from collections.abc import Callable
-from typing import Generic, TypeVar
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 
+import anyio
+from anyio import create_task_group, Semaphore, ClosedResourceError, CancelScope
 from anyio.abc import ObjectReceiveStream
 
-from localpost._utils import wait_any
-from localpost.flow import AnyHandlerManager, ensure_async_handler
-from localpost.flow._stream import create_stream_consumer
-from localpost.hosting import ServiceLifetimeManager
-
-T = TypeVar("T")
+from localpost._utils import NullSemaphore, ensure_int_or_inf
+from localpost.consumers import ensure_async_handler
+from localpost.consumers._utils import AsyncHandler
 
 __all__ = ["stream_consumer"]
 
 
-class StreamConsumerService(Generic[T]):
-    def __init__(
-        self,
-        target: ObjectReceiveStream[T],
-        handler: AnyHandlerManager[T],
-        /,
-        *,
-        concurrency: int,
-        process_leftovers: bool,
-    ):
-        if not (math.isinf(concurrency) or (isinstance(concurrency, int) and concurrency >= 1)):
-            raise ValueError("Number of consumers must be at least 1")
-
-        self.target = target
-        self.handler_m = handler
-        self.concurrency = concurrency
-        self.process_leftovers = process_leftovers
-
-    async def __call__(self, service_lifetime: ServiceLifetimeManager):
-        receiver = self.target
-        async with (
-            receiver,
-            self.handler_m as handler,
-            create_stream_consumer(
-                receiver,
-                ensure_async_handler(handler, max_threads=self.concurrency),
-                concurrency=self.concurrency,
-            ) as consumer_state,
-        ):
-            service_lifetime.set_started()
-            if not self.process_leftovers:
-                await wait_any(service_lifetime.shutting_down, consumer_state.closed)
-                await receiver.aclose()
-            # Otherwise just wait for the stream to be exhausted and closed
-
-
-def stream_consumer(
-    target: ObjectReceiveStream[T],
+@asynccontextmanager
+async def stream_consumer[T](
+    stream: ObjectReceiveStream[T],
+    h: AsyncHandler[T],
     /,
     *,
-    concurrency: int = 1,
+    max_concurrency: int | float = math.inf,
     process_leftovers: bool = True,
-) -> Callable[[AnyHandlerManager[T]], StreamConsumerService[T]]:
-    """Decorator to create a stream consumer hosted service."""
-    return lambda handler_m: StreamConsumerService(
-        target, handler_m, concurrency=concurrency, process_leftovers=process_leftovers
-    )
+) -> AsyncIterator[None]:
+    max_concurrency = ensure_int_or_inf(max_concurrency, min_value=1)
+    req_sem = Semaphore(max_concurrency) if max_concurrency != math.inf else NullSemaphore()
+    handler = ensure_async_handler(h)
+
+    async def handle_item(item):
+        try:
+            await handler(item)
+        finally:
+            req_sem.release()
+
+    async def handle_items():
+        with suppress(ClosedResourceError):  # Receiver has been closed (according to process_leftovers setting)
+            await req_sem.acquire()
+            async for item in stream:
+                tg.start_soon(handle_item, item)
+                await req_sem.acquire()
+
+    async with stream, create_task_group() as tg:
+        tg.start_soon(handle_items)
+        yield
+        if not process_leftovers:
+            # Immediately stop consuming (close the receiver) and ignore the remaining items
+            await stream.aclose()
+        # Otherwise process all the remaining items (until the source stream is completed)
+
+
+def _sample_usage():
+    import logging
+    import anyio
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    async def _run():
+        async with serve(simple_app, WorkerConfig()) as w:
+            with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
+                async for _ in signals:
+                    w.shutdown()
+                    break
+
+    # noinspection PyTypeChecker
+    anyio.run(_run)
+
+
+if __name__ == "__main__":
+    _sample_usage()

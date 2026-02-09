@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import queue
 import threading
 from contextlib import suppress
 
@@ -15,8 +14,16 @@ def check_cancelled() -> None:
         from_thread.check_cancelled()
 
 
-def _acquire(sem: threading.Semaphore):
+def acquire_sem(sem: threading.Semaphore) -> None:
+    while not sem.acquire(timeout=CHECK_TIMEOUT):
+        check_cancelled()
+    return
+
+
+def pull_queue[T](q: queue.Queue[T] | queue.SimpleQueue[T]) -> T:
     while True:
         check_cancelled()
-        if sem.acquire(timeout=CHECK_TIMEOUT):
-            return
+        try:
+            return q.get(timeout=CHECK_TIMEOUT)
+        except queue.Empty:
+            continue

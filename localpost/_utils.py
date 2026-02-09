@@ -27,16 +27,12 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, CapacityLimiter, WouldBlock, create_task_group, from_thread, to_thread
+from anyio import CancelScope, CapacityLimiter, WouldBlock, create_task_group, from_thread, to_thread, \
+    create_memory_object_stream
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, _MemoryObjectStreamState
 from typing_extensions import NotRequired, Self, TypeVar
-
-if sys.version_info >= (3, 11):
-    from builtins import ExceptionGroup
-else:
-    from exceptiongroup import ExceptionGroup
 
 T = TypeVar("T", default=Any)
 P = ParamSpec("P")
@@ -317,16 +313,11 @@ class MemorySendStream(Generic[T], MemoryObjectSendStream[T]):
             pass
 
 
+# For better typing in PyCharm
 class MemoryStream(Generic[T]):
     @staticmethod
     def create(max_buffer_size: float = 0) -> tuple[MemorySendStream[T], MemoryObjectReceiveStream[T]]:
-        if max_buffer_size != math.inf and not isinstance(max_buffer_size, int):
-            raise ValueError("max_buffer_size must be either an integer or math.inf")
-        if max_buffer_size < 0:
-            raise ValueError("max_buffer_size cannot be negative")
-
-        state: _MemoryObjectStreamState[T] = _MemoryObjectStreamState(max_buffer_size)
-        return MemorySendStream(state), MemoryObjectReceiveStream(state)
+        return create_memory_object_stream(max_buffer_size)  # type: ignore[return-value]
 
 
 class AsyncBackendConfig(TypedDict):
@@ -436,3 +427,14 @@ async def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> None:
     except ExceptionGroup as exc_group:
         exc = unwrap_exc(exc_group)
         raise exc from exc.__cause__
+
+
+class NullSemaphore(AbstractContextManager):
+    def __exit__(self, exc_type, exc_value, traceback, /):
+        pass
+
+    async def acquire(self) -> None:
+        pass
+
+    def release(self) -> None:
+        pass

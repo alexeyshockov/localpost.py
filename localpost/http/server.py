@@ -248,6 +248,9 @@ class RequestBodyStream(RawIOBase):
         while True:
             event = conn.next_event()
             if event is h11.NEED_DATA:
+                if conn.they_are_waiting_for_100_continue:
+                    sock.sendall(conn.send(
+                        h11.InformationalResponse(status_code=100, headers=[], reason="Continue")))
                 conn.receive_data(sock.recv(size))
             elif isinstance(event, h11.Data):
                 return event.data
