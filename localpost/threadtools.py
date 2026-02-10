@@ -1,0 +1,284 @@
+from __future__ import annotations
+
+import dataclasses as dc
+import threading
+from collections import deque
+from collections.abc import Iterator, Callable
+from contextlib import contextmanager
+from functools import partial
+from typing import Any, Self, Protocol, final
+
+import anyio
+from anyio import EndOfStream, ClosedResourceError, from_thread, CapacityLimiter, to_thread
+from anyio.abc import TaskGroup as AnyioTaskGroup
+
+__all__ = [
+    "Channel",
+    "SendChannel",
+    "ReceiveChannel",
+]
+
+from localpost._utils import is_async_callable
+
+CHECK_TIMEOUT: float = 1.0
+"""Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
+
+# Alias, so it's possible to override if needed
+check_cancelled = from_thread.check_cancelled
+
+
+###
+# Synchronization primitives
+###
+
+@final
+class CancellableLock:
+    """Same interface as threading.Lock, but acquire() is cancellation aware."""
+
+    __slots__ = ("source", "release", "__exit__", "locked", "_release_save", "_acquire_restore", "_is_owned")
+
+    # noinspection PyProtectedMember
+    def __init__(self, lock: threading.Lock | threading.RLock | None = None) -> None:
+        lock = lock or threading.Lock()
+        self.source = lock
+        self.release = lock.release
+        self.__exit__ = lock.__exit__
+        if hasattr(self.source, "locked"):
+            self.locked = lock.locked
+        if hasattr(lock, '_release_save'):
+            self._release_save = lock._release_save
+        if hasattr(lock, '_acquire_restore'):
+            self._acquire_restore = lock._acquire_restore
+        if hasattr(lock, '_is_owned'):
+            self._is_owned = lock._is_owned
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if not blocking:
+            return self.source.acquire(blocking=False)
+        while not self.source.acquire(timeout=CHECK_TIMEOUT):
+            check_cancelled()
+        return True
+
+    __enter__ = acquire
+
+
+def cancellable_condition(lock: CancellableLock | None = None) -> threading.Condition:
+    return threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
+
+
+def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
+    source = threading.BoundedSemaphore(value)
+    source._cond = cancellable_condition()
+    return source
+
+
+###
+# Task groups
+###
+
+
+class TaskGroup:
+    def __init__(self, tg: AnyioTaskGroup) -> None:
+        self._tg = tg
+
+    def start_soon(self, func: Callable[..., object], *args: Any, limiter: CapacityLimiter | None = None) -> None:
+        target = func
+        if is_async_callable(func):
+            target = partial(to_thread.run_sync, target, limiter=limiter)
+        from_thread.run_sync(self._tg.start_soon, target, *args)
+
+
+@contextmanager
+def create_task_group() -> Iterator[TaskGroup]:
+    atg = anyio.create_task_group()
+    try:
+        yield TaskGroup(from_thread.run(atg.__aenter__))
+    except Exception as e:
+        if not from_thread.run(atg.__aexit__, type(e), e, e.__traceback__):
+            raise e
+    else:
+        from_thread.run(atg.__aexit__, None, None, None)
+
+
+###
+# Channels
+###
+
+
+@final
+class Channel[T]:
+    @staticmethod
+    def create(capacity: int | None = None) -> tuple[SendChannel[T], ReceiveChannel[T]]:
+        """Create a channel sender/receiver pair.
+
+        Args:
+            capacity: Buffer size. None means unbounded, 0 means rendezvous
+                (put blocks until a receiver consumes the item), N>0 means bounded.
+        """
+        with ChannelState(capacity) as state:
+            state.open_send_channels += 1
+            tx = SendChannel(state)
+            state.open_receive_channels += 1
+            rx = ReceiveChannel(state)
+            return tx, rx
+
+
+class BaseReceiveChannel[T](Protocol):
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def __iter__(self) -> Iterator[T]:
+        while True:
+            try:
+                yield self.get()
+            except EndOfStream:
+                break
+
+    def clone(self) -> ReceiveChannel[T]: ...
+
+    # Raises:
+    # EndOfChannel – if the sender has been closed cleanly, and no more objects are coming. This is not an error condition.
+    # ClosedResourceError – if you previously closed this ReceiveChannel object.
+    # BrokenResourceError – if something has gone wrong, and the channel is broken.
+    def get(self) -> T: ...
+
+    def close(self): ...
+
+
+class BaseSendChannel[T](Protocol):
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def clone(self) -> SendChannel[T]: ...
+
+    # Raises:
+    # BrokenResourceError – if something has gone wrong, and the channel is broken. For example, you may get this if the receiver has already been closed.
+    # ClosedResourceError – if you previously closed this SendChannel object, or if another task closes it while send() is running.
+    def put(self, item: T, /) -> None: ...
+
+    def close(self) -> None: ...
+
+
+@dc.dataclass(slots=True)
+class ChannelState[T]:
+    buffer: deque[T]
+    capacity: int | None
+    open_send_channels: int
+    open_receive_channels: int
+    _lock: CancellableLock
+    not_empty: threading.Condition
+    not_full: threading.Condition
+
+    def __init__(self, capacity: int | None = None):
+        self.buffer = deque()
+        self.capacity = capacity
+        """
+        None: unbounded
+        0: rendezvous (at most 1 item in-flight, put() blocks until a receiver consumes the item)
+        Positive int: bounded (put blocks until len(buffer) < capacity)"""
+        self.open_send_channels = 0
+        self.open_receive_channels = 0
+        self._lock = CancellableLock(threading.RLock())
+        self.not_empty = cancellable_condition(self._lock)
+        self.not_full = cancellable_condition(self._lock)
+
+    @property
+    def can_put(self) -> bool:
+        if self.open_receive_channels == 0:
+            raise ClosedResourceError("no more receivers")
+        return self.capacity is None or len(self.buffer) < max(self.capacity, 1)
+
+    def __enter__(self) -> Self:
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        if self.open_send_channels == 0 or self.open_receive_channels == 0:
+            self.not_empty.notify_all()
+            self.not_full.notify_all()
+        self._lock.release()
+
+
+class SendChannel[T](BaseSendChannel[T]):
+    def __init__(self, state: ChannelState[T]) -> None:
+        self._state = state
+        self._closed = False
+
+    def clone(self):
+        with self._state as state:
+            if self._closed:
+                raise ClosedResourceError("send channel is already closed")
+            state.open_send_channels += 1
+        return SendChannel(state)
+
+    def put(self, item: T, /) -> None:
+        # Phase 1: wait for space in the buffer
+        while True:
+            check_cancelled()
+            with self._state as state:
+                if self._closed:
+                    raise ClosedResourceError("send channel has been closed")
+                if state.can_put:
+                    state.buffer.append(item)
+                    state.not_empty.notify()
+                    break
+                state.not_full.wait()
+
+        # Phase 2 (rendezvous only): wait until the item is consumed
+        if self._state.capacity == 0:
+            while True:
+                with self._state as state:
+                    if self._closed:
+                        raise ClosedResourceError("send channel has been closed")
+                    if len(state.buffer) == 0:
+                        return  # Consumed
+                    if state.open_receive_channels == 0:
+                        return  # No receivers left
+                    state.not_full.wait()
+                check_cancelled()
+
+    def close(self) -> None:
+        with self._state as state:
+            if not self._closed:
+                self._closed = True
+                state.open_send_channels -= 1
+                state.not_full.notify()  # Wake up threads waiting in put() immediately
+
+
+class ReceiveChannel[T](BaseReceiveChannel[T]):
+    def __init__(self, state: ChannelState[T]) -> None:
+        self._state = state
+        self._closed = False
+
+    def clone(self):
+        with self._state as state:
+            if self._closed:
+                raise ClosedResourceError("receive channel is already closed")
+            state.open_receive_channels += 1
+        return ReceiveChannel(state)
+
+    def get(self) -> T:
+        check_cancelled()
+        while not self._closed:
+            with self._state as state:
+                if len(state.buffer) > 0:
+                    item = state.buffer.popleft()
+                    state.not_full.notify()
+                    return item
+                if state.open_send_channels == 0:
+                    raise EndOfStream("no more senders")
+                state.not_empty.wait()
+        raise ClosedResourceError("receive channel has been closed")
+
+    def close(self) -> None:
+        with self._state as state:
+            if not self._closed:
+                self._closed = True
+                state.open_receive_channels -= 1
+                state.not_empty.notify()  # Wake up threads waiting in get() immediately
