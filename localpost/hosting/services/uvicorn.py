@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from os import getenv
 from typing import Any, cast, final
 
@@ -9,8 +10,7 @@ from anyio import create_task_group
 from typing_extensions import Self
 
 from localpost._utils import start_task_soon
-
-from .._host import ServiceLifetimeManager
+from localpost.hosting._host import ServiceLifetime
 
 
 # Also see /health endpoint in http_app.py example
@@ -34,26 +34,14 @@ class UvicornService:
     # It is hard to use server.serve() directly, because it overrides the signal handlers. A possible workaround is
     # to call it in a separate thread, but currently it looks like an overkill.
     # See uvicorn.Server._serve() for the original implementation.
-    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
+    async def __call__(self, sl: ServiceLifetime) -> None:
         config = self.config
         server = uvicorn.Server(config)
 
         if config.should_reload:
-            raise ValueError("Reload is not supported")
+            raise ValueError("Uvicorn: reload is not supported")
         elif config.workers > 1:
-            raise ValueError("Multiple workers are not supported")
-
-        try:
-            if not config.loaded:
-                config.load()
-            server.lifespan = config.lifespan_class(config)
-            await server.startup()
-        except SystemExit as e:
-            service_lifetime.host.exit_code = cast(int, e.code)
-            raise e.__context__ if e.__context__ else RuntimeError("Server startup failed") from None
-
-        if not server.started:
-            raise RuntimeError("Server did not start")
+            raise ValueError("Uvicorn: multiple workers are not supported")
 
         async def serve():
             service_lifetime.set_started()

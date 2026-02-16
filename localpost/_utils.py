@@ -400,7 +400,7 @@ def cancellable_from(*events: AnyEventView):
     def _decorator(func: Callable[P, Awaitable[Any]]) -> Callable[P, Awaitable[None]]:
         @wraps(func)
         async def _wrapper(*args, **kwargs):
-            # await wait_any(lambda: func(*args, **kwargs), *[e.wait for e in events])
+            # Short version: await wait_any(lambda: func(*args, **kwargs), *[e.wait for e in events])
             async with create_task_group() as exec_tg:
                 exec_scope = exec_tg.cancel_scope
                 for e in events:

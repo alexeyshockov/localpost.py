@@ -2,13 +2,11 @@ import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
-import anyio
-from anyio import create_task_group, Semaphore, ClosedResourceError, CancelScope
+from anyio import create_task_group, Semaphore, ClosedResourceError
 from anyio.abc import ObjectReceiveStream
 
 from localpost._utils import NullSemaphore, ensure_int_or_inf
-from localpost.consumers import ensure_async_handler
-from localpost.consumers._utils import AsyncHandler
+from localpost.consumers._utils import AnyHandler, ensure_async_handler
 
 __all__ = ["stream_consumer"]
 
@@ -16,7 +14,7 @@ __all__ = ["stream_consumer"]
 @asynccontextmanager
 async def stream_consumer[T](
     stream: ObjectReceiveStream[T],
-    h: AsyncHandler[T],
+    h: AnyHandler[T],
     /,
     *,
     max_concurrency: int | float = math.inf,
@@ -46,24 +44,3 @@ async def stream_consumer[T](
             # Immediately stop consuming (close the receiver) and ignore the remaining items
             await stream.aclose()
         # Otherwise process all the remaining items (until the source stream is completed)
-
-
-def _sample_usage():
-    import logging
-    import anyio
-
-    logging.basicConfig(level=logging.DEBUG)
-
-    async def _run():
-        async with serve(simple_app, WorkerConfig()) as w:
-            with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
-                async for _ in signals:
-                    w.shutdown()
-                    break
-
-    # noinspection PyTypeChecker
-    anyio.run(_run)
-
-
-if __name__ == "__main__":
-    _sample_usage()

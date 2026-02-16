@@ -9,7 +9,7 @@ from functools import partial
 from typing import Any, Self, Protocol, final
 
 import anyio
-from anyio import EndOfStream, ClosedResourceError, from_thread, CapacityLimiter, to_thread
+from anyio import EndOfStream, ClosedResourceError, from_thread, CapacityLimiter, to_thread, WouldBlock
 from anyio.abc import TaskGroup as AnyioTaskGroup
 
 __all__ = [
@@ -30,6 +30,7 @@ check_cancelled = from_thread.check_cancelled
 ###
 # Synchronization primitives
 ###
+
 
 @final
 class CancellableLock:
@@ -52,18 +53,43 @@ class CancellableLock:
         if hasattr(lock, '_is_owned'):
             self._is_owned = lock._is_owned
 
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+    def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
         if not blocking:
             return self.source.acquire(blocking=False)
-        while not self.source.acquire(timeout=CHECK_TIMEOUT):
+        if timeout is None or timeout < 0:
+            # No timeout — loop until acquired, checking for cancellation
+            while not self.source.acquire(timeout=CHECK_TIMEOUT):
+                check_cancelled()
+            return True
+        # Finite timeout — respect the deadline
+        deadline = anyio.current_time() + timeout
+        while (remaining := deadline - anyio.current_time()) > 0:
+            if self.source.acquire(timeout=min(CHECK_TIMEOUT, remaining)):
+                return True
             check_cancelled()
-        return True
+        return False
 
     __enter__ = acquire
 
 
 def cancellable_condition(lock: CancellableLock | None = None) -> threading.Condition:
-    return threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
+    cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
+    orig_wait = cond.wait
+    def cancellable_wait(timeout: float | None = None) -> bool:
+        end_time = None if timeout is None else anyio.current_time() + timeout
+        while True:
+            check_cancelled()
+            if timeout is None:
+                remaining = CHECK_TIMEOUT
+            else:
+                remaining = min(CHECK_TIMEOUT, max(0.0, end_time - anyio.current_time()))
+            if orig_wait(remaining):
+                return True
+            if timeout is not None and anyio.current_time() >= end_time:
+                return False
+
+    cond.wait = cancellable_wait  # type: ignore
+    return cond
 
 
 def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
@@ -130,6 +156,12 @@ class BaseReceiveChannel[T](Protocol):
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
     def __iter__(self) -> Iterator[T]:
         while True:
             try:
@@ -140,9 +172,10 @@ class BaseReceiveChannel[T](Protocol):
     def clone(self) -> ReceiveChannel[T]: ...
 
     # Raises:
-    # EndOfChannel – if the sender has been closed cleanly, and no more objects are coming. This is not an error condition.
-    # ClosedResourceError – if you previously closed this ReceiveChannel object.
-    # BrokenResourceError – if something has gone wrong, and the channel is broken.
+    #   EndOfStream – if the sender has been closed cleanly, and no more objects are coming. This is not an error
+    #       condition.
+    #   ClosedResourceError – if you previously closed this ReceiveChannel object.
+    #   BrokenResourceError – if something has gone wrong, and the channel is broken.
     def get(self) -> T: ...
 
     def close(self): ...
@@ -155,11 +188,19 @@ class BaseSendChannel[T](Protocol):
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
     def clone(self) -> SendChannel[T]: ...
 
     # Raises:
-    # BrokenResourceError – if something has gone wrong, and the channel is broken. For example, you may get this if the receiver has already been closed.
-    # ClosedResourceError – if you previously closed this SendChannel object, or if another task closes it while send() is running.
+    #   BrokenResourceError – if something has gone wrong, and the channel is broken. For example, you may get this if
+    #       the receiver has already been closed.
+    #   ClosedResourceError – if you previously closed this SendChannel object, or if another task closes it while
+    #       put() is running.
     def put(self, item: T, /) -> None: ...
 
     def close(self) -> None: ...
@@ -217,18 +258,25 @@ class SendChannel[T](BaseSendChannel[T]):
             state.open_send_channels += 1
         return SendChannel(state)
 
+    def put_nowait(self, item: T, /) -> None:
+        with self._state as state:
+            if self._closed:
+                raise ClosedResourceError("send channel has been closed")
+            if not state.can_put:
+                raise WouldBlock
+            state.buffer.append(item)
+            state.not_empty.notify()
+
     def put(self, item: T, /) -> None:
         # Phase 1: wait for space in the buffer
         while True:
             check_cancelled()
             with self._state as state:
-                if self._closed:
-                    raise ClosedResourceError("send channel has been closed")
-                if state.can_put:
-                    state.buffer.append(item)
-                    state.not_empty.notify()
+                try:
+                    self.put_nowait(item)
                     break
-                state.not_full.wait()
+                except WouldBlock:
+                    state.not_full.wait()
 
         # Phase 2 (rendezvous only): wait until the item is consumed
         if self._state.capacity == 0:

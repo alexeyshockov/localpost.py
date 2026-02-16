@@ -12,20 +12,20 @@ from wsgiref.types import WSGIApplication
 import anyio
 from anyio import CancelScope, create_task_group, from_thread, to_thread
 
-from localpost._sync_utils import acquire_sem
+from localpost import threadtools
 from localpost.http.config import WorkerConfig
 from localpost.http.server import Server, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
-__all__ = ["Worker", "serve"]
+__all__ = ["Worker", "serve_http"]
 
 
 @asynccontextmanager
-async def serve(app: WSGIApplication, config: WorkerConfig, /) -> AsyncIterator[Worker]:
+async def serve_http(app: WSGIApplication, config: WorkerConfig, /) -> AsyncIterator[Worker]:
     """Run multiple servers (workers)."""
     handler = wrap_wsgi(app)
     req_threads = anyio.CapacityLimiter(config.max_requests)
-    req_sem = threading.BoundedSemaphore(config.max_requests)
+    req_sem = threadtools.cancellable_semaphore(config.max_requests)
 
     def handle_client(c):
         try:
@@ -37,11 +37,11 @@ async def serve(app: WSGIApplication, config: WorkerConfig, /) -> AsyncIterator[
         return to_thread.run_sync(handle_client, c, limiter=req_threads)
 
     def handle_clients():
-        acquire_sem(req_sem)
+        req_sem.acquire()
         for c in server.accept():
             # Handle each client connection in a separate thread
             from_thread.run_sync(tg.start_soon, handle_client_thread, c)
-            acquire_sem(req_sem)
+            req_sem.acquire()
 
     def handle_clients_thread() -> Awaitable[None]:
         return to_thread.run_sync(handle_clients, limiter=anyio.CapacityLimiter(1))
@@ -72,7 +72,7 @@ def _sample_usage():
         return [f"Hello from worker thread {threading.get_ident()}!\n".encode()]
 
     async def _run():
-        async with serve(simple_app, WorkerConfig()) as w:
+        async with serve_http(simple_app, WorkerConfig()) as w:
             with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
                 async for _ in signals:
                     w.close()

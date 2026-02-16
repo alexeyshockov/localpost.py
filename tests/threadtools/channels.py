@@ -1,13 +1,21 @@
 import threading
 import time
 import pytest
-from anyio import EndOfStream
+from anyio import EndOfStream, ClosedResourceError
 
+from localpost import threadtools
 from localpost.threadtools import Channel, SendChannel
 
-def no_anyio
+@pytest.fixture
+def no_anyio():
+    original_check_cancelled = threadtools.check_cancelled
+    threadtools.check_cancelled = lambda: None
+    try:
+        yield
+    finally:
+        threadtools.check_cancelled = original_check_cancelled
 
-def test_basic_send_receive():
+def test_basic_send_receive(no_anyio):
     """Test basic send and receive operations."""
     sender, receiver = Channel.create()
 
@@ -26,19 +34,19 @@ def test_basic_send_receive():
     receiver.close()
 
 
-def test_multiple_senders_single_receiver():
+def test_multiple_senders_single_receiver(no_anyio):
     """Test multiple senders with a single receiver."""
     sender, receiver = Channel.create()
     results = []
     num_senders = 3
-    num_messages_per_sender = 4
+    messages_per_sender = 3
     senders = [sender] + [sender.clone() for _ in range(num_senders - 1)]
 
     def send_messages(thread_sender: SendChannel[str], sender_id: int):
-        for i in range(3):
+        for i in range(messages_per_sender):
             thread_sender.put(f"sender{sender_id}-msg{i}")
-            time.sleep(0.01)  # Small delay to mix messages
-        sender.close()
+            time.sleep(0.05)  # Small delay to mix messages
+        thread_sender.close()
 
     # Start multiple sender threads
     threads = []
@@ -61,33 +69,32 @@ def test_multiple_senders_single_receiver():
     receiver.close()
 
     # Should have received all messages
-    assert len(results) == num_senders * num_messages_per_sender
+    assert len(results) == num_senders * messages_per_sender
     # Check that we got messages from all senders
     for i in range(num_senders):
         sender_msgs = [msg for msg in results if msg.startswith(f"sender{i}")]
-        assert len(sender_msgs) == num_messages_per_sender
+        assert len(sender_msgs) == messages_per_sender
 
 
-def test_single_sender_multiple_receivers():
+def test_single_sender_multiple_receivers(no_anyio):
     """Test single sender with multiple receivers."""
-    channel = Channel[int]()
-    sender = channel.open_sender()
+    sender, receiver = Channel.create()
     results = {i: [] for i in range(3)}
+    receivers = [receiver] + [receiver.clone() for _ in range(2)]
 
-    def receive_messages(receiver_id: int):
-        receiver = channel.open_receiver()
+    def receive_messages(recv, receiver_id: int):
         try:
             while True:
-                value = receiver.get()
+                value = recv.get()
                 results[receiver_id].append(value)
         except EndOfStream:
             pass
-        receiver.close()
+        recv.close()
 
     # Start multiple receiver threads
     threads = []
-    for i in range(3):
-        t = threading.Thread(target=receive_messages, args=(i,))
+    for i, recv in enumerate(receivers):
+        t = threading.Thread(target=receive_messages, args=(recv, i))
         t.start()
         threads.append(t)
 
@@ -113,30 +120,21 @@ def test_single_sender_multiple_receivers():
         assert len(receiver_results) > 0
 
 
-def test_no_receivers_error():
-    """Test that sending without receivers does not raise an error."""
-    channel = Channel[int]()
-    sender = channel.open_sender()
-
-    # Should not raise an error anymore - items go to buffer
-    sender.put(42)
-    sender.put(43)
-
-    # Now open a receiver and verify it gets the buffered items
-    receiver = channel.open_receiver()
-    assert receiver.get() == 42
-    assert receiver.get() == 43
-
-    sender.close()
+def test_no_receivers_error(no_anyio):
+    """Test that sending without receivers raises ClosedResourceError."""
+    sender, receiver = Channel.create()
     receiver.close()
 
+    with pytest.raises(ClosedResourceError):
+        sender.put(42)
 
-def test_end_of_channel():
+    sender.close()
+
+
+def test_end_of_channel(no_anyio):
     """Test that receivers get EndOfStream when all senders close."""
-    channel = Channel[int]()
-    sender1 = channel.open_sender()
-    sender2 = channel.open_sender()
-    receiver = channel.open_receiver()
+    sender1, receiver = Channel.create()
+    sender2 = sender1.clone()
 
     sender1.put(1)
     sender2.put(2)
@@ -157,11 +155,9 @@ def test_end_of_channel():
     receiver.close()
 
 
-def test_closed_channel_errors():
+def test_closed_channel_errors(no_anyio):
     """Test operations on closed channels raise errors."""
-    channel = Channel[int]()
-    sender = channel.open_sender()
-    receiver = channel.open_receiver()
+    sender, receiver = Channel.create()
 
     # Close sender and try to use it
     sender.close()
@@ -174,11 +170,9 @@ def test_closed_channel_errors():
         receiver.get()
 
 
-def test_blocking_receive():
+def test_blocking_receive(no_anyio):
     """Test that receive blocks until item is available."""
-    channel = Channel[str]()
-    sender = channel.open_sender()
-    receiver = channel.open_receiver()
+    sender, receiver = Channel.create()
     result = []
 
     def delayed_send():
@@ -208,34 +202,35 @@ def test_blocking_receive():
     assert result == ["delayed message"]
 
 
-def test_concurrent_stress():
+def test_concurrent_stress(no_anyio):
     """Stress test with many concurrent senders and receivers."""
-    channel = Channel[int]()
     num_senders = 5
     num_receivers = 3
     messages_per_sender = 100
 
+    sender, receiver = Channel.create()
+    senders = [sender] + [sender.clone() for _ in range(num_senders - 1)]
+    receivers = [receiver] + [receiver.clone() for _ in range(num_receivers - 1)]
+
     received = []
     received_lock = threading.Lock()
 
-    def sender_work(sender_id: int):
-        sender = channel.open_sender()
+    def sender_work(s, sender_id: int):
         try:
             for i in range(messages_per_sender):
-                sender.put(sender_id * 1000 + i)
+                s.put(sender_id * 1000 + i)
         finally:
-            sender.close()
+            s.close()
 
-    def receiver_work():
-        receiver = channel.open_receiver()
+    def receiver_work(r):
         local_received = []
         try:
             while True:
-                local_received.append(receiver.get())
+                local_received.append(r.get())
         except EndOfStream:
             pass
         finally:
-            receiver.close()
+            r.close()
 
         with received_lock:
             received.extend(local_received)
@@ -244,19 +239,17 @@ def test_concurrent_stress():
     threads = []
 
     # Start senders first to ensure at least one is open when receivers start
-    sender_threads = []
-    for i in range(num_senders):
-        t = threading.Thread(target=sender_work, args=(i,))
+    for i, s in enumerate(senders):
+        t = threading.Thread(target=sender_work, args=(s, i))
         t.start()
-        sender_threads.append(t)
         threads.append(t)
 
     # Give senders time to start
-    time.sleep(0.01)
+    time.sleep(0.05)
 
     # Start receivers
-    for _ in range(num_receivers):
-        t = threading.Thread(target=receiver_work)
+    for r in receivers:
+        t = threading.Thread(target=receiver_work, args=(r,))
         t.start()
         threads.append(t)
 
@@ -277,20 +270,17 @@ def test_concurrent_stress():
     assert sorted(received) == sorted(expected)
 
 
-def test_channel_cleanup():
+def test_channel_cleanup(no_anyio):
     """Test that channels clean up properly when references are dropped."""
-    channel = Channel[int]()
-
-    # Open and immediately close channels
     for _ in range(10):
-        sender = channel.open_sender()
-        receiver = channel.open_receiver()
+        sender, receiver = Channel.create()
         sender.put(42)
         assert receiver.get() == 42
+        state = sender._state
         sender.close()
         receiver.close()
 
-    # Verify state is clean
-    assert channel._state.open_send_channels == 0
-    assert channel._state.open_receive_channels == 0
-    assert len(channel._state.buffer) == 0
+        # Verify state is clean
+        assert state.open_send_channels == 0
+        assert state.open_receive_channels == 0
+        assert len(state.buffer) == 0
