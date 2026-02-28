@@ -1,19 +1,20 @@
 import queue
 import sys
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from queue import Queue, SimpleQueue
 
 import anyio
-from anyio import create_task_group, CancelScope, to_thread, CapacityLimiter, from_thread
+from anyio import CancelScope, CapacityLimiter, create_task_group, from_thread, to_thread
 
 from localpost import threadtools
 from localpost._utils import is_async_callable
-from localpost.consumers._utils import AsyncHandler, ensure_sync_handler, AnyHandler
+from localpost.consumers._utils import AnyHandler
 
 if sys.version_info >= (3, 13):
     from queue import ShutDown
 else:
+
     class ShutDown(Exception):
         pass
 
@@ -44,6 +45,7 @@ async def queue_consumer[T](
     req_sem = threadtools.cancellable_semaphore(max_concurrency)
 
     if is_async_callable(h):
+
         async def handle_item(item):
             try:
                 await h(item)

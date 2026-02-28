@@ -6,19 +6,18 @@ import math
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from functools import partial
-from typing import Final, TypeAlias, final, overload
+from typing import Final, final, overload
 
+import google.pubsub_v1 as pubsub
 from anyio import CancelScope, CapacityLimiter, create_task_group, from_thread, to_thread
 from google.api_core import retry
 from google.api_core.exceptions import AlreadyExists
 from google.api_core.gapic_v1.method import DEFAULT
-import google.pubsub_v1 as pubsub
-from google.pubsub_v1 import SubscriberAsyncClient, SubscriberClient
+from google.pubsub_v1 import SubscriberClient
 
 from localpost._utils import MemoryStream
 from localpost.flow import (
     AnyHandlerManager,
-    AsyncHandler,
     SyncHandler,
     ensure_async_handler,
     ensure_sync_handler,
@@ -139,8 +138,7 @@ class ConsumerClient:
             # https://cloud.google.com/pubsub/docs/reference/error-codes
             try:
                 logger.info("Creating subscription for pulling messages")
-                await to_thread.run_sync(
-                    client.create_subscription, {"name": subscription_path, "topic": topic_path})
+                await to_thread.run_sync(client.create_subscription, {"name": subscription_path, "topic": topic_path})
             except AlreadyExists:
                 logger.info("Subscription already exists, using it for pulling messages")
             yield cls(client, subscription_path, topic_path, max_messages, retry_policy)

@@ -1,6 +1,6 @@
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
-from anyio import CapacityLimiter, to_thread, from_thread
+from anyio import CapacityLimiter, from_thread, to_thread
 
 from localpost._utils import is_async_callable
 

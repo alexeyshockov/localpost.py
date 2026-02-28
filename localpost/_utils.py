@@ -16,8 +16,10 @@ from typing import (
     Any,
     Final,
     Generic,
+    NotRequired,
     ParamSpec,
     Protocol,
+    Self,
     TypeAlias,
     TypedDict,
     TypeGuard,
@@ -27,12 +29,19 @@ from typing import (
 )
 
 import anyio
-from anyio import CancelScope, CapacityLimiter, WouldBlock, create_task_group, from_thread, to_thread, \
-    create_memory_object_stream
+from anyio import (
+    CancelScope,
+    CapacityLimiter,
+    WouldBlock,
+    create_memory_object_stream,
+    create_task_group,
+    from_thread,
+    to_thread,
+)
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, _MemoryObjectStreamState
-from typing_extensions import NotRequired, Self, TypeVar
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from typing_extensions import TypeVar
 
 T = TypeVar("T", default=Any)
 P = ParamSpec("P")
@@ -291,6 +300,20 @@ def ensure_delay_factory(delay: DelayFactory, /) -> Callable[[], timedelta]:
         return delay
     else:  # int | float | timedelta | None
         return FixedDelay.create(delay)
+
+
+@dc.dataclass(eq=False, slots=True, init=False)
+class Switch:
+    value: bool = False
+
+    def __bool__(self) -> bool:
+        return self.value
+
+    def __enter__(self) -> None:
+        self.value = True
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.value = False
 
 
 # sleep(0) is used to return control to the event loop (in both Trio and AsyncIO)

@@ -1,17 +1,18 @@
 import math
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import suppress
 
-from anyio import create_task_group, Semaphore, ClosedResourceError
+from anyio import ClosedResourceError, Semaphore, create_task_group
 from anyio.abc import ObjectReceiveStream
 
+from localpost import hosting
 from localpost._utils import NullSemaphore, ensure_int_or_inf
 from localpost.consumers._utils import AnyHandler, ensure_async_handler
 
 __all__ = ["stream_consumer"]
 
 
-@asynccontextmanager
+@hosting.service
 async def stream_consumer[T](
     stream: ObjectReceiveStream[T],
     h: AnyHandler[T],

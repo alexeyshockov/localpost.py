@@ -1,32 +1,20 @@
 from __future__ import annotations
 
 import dataclasses as dc
+import inspect
 import logging
 import threading
 from _contextvars import ContextVar
-from collections.abc import Callable
-from contextlib import asynccontextmanager
-from functools import wraps
-from typing import (
-    ClassVar,
-    Literal,
-    final, Any, TypeVar, overload, cast, Awaitable,
-)
+from collections.abc import AsyncIterator, Awaitable, Callable, AsyncGenerator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, AsyncExitStack
+from functools import cached_property, wraps
+from typing import Any, ClassVar, Literal, TypeVar, final, overload
 
-import anyio
-from anyio import (
-    CancelScope, create_task_group, get_cancelled_exc_class,
-)
-from anyio import open_signal_receiver
+from anyio import CancelScope, create_task_group, get_cancelled_exc_class, to_thread, CapacityLimiter
 from anyio.abc import TaskGroup
 from anyio.from_thread import BlockingPortal
 
-from localpost._utils import (
-    EventView, Event, cancellable_from, unwrap_exc,
-)
-from localpost._utils import HANDLED_SIGNALS, choose_anyio_backend
-
-__all__ = ["ServiceLifetime", "HostLifetime", "current_host", "serve", "serve_app", "run", "arun"]
+from localpost._utils import Event, EventView, cancellable_from, unwrap_exc, wait_all, is_async_callable
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -44,7 +32,6 @@ class Starting:
 @dc.dataclass(frozen=True, slots=True)
 class Running:
     name: ClassVar[Literal["running"]] = "running"
-    # graceful_shutdown_scope: CancelScope | None = None
 
 
 @final
@@ -66,74 +53,57 @@ class Stopped:
 ServiceState = Starting | Running | ShuttingDown | Stopped
 
 
-_current_host: ContextVar[HostLifetime] = ContextVar("localpost.current_host")
+_svc_lt: ContextVar[ServiceLifetime] = ContextVar("localpost.current_service")
 
 
-def current_host() -> HostLifetime:
-    if _current_host.get(None) is None:
-        raise RuntimeError("Not in localpost hosting context")
-    return _current_host.get()
+def _current_service() -> ServiceLifetime:
+    if lt := _svc_lt.get(None):
+        return lt
+    raise RuntimeError("Not in hosting context")
 
 
-def _start_scv[T: AbstractLifetime](
-    lt: T, svc: Callable[[T], Awaitable[None]], /,
-    start_timeout: float | None = None,
-    shutdown_timeout: float | None = None,
-) -> None:
-    @wraps(svc)
-    async def _observed():
+def current_service() -> ServiceLifetimeView:
+    return _current_service().view
+
+
+@dc.dataclass(frozen=True)
+class ServiceLifetimeView:
+    _state: ServiceLifetime
+
+    started: EventView
+    shutting_down: EventView
+    stopped: EventView
+
+    @asynccontextmanager
+    async def observe(self) -> AsyncIterator[ServiceLifetimeView]:
+        await self.started
         try:
-            await svc(lt)
-        except get_cancelled_exc_class():  # BaseException
-            raise
-        except Exception as exc:
-            source_exc = unwrap_exc(exc)
-            # lt.exception = source_exc
-            object.__setattr__(lt, "exception", source_exc)
+            yield self
         finally:
-            lt.stopped.set()
-
-    lt.tg.start_soon(_observed)
-
-
-@dc.dataclass(frozen=True, eq=False, slots=True)
-class AbstractLifetime:
-    tg: TaskGroup
-    portal: BlockingPortal
-    thread_id: int = dc.field(default_factory=threading.get_ident)
-
-    started: EventView = dc.field(default_factory=Event)
-    shutting_down: EventView = dc.field(default_factory=Event)
-    stopped: EventView = dc.field(default_factory=Event)
-
-    shutdown_reason: BaseException | str | None = None
-    exception: BaseException | None = None
+            self.shutdown()
+            await self.stopped
 
     @property
-    def run_scope(self) -> CancelScope:
-        return self.tg.cancel_scope
+    def exit_code(self) -> int:
+        return self._state.exit_code
 
     @property
     def state(self) -> ServiceState:
-        if self.stopped:
-            return Stopped(self.shutdown_reason, self.exception)
-        if self.shutting_down:
-            return ShuttingDown(self.shutdown_reason)
-        if self.started:
-            return Running()
-        return Starting()
+        return self._state.state
 
     def wait_started(self) -> None:
         """Helper for sync code, to wait in a thread."""
-        if self.same_thread:
+        if self._state.same_thread:
             raise RuntimeError("Deadlock: synchronous wait in the async thread")
-        return self.portal.start_task_soon(self.started.wait).result()
+        # noinspection PyTypeChecker
+        return self._state.portal.start_task_soon(self.started.wait).result()
 
     def wait_shutting_down(self) -> None:
         """Helper for sync code, to wait in a thread."""
-        if self.same_thread:
+        if self._state.same_thread:
             raise RuntimeError("Deadlock: synchronous wait in the async thread")
-        return self.portal.start_task_soon(self.shutting_down.wait).result()
+        # noinspection PyTypeChecker
+        return self._state.portal.start_task_soon(self.shutting_down.wait).result()
 
     @overload
     def cancel_on_shutdown(self) -> Callable[[F], F]: ...
@@ -155,43 +125,37 @@ class AbstractLifetime:
         dec = cancellable_from(self.stopped)
         return dec(target) if target is not None else dec
 
-    @property
-    def same_thread(self) -> bool:
-        return threading.get_ident() == self.thread_id
-
-    def set_started(self) -> None:
-        def do_set_started():
-            assert not self.stopped, "Cannot mark already stopped service as started"
-            if self.started.is_set():
-                return
-            cast(Event, self.started).set()
-
-        in_host_thread(self, do_set_started)
-
     def shutdown(self, *, reason: BaseException | str | None = None) -> None:
         def do_shutdown():
             if self.stopped or self.shutting_down:
                 return
-            # self.shutdown_reason = reason
-            object.__setattr__(self, "shutdown_reason", reason)
-            cast(Event, self.shutting_down).set()
+            self._state.shutdown_reason = reason
+            self._state.shutting_down.set()
 
-        in_host_thread(self, do_shutdown)
+        in_host_thread(self._state, do_shutdown)
 
     def stop(self) -> None:
-        in_host_thread(self, self.run_scope.cancel)
+        in_host_thread(self._state, self._state.run_scope.cancel)
 
 
-@final
-@dc.dataclass(frozen=True, eq=False, slots=True)
-class ServiceLifetime(AbstractLifetime):
-    pass
+@dc.dataclass(eq=False, unsafe_hash=True)
+class ServiceLifetime:
+    portal: BlockingPortal
+    tg: TaskGroup = dc.field(default_factory=create_task_group)
+    thread_id: int = dc.field(default_factory=threading.get_ident)
 
+    started: Event = dc.field(default_factory=Event)
+    shutting_down: Event = dc.field(default_factory=Event)
+    stopped: Event = dc.field(default_factory=Event)
 
-@final
-@dc.dataclass(frozen=True, eq=False, slots=True)
-class HostLifetime(AbstractLifetime):
+    shutdown_reason: BaseException | str | None = None
+    exception: BaseException | None = None
+
     _exit_code: int | None = None
+
+    @cached_property
+    def view(self) -> ServiceLifetimeView:
+        return ServiceLifetimeView(self, self.started, self.shutting_down, self.stopped)
 
     @property
     def exit_code(self) -> int:
@@ -205,60 +169,197 @@ class HostLifetime(AbstractLifetime):
             raise ValueError("Exit code must be in [0,255] range")
         object.__setattr__(self, "_exit_code", value)
 
+    @property
+    def run_scope(self) -> CancelScope:
+        return self.tg.cancel_scope
 
-def in_host_thread[T](h: AbstractLifetime, func: Callable[..., T]) -> T:
+    @property
+    def state(self) -> ServiceState:
+        if self.stopped:
+            return Stopped(self.shutdown_reason, self.exception)
+        if self.shutting_down:
+            return ShuttingDown(self.shutdown_reason)
+        if self.started:
+            return Running()
+        return Starting()
+
+    @property
+    def same_thread(self) -> bool:
+        return threading.get_ident() == self.thread_id
+
+    def set_started(self) -> None:
+        def do_set():
+            assert not self.stopped, "Cannot mark already stopped service as started"
+            self.started.set()
+
+        in_host_thread(self, do_set)
+
+    def set_shutting_down(self, reason: BaseException | str | None = None) -> None:
+        def do_set():
+            assert not self.stopped, "Cannot mark already stopped service as started"
+            if not self.shutting_down.is_set():
+                self.shutdown_reason = reason
+                self.shutting_down.set()
+
+        in_host_thread(self, do_set)
+
+    def start(self, svc_f: ServiceF, /) -> ServiceLifetimeView:
+        """Start a child service from the given function."""
+
+        def do_start() -> ServiceLifetimeView:
+            child_lt = ServiceLifetime(self.portal)
+            self.tg.start_soon(_run, svc_f, child_lt)
+            return child_lt.view
+
+        return in_host_thread(self, do_start)
+
+
+def in_host_thread[R](h: ServiceLifetime, func: Callable[..., R], *args) -> R:
     if h.same_thread:
-        return func()
+        return func(*args)
+    # noinspection PyTypeChecker
     return h.portal.start_task_soon(func).result()
 
+
 ServiceF = Callable[[ServiceLifetime], Awaitable[None]]
-AppF = Callable[[HostLifetime], Awaitable[None]]
+# AppF = Callable[[HostLifetime], Awaitable[None]]
+
+
+@dc.dataclass()
+class _ResolvedService(AbstractAsyncContextManager[ServiceLifetimeView]):
+    func: ServiceF
+    _run: AbstractAsyncContextManager | None = dc.field(default=None, compare=False, repr=False)
+
+    def __call__(self, lt: ServiceLifetime, /) -> Awaitable[None]:
+        return self.func(lt)
+
+    async def __aenter__(self) -> ServiceLifetimeView:
+        assert self._run is None
+        self._run = serve(self.func, parent=_svc_lt.get(None))
+        return await self._run.__aenter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        assert self._run is not None
+        return await self._run.__aexit__(exc_type, exc_val, exc_tb)
 
 
 @asynccontextmanager
-async def serve(app: ServiceF, /):
-    """Start the target service and return control to the caller."""
-    async with BlockingPortal() as portal, create_task_group() as host_tg:
-        host_lifetime = HostLifetime(host_tg, portal)
-        _start_scv(host_lifetime, app)
-        yield host_lifetime
-        host_lifetime.shutdown()
+async def _serve_and_observe(svc_f: ServiceF, /):
+    async with serve(svc_f, parent=_svc_lt.get(None)) as lt, lt.observe():
+        yield lt
+
+
+@overload
+def service[**P](target: Callable[P, Any]) -> Callable[P, _ResolvedService]:
+    """Decorator to create a hosted service."""
+    ...
+
+
+@overload
+def service[**P]() -> Callable[[Callable[P, Any]], Callable[P, _ResolvedService]]:
+    """Decorator to create a hosted service."""
+    ...
+
+
+def service(target: Callable[..., Any] | None = None):
+    # FIXME Wrap sync functions, wrap context managers
+    def decorator(func: Callable[..., Any]) -> Callable[..., _ResolvedService]:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            raw_svc_f = func(*args, **kwargs)
+            if is_async_callable(raw_svc_f):
+                svc_f = raw_svc_f
+            else:
+                svc_f = lambda lt: to_thread.run_sync(raw_svc_f, lt, limiter=CapacityLimiter(1))
+            return _ResolvedService(svc_f)
+
+        if inspect.isasyncgenfunction(func):
+            return _service_cm(func)
+        return wrapper
+
+    return decorator(target) if callable(target) else decorator
+
+
+def _service_cm(func: Callable[..., AsyncGenerator]):
+    """Decorator to transform a generator function into a service factory."""
+    cm_f = asynccontextmanager(func)
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        async def svc_f(lt: ServiceLifetime) -> None:
+            async with cm_f(*args, **kwargs):
+                lt.set_started()
+                await lt.shutting_down.wait()
+
+        return _ResolvedService(svc_f)
+
+    return wrapper
 
 
 @asynccontextmanager
-async def serve_app(app: AppF, /):
-    """Start the target app and return control to the caller."""
-    async with BlockingPortal() as portal, create_task_group() as host_tg:
-        host_lifetime = HostLifetime(host_tg, portal)
-        _start_scv(host_lifetime, app)
-        yield host_lifetime
-        host_lifetime.shutdown()
+async def observe_services(*lifetimes: ServiceLifetimeView):
+    await wait_all(svc.started for svc in lifetimes)
+    try:
+        yield
+    finally:
+        for svc in lifetimes:
+            svc.shutdown()
+        await wait_all(svc.stopped for svc in lifetimes)
 
 
-def run(app_f: AppF, /) -> int:
-    """Run the target app until it stops or is interrupted by a signal."""
-    return anyio.run(arun, app_f, **choose_anyio_backend())
+async def _run(svc_f: ServiceF, lt: ServiceLifetime) -> None:
+    outer_ctx_token = _svc_lt.set(lt)
+    try:
+        async with lt.tg as tg:
+            await svc_f(lt)
+            tg.cancel_scope.cancel()  # Cancel any remaining tasks
+    except get_cancelled_exc_class() as exc:  # BaseException
+        lt.exception = exc
+        raise  # Always reraise cancellations
+    except Exception as exc:
+        lt.exception = unwrap_exc(exc)
+    finally:
+        lt.stopped.set()
+        _svc_lt.reset(outer_ctx_token)
 
 
-async def arun(app_f: AppF, /) -> int:
-    """Run the target app until it stops or is interrupted by a signal."""
-    if threading.current_thread() is not threading.main_thread():
-        raise RuntimeError("Signals can only be installed on the main thread")
+def serve(
+    svc: ServiceF, /, *, parent: ServiceLifetime | None = None
+) -> AbstractAsyncContextManager[ServiceLifetimeView]:
+    return _serve_in(svc, parent) if parent else _serve_root(svc)
 
-    async def handle_signals():
-        with open_signal_receiver(*HANDLED_SIGNALS) as signals:
-            async for _ in signals:
-                # First Ctrl+C (or other termination method)
-                if not host.shutting_down:
-                    logger.info("Shutting down...")
-                    host.shutdown()
-                    continue
-                # Ctrl+C again
-                logger.warning("Forced shutdown")
-                host.stop()
-                break
 
-    async with serve_app(app_f) as host:
-        await host.cancel_on_stop(handle_signals)()
+@asynccontextmanager
+async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
+    async with BlockingPortal() as portal:
+        child_lt = ServiceLifetime(portal)
+        tg = portal._task_group  # noqa
+        tg.start_soon(_run, svc, child_lt)
+        await child_lt.started
+        yield child_lt.view
+        child_lt.view.shutdown()
+        await child_lt.stopped
 
-    return host.exit_code
+
+@asynccontextmanager
+async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[ServiceLifetimeView]:
+    async def _bind_parent_to(shutdown_trigger: EventView):
+        await shutdown_trigger
+        parent.view.shutdown()
+
+    child_lt = parent.start(svc)
+    async with create_task_group() as observe_tg:
+        # Bind the parent lifetime (if the child is stopped, shutdown the parent)
+        observe_tg.start_soon(_bind_parent_to, child_lt.stopped)
+        await child_lt.started
+        yield child_lt
+        child_lt.shutdown()
+        observe_tg.cancel_scope.cancel()
+        await child_lt.stopped
+
+
+async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
+    async with nullcontext(parent.portal) if parent else BlockingPortal() as portal:
+        lt = ServiceLifetime(portal)
+        await _run(svc_f, lt)
+        return lt.exit_code

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
-from typing import final
-
-from localpost._sync_utils import CHECK_TIMEOUT
+from typing import final, Final
 
 __all__ = [
     "LOGGER_NAME",
@@ -11,7 +10,10 @@ __all__ = [
     "ServerConfig",
 ]
 
-LOGGER_NAME = "localpost.http"
+DEFAULT_BUFFER_SIZE: Final = io.DEFAULT_BUFFER_SIZE
+
+LOGGER_NAME: Final = "localpost.http"
+# TODO Access logger?..
 
 
 @final
@@ -20,9 +22,9 @@ class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     backlog: int = 1024
-    """Maximum number of queued connections."""
-    rw_timeout: float = 3.0
-    """Timeout (seconds) for receive/send operations on a client connection."""
+    """Maximum number of queued (in the kernel) connections."""
+    # rw_timeout: float = 3.0
+    # """Timeout (seconds) for receive/send operations on a client connection."""
     keep_alive_timeout: float = 15.0
     """Timeout (seconds) for idle connections."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB
@@ -30,6 +32,7 @@ class ServerConfig:
     # TODO Support Keep-Alive response header (timeout, max requests)
 
 
+# FIXME Remove, just move to ...
 @final
 @dataclass(frozen=True, slots=True)
 class WorkerConfig:

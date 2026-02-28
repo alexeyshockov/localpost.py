@@ -13,10 +13,8 @@ deps-upgrade:
 [doc("Check types (using both PyRight and MyPy)")]
 types:
     -ty check localpost
-    -pyright --pythonpath $(which python) \
-      localpost
-    -mypy --pretty --strict-bytes --python-executable $(which python) \
-      localpost
+    -pyright --pythonpath $(which python) localpost
+    -mypy --pretty --strict-bytes --python-executable $(which python) localpost
 
 [doc("Check types (using both PyRight and MyPy)")]
 types-strict:

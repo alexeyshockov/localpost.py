@@ -1,58 +1,38 @@
-from __future__ import annotations
-
-from collections.abc import Callable
-from contextlib import asynccontextmanager
-from os import getenv
-from typing import Any, cast, final
+from contextlib import nullcontext
 
 import uvicorn
 from anyio import create_task_group
-from typing_extensions import Self
 
-from localpost._utils import start_task_soon
-from localpost.hosting._host import ServiceLifetime
+from localpost._utils import AnyEventView
+from localpost.hosting._host import ServiceLifetime, service
 
 
 # Also see /health endpoint in http_app.py example
-@final
-class UvicornService:
-    def __init__(self, config: uvicorn.Config):
-        self.config = config
-        self.name = "uvicorn"
+@service
+def uvicorn_server(config: uvicorn.Config):
+    if config.should_reload:
+        raise ValueError("Uvicorn: reload is not supported")
+    elif config.workers > 1:
+        raise ValueError("Uvicorn: multiple workers are not supported")
 
-    @classmethod
-    def for_app(cls, app: Callable[..., Any]) -> Self:
-        return cls(
-            uvicorn.Config(
-                app,
-                host=getenv("UVICORN_HOST", "127.0.0.1"),
-                port=int(getenv("UVICORN_PORT", "8000")),
-                log_config=None,  # Do not touch current logging configuration
-            )
-        )
-
-    # It is hard to use server.serve() directly, because it overrides the signal handlers. A possible workaround is
-    # to call it in a separate thread, but currently it looks like an overkill.
-    # See uvicorn.Server._serve() for the original implementation.
-    async def __call__(self, sl: ServiceLifetime) -> None:
-        config = self.config
+    async def run(sl: ServiceLifetime) -> None:
         server = uvicorn.Server(config)
+        server_main_loop = server.main_loop
 
-        if config.should_reload:
-            raise ValueError("Uvicorn: reload is not supported")
-        elif config.workers > 1:
-            raise ValueError("Uvicorn: multiple workers are not supported")
+        async def lf_aware_main_loop():
+            sl.set_started()
+            await server_main_loop()
+            sl.set_shutting_down()
 
-        async def serve():
-            service_lifetime.set_started()
-            await server.main_loop()
-            service_lifetime.set_shutting_down()
-            await server.shutdown()
+        server.main_loop = lf_aware_main_loop
+        server.capture_signals = nullcontext
 
-        async def observe_shutdown():
-            await service_lifetime.shutting_down
+        async def observe_shutdown(trigger: AnyEventView):
+            await trigger.wait()
             server.should_exit = True
 
         async with create_task_group() as tg:
-            start_task_soon(tg, serve)
-            start_task_soon(tg, observe_shutdown)
+            tg.start_soon(server.serve, None)
+            tg.start_soon(observe_shutdown, sl.shutting_down)
+
+    return run

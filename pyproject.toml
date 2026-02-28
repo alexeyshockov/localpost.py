@@ -42,7 +42,7 @@ classifiers = [
     "Intended Audience :: System Administrators",
 ]
 dependencies = [
-    "typing_extensions ~=4.10",
+#    "typing_extensions ~=4.10",
     "anyio ~=4.12",
 ]
 
@@ -54,6 +54,13 @@ scheduler = [  # Better name?..
 #    "localpost[cron]",
     "humanize >=3.0,<5.0",
     "pytimeparse2 ~=1.6",
+]
+http-rest = [
+    "h11 ~=0.16",
+#    "uritemplate ~=4.2",
+#    "werkzeug ~=3.1",
+#    "multipart",
+#    "python-multipart",
 ]
 sqs = [
     "botocore ~=1.38",  # Sync SQS client (default)
@@ -87,11 +94,9 @@ dev = [
     "structlog ~=25.0",
     "trio ~=0.32",
 ]
-dev-hosting-http = [
+dev-hosting-services = [
     "uvicorn ~=0.30",
     "hypercorn ~=0.17",
-]
-dev-hosting-grpc = [
     "grpcio ~=1.68",
 ]
 dev-consumers = [
@@ -103,7 +108,11 @@ dev-consumers = [
     "grpcio-tools ~=1.68",
 ]
 dev-http = [
+    "punq ~=0.7",
     "flask ~=3.1",
+#    "defspec ~=0.5",  # Replaced by our own implementation
+    "msgspec ~=0.20",
+    "pydantic ~=2.11",
     "a2wsgi",
 ]
 dev-sentry = [

@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.6.0] - 2026-02-22
+
+Complete rewrite of the hosting system, to simplify it and make it more robust.
+
+### Fixed
+
+### Added
+
+- `localpost.http` — selectors-based non-async HTTP server
+
+### Changed
+
+### Removed
+
+- `localpost.flow` — too complicated
+
 ## [0.5.0] - 2025-07-18
 
 ### Added
