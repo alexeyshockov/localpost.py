@@ -12,29 +12,20 @@ deps-upgrade:
 
 [doc("Check types (using both PyRight and MyPy)")]
 types:
-    -ty check localpost
-    -pyright --pythonpath $(which python) localpost
-    -mypy --pretty --strict-bytes --python-executable $(which python) localpost
+    -basedpyright --pythonpath $(which python) localpost
 
 [doc("Check types (using both PyRight and MyPy)")]
 types-strict:
-    -pyright --pythonpath $(which python) localpost
-    -mypy --pretty \
-      --python-executable $(which python) \
-      --strict-bytes \
-      --warn-unreachable \
-      localpost
+    -basedpyright --pythonpath $(which python) localpost
 
 [doc("Check types (including examples and tests)")]
 types-all: types
-    -pyright --pythonpath $(which python) \
-      examples tests
-    -mypy --pretty --strict-bytes --python-executable $(which python) \
+    -basedpyright --pythonpath $(which python) \
       examples tests
 
 [doc("Check that the public API is correctly typed")]
 type-coverage:
-    pyright --pythonpath $(which python) --verifytypes localpost localpost/*
+    basedpyright --pythonpath $(which python) --verifytypes localpost localpost/*
 
 format:
     ruff check --fix localpost
@@ -46,8 +37,7 @@ format-all: format
 
 check file:
     -ruff check --fix {{ file }}
-    -pyright --pythonpath $(which python) {{ file }}
-    -mypy --pretty --strict-bytes --python-executable $(which python) {{ file }}
+    -basedpyright --pythonpath $(which python) {{ file }}
 
 tests:
     pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
