@@ -157,6 +157,9 @@ omit = ["tests/*"]
 
 [tool.pyright]
 include = ["localpost"]
+reportAny = false
+reportExplicitAny = false
+reportUnusedCallResult = false
 
 [[tool.mypy.overrides]]
 module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]

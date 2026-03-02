@@ -100,7 +100,9 @@ class _SupportsAsyncClose(Protocol):
     async def aclose(self) -> object: ...
 
 
-class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
+# TODO Remove
+@final
+class ClosingContext[T](AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
     def __init__(self, enter_result: T):
         self.enter_result = enter_result
 
@@ -131,7 +133,7 @@ def ensure_int_or_inf(value: int | float, *, min_value: int = 0, name: str = "Va
 
 
 @final
-# Actually immutable, but frozen=True has noticeable performance impact
+# Actually immutable, but frozen=True has a noticeable performance impact
 @dc.dataclass(slots=True, eq=True, unsafe_hash=True)
 class Result(Generic[T]):
     value: T  # | NOT_SET

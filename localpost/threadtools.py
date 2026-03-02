@@ -5,23 +5,29 @@ import os
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, AsyncIterable, Awaitable
-from contextlib import contextmanager, asynccontextmanager, suppress
-from functools import partial
-from typing import Any, Protocol, Self, final, Final, assert_never
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import asynccontextmanager
+from typing import Any, Protocol, Self, final, override
 
-import anyio
-from anyio import CapacityLimiter, ClosedResourceError, EndOfStream, WouldBlock, from_thread, to_thread, \
-    create_task_group
-from anyio.abc import TaskGroup as AnyioTaskGroup
+from anyio import (
+    CapacityLimiter,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    create_task_group,
+    from_thread,
+    to_thread,
+)
 
 __all__ = [
     "Channel",
     "SendChannel",
     "ReceiveChannel",
+    "create_executor",
+    "gather",
 ]
 
-from localpost._utils import is_async_callable, Switch, RandomDelay
+from localpost._utils import NOT_SET, RandomDelay, is_async_callable
 
 CHECK_TIMEOUT: float = 1.0
 """Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
@@ -50,13 +56,13 @@ class CancellableLock:
         self.release = lock.release
         self.__exit__ = lock.__exit__
         if hasattr(self.source, "locked"):
-            self.locked = lock.locked
+            self.locked = lock.locked  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         if hasattr(lock, "_release_save"):
-            self._release_save = lock._release_save
+            self._release_save = lock._release_save  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         if hasattr(lock, "_acquire_restore"):
-            self._acquire_restore = lock._acquire_restore
+            self._acquire_restore = lock._acquire_restore  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         if hasattr(lock, "_is_owned"):
-            self._is_owned = lock._is_owned
+            self._is_owned = lock._is_owned  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
         if not blocking:
@@ -78,7 +84,7 @@ class CancellableLock:
 
 
 def cancellable_condition(lock: CancellableLock | None = None) -> threading.Condition:
-    cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
+    cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # pyright: ignore[reportArgumentType]
     orig_wait = cond.wait
 
     def cancellable_wait(timeout: float | None = None) -> bool:
@@ -104,8 +110,38 @@ def cancellable_condition(lock: CancellableLock | None = None) -> threading.Cond
 
 def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
     source = threading.BoundedSemaphore(value)
-    source._cond = cancellable_condition()
+    source._cond = cancellable_condition()  # pyright: ignore[reportAttributeAccessIssue]
     return source
+
+
+###
+# Task Group related
+###
+
+
+@dc.dataclass(eq=False, slots=True)
+class FutureResult:
+    value: Any = NOT_SET
+
+
+def gather(*workload: Callable[[], Any] | tuple[Any, ...]) -> Sequence[Any]:
+    async def run_all():
+        results: list[FutureResult] = []
+        async with create_task_group() as tg:
+            for item in workload:
+                if callable(item):
+                    func, args = item, ()
+                else:
+                    func, *args = item
+                res = FutureResult()
+                results.append(res)
+                tg.start_soon(run_item, res, func, *args)
+        return [res.value for res in results]
+
+    async def run_item(res: FutureResult, func: Callable[..., Any], *args: Any) -> None:
+        res.value = await (func(*args) if is_async_callable(func) else to_thread.run_sync(func, *args))
+
+    return from_thread.run(run_all)
 
 
 ###
@@ -140,14 +176,13 @@ class ThreadPoolExecutor[T]:
     _limiter: threading.Semaphore
     _start_worker: Callable[[], None]
 
-    def acquire(self) -> Callable[[T], None]:
+    def acquire_nowait(self) -> Callable[[T], None] | None:
         """
         Acquire a slot in the executor, get a submit callable for the payload.
 
         The slot is released when the payload is processed.
         """
-        self._limiter.acquire()
-        return self._handle
+        return self._handle if self._limiter.acquire(blocking=False) else None
 
     def _handle(self, payload: T) -> None:
         try:
@@ -162,11 +197,11 @@ async def create_executor[T](
     func: Callable[[T], None],
     max_workers: int = min(32, (os.process_cpu_count() or 1) + 4),
     worker_max_age: int = 60 * 5,  # Seconds after which a thread is stopped
-) -> AsyncIterable[ThreadPoolExecutor[T]]:
+):
     max_age_jitter = RandomDelay((0.0, worker_max_age * 0.2))
     threads_limiter = CapacityLimiter(max_workers)
     work_limiter = cancellable_semaphore(max_workers)
-    sender, receiver = Channel.create()
+    sender, receiver = Channel[T].create()
 
     def start_thread() -> None:
         stop_at = current_time() + worker_max_age + max_age_jitter().total_seconds()
@@ -176,7 +211,7 @@ async def create_executor[T](
     async with create_task_group() as exec_tg, sender:
         permanent_thread = ExecutorThread(func, receiver, None)
         exec_tg.start_soon(permanent_thread.arun, work_limiter, threads_limiter)
-        yield ThreadPoolExecutor(sender, work_limiter, start_thread)
+        yield ThreadPoolExecutor[T](sender, work_limiter, start_thread)
 
 
 ###
@@ -301,12 +336,14 @@ class ChannelState[T]:
         self._lock.release()
 
 
+@final
 # TODO dataclass + repr
 class SendChannel[T](BaseSendChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
 
+    @override
     def clone(self):
         with self._state as state:
             if self._closed:
@@ -323,6 +360,7 @@ class SendChannel[T](BaseSendChannel[T]):
             state.buffer.append(item)
             state.not_empty.notify()
 
+    @override
     def put(self, item: T, /) -> None:
         # Phase 1: wait for space in the buffer
         while True:
@@ -355,12 +393,14 @@ class SendChannel[T](BaseSendChannel[T]):
                 state.not_full.notify()  # Wake up threads waiting in put() immediately
 
 
+@final
 # TODO dataclass + repr
 class ReceiveChannel[T](BaseReceiveChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
 
+    @override
     def clone(self):
         with self._state as state:
             if self._closed:
@@ -368,6 +408,7 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
             state.open_receive_channels += 1
         return ReceiveChannel(state)
 
+    @override
     def get(self) -> T:
         check_cancelled()
         while not self._closed:
@@ -381,6 +422,7 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
                 state.not_empty.wait()
         raise ClosedResourceError("receive channel has been closed")
 
+    @override
     def close(self) -> None:
         with self._state as state:
             if not self._closed:

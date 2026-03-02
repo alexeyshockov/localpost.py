@@ -37,8 +37,8 @@ type-coverage:
     pyright --pythonpath $(which python) --verifytypes localpost localpost/*
 
 format:
-    ruff format localpost
     ruff check --fix localpost
+    ruff format localpost
 
 format-all: format
     ruff check --fix examples tests

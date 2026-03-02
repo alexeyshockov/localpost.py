@@ -4,10 +4,10 @@ import inspect
 import json
 import logging
 import threading
-from collections.abc import Callable, Mapping, Sequence, Collection
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
-from typing import Protocol, Self, final, Annotated
+from typing import Annotated, Protocol, Self, final
 
 import localpost.spec.openapi as openapi_spec
 from localpost.http.router import RequestHandler, Router
@@ -62,6 +62,7 @@ class HttpApp:
 
     def get(self, path: str) -> FluentOpDecorator:
         """Decorator to register a GET operation on the given path."""
+
         def decorator(func) -> RequestHandler:
             return self.register(FluentPathOp(HTTPMethod.GET, path, func))
 
@@ -69,18 +70,11 @@ class HttpApp:
 
     def post(self, path: str) -> FluentOpDecorator:
         """Decorator to register a POST operation on the given path."""
+
         def decorator(func) -> RequestHandler:
             return self.register(FluentPathOp(HTTPMethod.POST, path, func))
 
         return decorator
-
-
-
-
-
-
-
-
 
 
 @final
@@ -118,13 +112,6 @@ class FluentPathOp:
         self.response_resolver(request, return_value)
 
 
-
-
-
-
-
-
-
 # class ResponseResolverFactory(Protocol):
 #     def __call__(self, return_annotation: type, /) -> ResponseResolver:
 #         ...
@@ -156,20 +143,8 @@ class DefaultResponseResolverFactory:
 #     pass
 
 
-
-
-
-
-
-
-
-
-
-
-
 class ArgResolverFactory:
-    def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
-        ...
+    def __call__(self, param: inspect.Parameter, /) -> ArgResolver: ...
 
 
 class ArgResolver(Protocol):
@@ -289,60 +264,8 @@ class FromPath(ArgResolverFactory):
         return resolve
 
 
-
-
-
-
-
-
 class Example:
     """Example value for a parameter or return type, to be included in the OpenAPI docs."""
 
     def __init__(self, value: object):
         self.value = value
-
-
-
-
-
-
-
-# noinspection DuplicatedCode
-def _sample_usage():
-    from localpost.http.worker import http_server
-    from localpost.http.config import WorkerConfig
-    import anyio
-    import signal
-    from uuid import UUID
-
-    logging.basicConfig(level=logging.DEBUG)
-
-    app = HttpApp()
-
-    @app.get("/hello/{name}")
-    def hello(name: str) -> str:
-        return f"Hello, {name}!"
-
-    @app.get("/books/{book_id}")
-    def hello(book_id: UUID, page_number: int) -> Annotated[dict,
-    Example({
-        "id": "123e4567-e89b-12d3-a456-426614174000",
-        "title": "The Lord of the Rings",
-        "author": "J.R.R. Tolkien"
-    })]:
-        # Dict (or any other type, actually) is serialized to JSON (or other format, according to the Accept header)
-        # page_number is just to demonstrate multiple parameters from different sources (path and query)
-        return {"id": str(id), "title": "The Lord of the Rings", "author": "J.R.R. Tolkien"}
-
-    async def _run():
-        async with http_server(simple_app, WorkerConfig()):
-            with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
-                async for _ in signals:
-                    break  # Shutdown on SIGTERM or SIGINT
-
-    # noinspection PyTypeChecker
-    anyio.run(_run)
-
-
-if __name__ == "__main__":
-    _sample_usage()

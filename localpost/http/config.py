@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import io
-from dataclasses import dataclass, field
-from typing import final, Final
+from dataclasses import dataclass
+from typing import Final, final
 
 __all__ = [
     "LOGGER_NAME",
-    "WorkerConfig",
     "ServerConfig",
 ]
 
-DEFAULT_BUFFER_SIZE: Final = io.DEFAULT_BUFFER_SIZE
+DEFAULT_BUFFER_SIZE: Final = 64 * 1024  # 64 KiB
 
 LOGGER_NAME: Final = "localpost.http"
 # TODO Access logger?..
@@ -23,19 +21,9 @@ class ServerConfig:
     port: int = 8000
     backlog: int = 1024
     """Maximum number of queued (in the kernel) connections."""
-    # rw_timeout: float = 3.0
+    # rw_timeout: float = threadtools.CHECK_TIMEOUT
     # """Timeout (seconds) for receive/send operations on a client connection."""
-    keep_alive_timeout: float = 15.0
+    keep_alive_timeout: float = 15.0  # TODO add it to the response
     """Timeout (seconds) for idle connections."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB
     """Maximum request body size (bytes)."""
-    # TODO Support Keep-Alive response header (timeout, max requests)
-
-
-# FIXME Remove, just move to ...
-@final
-@dataclass(frozen=True, slots=True)
-class WorkerConfig:
-    server: ServerConfig = field(default_factory=ServerConfig)
-    max_requests: int = 5
-    """Max parallel requests."""

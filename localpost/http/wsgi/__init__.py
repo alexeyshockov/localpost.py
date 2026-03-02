@@ -1,40 +1,43 @@
 from __future__ import annotations
 
-import logging
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager, closing, suppress
-from dataclasses import dataclass
 from io import BufferedReader, IOBase, RawIOBase
-from typing import Any
+from typing import Any, final, override
 from wsgiref.types import WSGIApplication
 
 import h11
-from flask import stream_with_context
 
-from localpost.http.server import HTTPConn, RequestHandler, HTTPReq
+from localpost.http.server import BorrowedHTTPReq, RequestHandler
 
 
+@final
 class RequestBodyStream(RawIOBase):
-    def __init__(self, ctx: HTTPReq) -> None:
+    def __init__(self, ctx: BorrowedHTTPReq) -> None:
         self._ctx = ctx
         self.completed = False
 
+    @override
     def writable(self):
         return False
 
+    @override
     def seekable(self):
         return False
 
+    @override
     def readable(self):
         return True
 
+    @override
     def readall(self):
         chunks = bytearray()
         while not self.completed:
             chunks.extend(self._ctx.receive())
         return chunks
 
+    @override
     def readinto(self, b: bytearray, /) -> int:
         try:
             data = self._ctx.receive(len(b))
@@ -130,36 +133,3 @@ def _build_environ(client: HTTPConn, request: h11.Request, body: IOBase) -> dict
         environ[name_str] = value.decode("ISO-8859-1")
 
     return environ
-
-
-def _main_flask():
-    logging.basicConfig(level=logging.DEBUG)
-
-    from flask import Flask
-    from flask import request as flask_request
-
-    from localpost.http.config import ServerConfig
-    from localpost.http.server import start_http_server
-
-    app = Flask(__name__)
-
-    @app.route("/hello/<name>")
-    def hello(name):
-        user_agent = flask_request.headers.get("User-Agent", "Unknown")
-        return f"Hello, {name}! Your User-Agent is: {user_agent}\n"
-
-    @app.route("/hello-stream/<name>")
-    @stream_with_context
-    def hello_stream(name):
-        user_agent = flask_request.headers.get("User-Agent", "Unknown")
-        yield f"Hello, {name}! "
-        yield f"Your User-Agent is: {user_agent}\n"
-
-    handler = wrap_wsgi(app)
-    with start_http_server(ServerConfig()) as server:
-        for client_conn in server.accept():
-            client_conn(handler)
-
-
-if __name__ == "__main__":
-    _main_flask()

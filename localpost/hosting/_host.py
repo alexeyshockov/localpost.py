@@ -5,16 +5,16 @@ import inspect
 import logging
 import threading
 from _contextvars import ContextVar
-from collections.abc import AsyncIterator, Awaitable, Callable, AsyncGenerator
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, AsyncExitStack
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from functools import cached_property, wraps
 from typing import Any, ClassVar, Literal, TypeVar, final, overload
 
-from anyio import CancelScope, create_task_group, get_cancelled_exc_class, to_thread, CapacityLimiter
+from anyio import CancelScope, CapacityLimiter, create_task_group, get_cancelled_exc_class, to_thread
 from anyio.abc import TaskGroup
 from anyio.from_thread import BlockingPortal
 
-from localpost._utils import Event, EventView, cancellable_from, unwrap_exc, wait_all, is_async_callable
+from localpost._utils import Event, EventView, cancellable_from, is_async_callable, unwrap_exc, wait_all
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -252,13 +252,11 @@ async def _serve_and_observe(svc_f: ServiceF, /):
 @overload
 def service[**P](target: Callable[P, Any]) -> Callable[P, _ResolvedService]:
     """Decorator to create a hosted service."""
-    ...
 
 
 @overload
 def service[**P]() -> Callable[[Callable[P, Any]], Callable[P, _ResolvedService]]:
     """Decorator to create a hosted service."""
-    ...
 
 
 def service(target: Callable[..., Any] | None = None):
@@ -333,7 +331,7 @@ def serve(
 async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
     async with BlockingPortal() as portal:
         child_lt = ServiceLifetime(portal)
-        tg = portal._task_group  # noqa
+        tg = portal._task_group
         tg.start_soon(_run, svc, child_lt)
         await child_lt.started
         yield child_lt.view
@@ -343,23 +341,24 @@ async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
 
 @asynccontextmanager
 async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[ServiceLifetimeView]:
-    async def _bind_parent_to(shutdown_trigger: EventView):
-        await shutdown_trigger
+    # TODO Just throw an exception if the service stops with an error?.. Instead of binding the parent lifetime
+    async def bind_parent_to(csl: ServiceLifetimeView):
+        await csl.stopped
         parent.view.shutdown()
 
     child_lt = parent.start(svc)
     async with create_task_group() as observe_tg:
         # Bind the parent lifetime (if the child is stopped, shutdown the parent)
-        observe_tg.start_soon(_bind_parent_to, child_lt.stopped)
+        observe_tg.start_soon(bind_parent_to, child_lt)
         await child_lt.started
         yield child_lt
-        child_lt.shutdown()
         observe_tg.cancel_scope.cancel()
+        child_lt.shutdown()
         await child_lt.stopped
 
 
 async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
-    async with nullcontext(parent.portal) if parent else BlockingPortal() as portal:
+    async with (nullcontext(parent.portal) if parent else BlockingPortal()) as portal:
         lt = ServiceLifetime(portal)
         await _run(svc_f, lt)
         return lt.exit_code

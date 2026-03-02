@@ -4,6 +4,7 @@ import logging
 
 import uvicorn
 from a2wsgi import WSGIMiddleware
+
 from ._benchmark_app import app
 
 

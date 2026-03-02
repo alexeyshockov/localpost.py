@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import re
-from collections.abc import Mapping, Buffer, Callable, Iterable
-from contextlib import ExitStack, AbstractContextManager
+from collections.abc import Buffer, Callable, Iterable, Mapping
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
 from http import HTTPMethod
 
 import h11
 
-from localpost.http.server import HTTPReq
+from localpost.http.server import BorrowedHTTPReq, TrackedHTTPReq
 from localpost.http.uritemplate import URITemplate
 
 
 # See also: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/use-http-context#httprequest
 @dataclass(eq=False, slots=True)
 class RESTContext:
-    _context: HTTPReq
+    _http: BorrowedHTTPReq
     exit_stack: ExitStack
 
     request: h11.Request
@@ -27,23 +26,23 @@ class RESTContext:
 
     result: OpResult = field(default_factory=lambda: Ok(None), init=False)
 
-    _body: bytearray | None = field(default=None, init=False)
+    _req_body: bytearray | None = field(default=None, init=False)
 
-    def receive_all(self, cache=False) -> Buffer:
+    def receive_all(self, cache: bool = False) -> Buffer:
         """Read the request body."""
-        if self._body is not None:
-            return self._body
+        if self._req_body is not None:
+            return self._req_body
         body = bytearray()
         while True:
-            chunk = self._context.receive()
+            chunk = self._http.receive()
             if not chunk:
                 break
             body.extend(chunk)
         if cache:
-            self._body = body
+            self._req_body = body
         return body
 
-    def get_header(self, name: str, /, default=None) -> str | None:
+    def get_header(self, name: str, /, default: str | None = None) -> str | None:
         raw_name = name.encode()
         for header_name, header_value in self.request.headers:
             if header_name == raw_name:
@@ -54,15 +53,15 @@ class RESTContext:
 RequestHandler = Callable[[RESTContext], None]
 RequestHandlerMiddleware = Callable[[RequestHandler], RequestHandler]
 
+# We cannot use h11 types here, to be compatible with WSGI too
 HTTPResponse = tuple[int, Iterable[tuple[str, str]], AbstractContextManager[Iterable[bytes]]]
 ResultConverter = Callable[[RESTContext], HTTPResponse]
 
 
-def not_found(request: RESTContext) -> None:
+def not_found(req_ctx: TrackedHTTPReq) -> None:
     """Default handler for unmatched routes."""
-    request.start_response(h11.Response(status_code=404, headers=[(b"Content-Type", b"text/plain")]))
+    req_ctx.complete(h11.Response(status_code=404, headers=[(b"Content-Type", b"text/plain")]), b"Not Found")
     # TODO Problem details if the client supports JSON (Accept header contains "json")
-    request.send(b"Not Found")
 
 
 def method_not_allowed(request: RESTContext) -> None:
@@ -72,18 +71,17 @@ def method_not_allowed(request: RESTContext) -> None:
     request.send(b"Method Not Allowed")
 
 
+@dataclass(eq=False, frozen=True, slots=True)
 class Router:
     paths: Mapping[URITemplate, Mapping[HTTPMethod, RequestHandler]]
 
-    def __call__(self, request: HTTPReq) -> None:
+    def __call__(self, req_ctx: TrackedHTTPReq) -> None:
         # FIXME Find a match, create RESTContext with extracted path_args, entered ExitStack, etc.
         pass
 
     def wsgi(self, environ, start_response):
         """WSGI app, to be used with any WSGI server, e.g. Gunicorn."""
         # TODO Adapt from WSGI, create RESTContext, ...
-        pass
-
 
 
 @dataclass(frozen=True, slots=True)

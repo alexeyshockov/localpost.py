@@ -7,6 +7,7 @@ import anyio
 
 from localpost.http.config import WorkerConfig
 from localpost.http.worker import http_server
+
 from ._benchmark_app import app
 
 

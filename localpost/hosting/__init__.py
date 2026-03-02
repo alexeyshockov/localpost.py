@@ -5,6 +5,7 @@ from ._host import (
     Running,
     ServiceF,
     ServiceState,
+    ServiceLifetime,
     ShuttingDown,
     Starting,
     Stopped,
@@ -27,6 +28,7 @@ __all__ = [
     "Starting",
     "Running",
     "ShuttingDown",
+    "ServiceLifetime",
     "Stopped",
 ]
 
