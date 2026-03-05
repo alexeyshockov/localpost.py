@@ -1,200 +1,117 @@
-from __future__ import annotations
-
 import inspect
 import json
-import logging
 import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
-from typing import Annotated, ParamSpec, Protocol, Self, TypeVar, final
+from typing import Annotated, ParamSpec, Protocol, Self, TypeVar, final, get_args, get_origin
+
+import msgspec
 
 import localpost.spec.openapi as openapi_spec
 from localpost.http.router import RequestCtx, RequestHandler, Response, Router
+from localpost.http.uritemplate import URITemplate
 
 P = ParamSpec("P")
 R = TypeVar("R")
-# FluentOpDecorator = Callable[[Callable[..., object]], RequestHandler]
 FluentOpDecorator = Callable[[Callable[P, R]], Callable[P, R]]
 
 
-@final
-class HttpApp:
-    def __init__(self):
-        self._router: Router | None = None
-        self._router_lock: threading.Lock = threading.Lock()
-        self._path_ops: list[FluentPathOp] = []
-
-    def __call__(self, req_ctx) -> None:
-        self.router(req_ctx)
-
-    def wsgi(self, environ, start_response):
-        """WSGI app, to be used with any WSGI server, e.g. Granian."""
-        return self.router.wsgi(environ, start_response)
-
-    def register_arg_resolver(self, resolver_factory: ArgResolverFactory) -> None:
-        # TODO Register a custom ArgResolverFactory for handling custom types in path operation parameters
-        pass
-
-    def register_result_resolver(self, resolver_factory: ArgResolverFactory) -> None:
-        # TODO Register a custom ArgResolverFactory for handling custom types in path operation parameters
-        pass
-
-    @property
-    def docs(self) -> openapi_spec.OpenAPI:
-        pass
-
-    @property
-    def router(self) -> Router:
-        if router := self._router:
-            return router
-        with self._router_lock:
-            if not self._router:
-                self._router = self._create_router()
-            return self._router
-
-    def _create_router(self) -> Router:
-        # FIXME Go through all registered FluentPathOps, convert their path patterns to regexes, group by path regex, create a Router with the resulting list of (regex, {method: handler}) pairs
-        pass
-
-    def register(self, op: FluentPathOp) -> FluentPathOp:
-        self._path_ops.append(op)
-        with self._router_lock:
-            self._router = None
-        return op
-
-    def get(self, path: str) -> FluentOpDecorator:
-        """Decorator to register a GET operation on the given path."""
-
-        def decorator(func):
-            return self.register(FluentPathOp(HTTPMethod.GET, path, func))
-
-        return decorator
-
-    def post(self, path: str) -> FluentOpDecorator:
-        """Decorator to register a POST operation on the given path."""
-
-        def decorator(func):
-            return self.register(FluentPathOp(HTTPMethod.POST, path, func))
-
-        return decorator
+# --- OpResult hierarchy ---
 
 
-@final
-@dataclass(eq=False, frozen=True)
-class FluentPathOp:
-    method: HTTPMethod
-    path: str
-    """Path pattern, like /books/{id} or /shop/{name}/checkout."""
+@dataclass(frozen=True, slots=True)
+class OpResult:
+    code: int
+    headers: Mapping[str, str]
+    body: object
 
-    target: Callable[..., object]
-    arg_resolvers: Mapping[str, ArgResolver]
-    response_resolver: ResponseResolver
-    """
-    To resolve (create) a response from the target's return value.
-
-    E.g. if the target returns a dict, we can serialize it to JSON and set the Content-Type header.
-    """
-
-    # # Security is for sure out of our scope, so this should be declared manually by the user
-    # security: openapi_spec.SecurityScheme | None = None
-    # TODO Simply supply a doc customizer...
-
-    @classmethod
-    def create(cls, method: HTTPMethod, path: str, func, /) -> Self:
-        pass  # FIXME Implement: inspect func signature, create ArgResolvers for its parameters, create a FluentPathOpHandler with the target and resolvers
-
-    # Build it all in the root app...
-    # @cached_property
-    # def docs(self) -> openapi_spec.OpenAPIRoute:
-    #     pass
-
-    def __call__(self, request: RESTContext) -> None:
-        args = {name: resolver(request) for name, resolver in self.arg_resolvers.items()}
-        return_value = self.target(**args)
-        self.response_resolver(request, return_value)
+    def __init__(self, code: int, body: object, /, *, headers: Mapping[str, str] | None = None):
+        object.__setattr__(self, "code", code)
+        object.__setattr__(self, "body", body)
+        object.__setattr__(self, "headers", headers or {})
 
 
-# class ResponseResolverFactory(Protocol):
-#     def __call__(self, return_annotation: type, /) -> ResponseResolver:
-#         ...
+class Ok[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 200, body, headers=headers)
 
 
-class ResponseResolver(Protocol):
-    def __call__(self, result: object, ctx: RESTContext, http_ctx: HTTPContext, /) -> None:
-        # if generator — run the generator and send chunks as they are produced, set Content-Type to text/event-stream
-        # if File — set Content-Type according to the file type, send file in chunks
-        # ...
-        ...
+class Created[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 201, body, headers=headers)
 
 
-class DefaultResponseResolverFactory:
-    def __call__(self, return_annotation: type, /) -> ResponseResolver:
-        # TODO Implement a default resolver that handles common types (str, dict, etc.) and serializes them to the appropriate format according to the Accept header (e.g. JSON for dict)
-        pass
+class NoContent(OpResult):
+    def __init__(self, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 204, None, headers=headers)
 
 
-# class Redirect:  # Not an exception, but a valid return type for a path operation, to be handled by a custom ResponseResolver
-#     pass
-#
-#
-# class FileResponse:
-#     pass
-#
-#
-# class SSEResponse:
-#     pass
+class BadRequest[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 400, body, headers=headers)
+
+
+class NotFound[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 404, body, headers=headers)
+
+
+# --- Protocols ---
+
+
+class ArgResolver(Protocol):
+    def __call__(self, request: RequestCtx, /) -> object: ...
 
 
 class ArgResolverFactory:
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver: ...
 
 
-class ArgResolver(Protocol):
-    def __call__(self, request: RESTContext, /) -> object:
-        """
-        Resolve an argument for the target function from the request context.
+class ResponseResolver(Protocol):
+    def __call__(self, result: OpResult, /) -> Response: ...
 
-        Raises ValueError if case of any issues, e.g. missing required header or query param, invalid path param
-        format, etc.
-        """
-        ...
+
+# --- Resolver implementations ---
+
+
+@final
+class DefaultResponseResolver:
+    def __call__(self, result: OpResult, /) -> Response:
+        headers: dict[str, str] = dict(result.headers)
+
+        if result.body is None:
+            return Response(status_code=result.code, headers=headers, body=[])
+
+        if isinstance(result.body, bytes):
+            body_bytes = result.body
+            headers.setdefault("Content-Type", "application/octet-stream")
+        elif isinstance(result.body, str):
+            body_bytes = msgspec.json.encode(result.body)
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            try:
+                body_bytes = msgspec.json.encode(result.body)
+            except Exception:
+                body_bytes = json.dumps(result.body).encode()
+            headers.setdefault("Content-Type", "application/json")
+
+        headers["Content-Length"] = str(len(body_bytes))
+        return Response(status_code=result.code, headers=headers, body=[body_bytes])
 
 
 @final
 @dataclass(kw_only=True, frozen=True, slots=True)
 class FromBody(ArgResolverFactory):
-    """
-    Built-in body resolver that supports most common Python types (dataclasses, Pydantic, msgpack) and input
-    formats (JSON, msgpack).
-
-    For any complex case, just implement a custom ArgResolver and attach it to the function parameter via Annotated.
-    """
+    """Built-in body resolver."""
 
     json_converter: Callable[[bytes], object] | None = None
 
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
         json_converter = self.json_converter or json.loads
 
-        if param.annotation is inspect.Parameter.empty:
-            assert param.default is inspect.Parameter.empty  # Body is required (more for simplicity for now)
-
-            def resolve_any(request: RESTContext) -> object:
-                if not (content_type := request.get_header("content-type")):
-                    raise ValueError("Missing Content-Type header")
-                if "json" in content_type:
-                    return json_converter(request.body.read())
-                raise ValueError(f"Unsupported Content-Type: {content_type}")
-
-            return resolve_any
-
-        param_type = param.annotation  # TODO Deal with Annotated, Optional, etc.
-        assert isinstance(param_type, type)
-
-        # TODO Decode Pydantic models with Pydantic, msgspec.Struct with msgspec
-        # TODO Decode dataclasses with msgspec
-        def resolve(request: RESTContext) -> object:
-            pass
+        def resolve(request: RequestCtx) -> object:
+            return json_converter(request.body())
 
         return resolve
 
@@ -208,7 +125,19 @@ class FromHeader(ArgResolverFactory):
     converter: Callable[[str], object] | None = None
 
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
-        pass  # TODO Implement, similar to FromQuery and FromPath
+        header_name = self.name or param.name.replace("_", "-").lower()
+        converter = self.converter or str
+        has_default = param.default is not inspect.Parameter.empty
+
+        def resolve(request: RequestCtx) -> object:
+            value = request.headers.get(header_name)
+            if value is None:
+                if has_default:
+                    return param.default
+                raise ValueError(f"Missing required header: {header_name}")
+            return converter(value)
+
+        return resolve
 
 
 @final
@@ -225,23 +154,30 @@ class FromQuery(ArgResolverFactory):
         if self.converter:
             converter = self.converter
         elif param.annotation is not inspect.Parameter.empty:
-            param_type = param.annotation  # TODO Deal with Annotated, Optional, etc.
-            assert isinstance(param_type, type)
-            if issubclass(param_type, Collection):  # list, set, etc.
+            param_type = param.annotation
+            if get_origin(param_type) is Annotated:
+                param_type = get_args(param_type)[0]
+            if isinstance(param_type, type) and issubclass(param_type, Collection) and param_type is not str:
                 converter = param_type
+            elif isinstance(param_type, type):
+                converter = lambda values, _t=param_type: _t(values[0])
             else:
-                converter = lambda values: param_type(values[0])
-        else:  # First argument as a string by default, if not annotated and no converter provided
+                converter = lambda values: values[0]
+        else:
             converter = lambda values: values[0]
 
-        def resolve(request: RESTContext) -> object:
-            if param.default is inspect.Parameter.empty:
-                return converter(request.query_args[param_name])
-            return converter(request.query_args.get(param_name, param.default))
+        def resolve(request: RequestCtx) -> object:
+            values = request.query_args.get(param_name)
+            if values is None:
+                if has_default:
+                    return param.default
+                raise ValueError(f"Missing required query parameter: {param_name}")
+            return converter(values)
 
         return resolve
 
 
+@final
 @dataclass(frozen=True, slots=True)
 class FromPath(ArgResolverFactory):
     """Resolve from a path parameter, e.g. /books/{id}."""
@@ -254,77 +190,219 @@ class FromPath(ArgResolverFactory):
         if self.converter:
             converter = self.converter
         elif param.annotation is not inspect.Parameter.empty:
-            param_type = param.annotation  # TODO Deal with Annotated, Optional, etc.
-            converter = param_type
+            param_type = param.annotation
+            if get_origin(param_type) is Annotated:
+                param_type = get_args(param_type)[0]
+            if isinstance(param_type, type):
+                converter = param_type
+            else:
+                converter = str
         else:
             converter = str
 
-        def resolve(request: RESTContext) -> object:
-            if param.default is inspect.Parameter.empty:
-                return converter(request.path_args[param_name])
-            return converter(request.path_args.get(param_name, param.default))
+        def resolve(request: RequestCtx) -> object:
+            value = request.path_args.get(param_name)
+            if value is None:
+                raise ValueError(f"Missing path parameter: {param_name}")
+            return converter(value)
 
         return resolve
 
 
-@dataclass(frozen=True, slots=True)
-class OpResult:
-    code: int
-    headers: Mapping[str, str]
-    body: object
-
-    def __init__(self, code: int, body: object, /, *, headers: Mapping[str, str] | None = None):
-        object.__setattr__(self, "code", code)
-        object.__setattr__(self, "body", body)
-        object.__setattr__(self, "headers", headers or {})
+def _extract_resolver_factory(annotation) -> ArgResolverFactory | None:
+    """Extract an ArgResolverFactory from an Annotated type, if present."""
+    if get_origin(annotation) is Annotated:
+        for arg in get_args(annotation):
+            if isinstance(arg, ArgResolverFactory):
+                return arg
+    return None
 
 
-ResultConverter = Callable[[OpResult], Response]
+# --- FluentPathOp ---
 
 
-@dataclass(frozen=True, slots=True)
-class Ok[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(200, body, headers=headers)
+@final
+@dataclass(eq=False, frozen=True)
+class FluentPathOp:
+    method: HTTPMethod
+    path: str
+    """Path pattern, like /books/{id} or /shop/{name}/checkout."""
+
+    target: Callable[..., object]
+    arg_resolvers: Mapping[str, ArgResolver]
+    response_resolver: ResponseResolver
+
+    @classmethod
+    def create(cls, method: HTTPMethod, path: str, func: Callable, /) -> Self:
+        template = URITemplate.parse(path)
+        path_var_names = set(template.variable_names)
+
+        sig = inspect.signature(func)
+        arg_resolvers: dict[str, ArgResolver] = {}
+
+        for param_name, param in sig.parameters.items():
+            annotation = param.annotation
+            resolver_factory = _extract_resolver_factory(annotation)
+
+            if resolver_factory is not None:
+                arg_resolvers[param_name] = resolver_factory(param)
+            elif param_name in path_var_names:
+                arg_resolvers[param_name] = FromPath()(param)
+            else:
+                arg_resolvers[param_name] = FromQuery()(param)
+
+        return cls(
+            method=method,
+            path=path,
+            target=func,
+            arg_resolvers=arg_resolvers,
+            response_resolver=DefaultResponseResolver(),
+        )
+
+    def as_handler(self) -> RequestHandler:
+        def handler(ctx: RequestCtx) -> Response:
+            return self(ctx)
+
+        return handler
+
+    def __call__(self, request: RequestCtx) -> Response:
+        args = {}
+        for name, resolver in self.arg_resolvers.items():
+            result = resolver(request)
+            if isinstance(result, OpResult):
+                return self.response_resolver(result)
+            args[name] = result
+        return_value = self.target(**args)
+        if isinstance(return_value, OpResult):
+            op_result = return_value
+        else:
+            op_result = Ok(return_value)
+        return self.response_resolver(op_result)
 
 
-@dataclass(frozen=True, slots=True)
-class Created[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(201, body, headers=headers)
+# --- HttpApp ---
 
 
-@dataclass(frozen=True, slots=True)
-class NoContent(OpResult):
-    def __init__(self, /, *, headers: dict[str, str] | None = None):
-        super().__init__(204, None, headers=headers)
+@final
+class HttpApp:
+    def __init__(self, *, info: openapi_spec.Info | None = None):
+        self._router: Router | None = None
+        self._router_lock: threading.Lock = threading.Lock()
+        self._path_ops: list[FluentPathOp] = []
+        self._info = info or openapi_spec.Info()
 
+    def wsgi(self, environ, start_response):
+        """WSGI app, to be used with any WSGI server, e.g. Granian."""
+        return self.router.wsgi(environ, start_response)
 
-@dataclass(frozen=True, slots=True)
-class MovedPermanently(OpResult):
-    def __init__(self, location: str, /, *, headers: dict[str, str] | None = None):
-        super().__init__(301, None, headers={"Location": location, **(headers or {})})
+    @property
+    def docs(self) -> openapi_spec.OpenAPI:
+        spec = openapi_spec.OpenAPI(info=self._info)
+        for op in self._path_ops:
+            params: list[openapi_spec.Parameter] = []
+            template = URITemplate.parse(op.path)
+            for var_name in template.variable_names:
+                params.append(
+                    openapi_spec.Parameter(name=var_name, location="path", required=True, schema={"type": "string"})
+                )
+            for arg_name in op.arg_resolvers:
+                if arg_name not in template.variable_names:
+                    params.append(
+                        openapi_spec.Parameter(
+                            name=arg_name, location="query", required=True, schema={"type": "string"}
+                        )
+                    )
+            operation = openapi_spec.Operation(
+                summary=op.target.__doc__ or f"{op.method.value} {op.path}",
+                operation_id=f"{op.method.value.lower()}_{op.path.replace('/', '_').strip('_')}",
+                parameters=tuple(params),
+                responses={
+                    "200": openapi_spec.Response(
+                        description="Successful response",
+                        content={"application/json": openapi_spec.MediaType(schema={"type": "string"})},
+                    )
+                },
+            )
+            spec = spec.add_operation(op.path, op.method.value, operation)
+        return spec
 
+    @property
+    def router(self) -> Router:
+        if router := self._router:
+            return router
+        with self._router_lock:
+            if not self._router:
+                self._router = self._create_router()
+            return self._router
 
-@dataclass(frozen=True, slots=True)
-class BadRequest[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(400, body, headers=headers)
+    def _create_router(self) -> Router:
+        paths: dict[URITemplate, dict[HTTPMethod, RequestHandler]] = {}
 
+        for op in self._path_ops:
+            template = URITemplate.parse(op.path)
+            # Find existing template with same string
+            target_key: URITemplate | None = None
+            for existing in paths:
+                if existing.template == template.template:
+                    target_key = existing
+                    break
+            if target_key is None:
+                paths[template] = {op.method: op.as_handler()}
+            else:
+                paths[target_key][op.method] = op.as_handler()
 
-@dataclass(frozen=True, slots=True)
-class Unauthorized[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(401, body, headers=headers)
+        # Built-in /openapi.json route
+        openapi_template = URITemplate.parse("/openapi.json")
+        app_ref = self
 
+        def openapi_handler(ctx: RequestCtx) -> Response:
+            return Response(
+                status_code=200,
+                headers={"Content-Type": "application/json"},
+                body=[app_ref.docs.to_json()],
+            )
 
-@dataclass(frozen=True, slots=True)
-class Forbidden[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(403, body, headers=headers)
+        paths[openapi_template] = {HTTPMethod.GET: openapi_handler}
+        return Router(paths=paths)
 
+    def register(self, op: FluentPathOp) -> FluentPathOp:
+        self._path_ops.append(op)
+        with self._router_lock:
+            self._router = None
+        return op
 
-@dataclass(frozen=True, slots=True)
-class NotFound[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(404, body, headers=headers)
+    def get(self, path: str) -> FluentOpDecorator:
+        """Decorator to register a GET operation on the given path."""
+
+        def decorator(func):
+            self.register(FluentPathOp.create(HTTPMethod.GET, path, func))
+            return func
+
+        return decorator
+
+    def post(self, path: str) -> FluentOpDecorator:
+        """Decorator to register a POST operation on the given path."""
+
+        def decorator(func):
+            self.register(FluentPathOp.create(HTTPMethod.POST, path, func))
+            return func
+
+        return decorator
+
+    def put(self, path: str) -> FluentOpDecorator:
+        """Decorator to register a PUT operation on the given path."""
+
+        def decorator(func):
+            self.register(FluentPathOp.create(HTTPMethod.PUT, path, func))
+            return func
+
+        return decorator
+
+    def delete(self, path: str) -> FluentOpDecorator:
+        """Decorator to register a DELETE operation on the given path."""
+
+        def decorator(func):
+            self.register(FluentPathOp.create(HTTPMethod.DELETE, path, func))
+            return func
+
+        return decorator

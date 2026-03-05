@@ -1,18 +1,9 @@
-import logging
-from typing import Annotated
-from uuid import UUID
+from wsgiref.simple_server import make_server
 
-from localpost import threadtools
-from localpost.http.config import ServerConfig
-from localpost.http.openapi.app import HttpApp, Example
-from localpost.http.server import start_http_server
+from localpost.http.openapi.app import HttpApp
 
 
-# noinspection DuplicatedCode
 def main():
-    logging.basicConfig(level=logging.DEBUG)
-    threadtools.check_cancelled = lambda: None
-
     app = HttpApp()
 
     @app.get("/hello/{name}")
@@ -20,21 +11,14 @@ def main():
         return f"Hello, {name}!"
 
     @app.get("/books/{book_id}")
-    def hello(
-        book_id: UUID, page_number: int
-    ) -> Annotated[
-        dict,
-        Example(
-            {"id": "123e4567-e89b-12d3-a456-426614174000", "title": "The Lord of the Rings", "author": "J.R.R. Tolkien"}
-        ),
-    ]:
-        # Dict (or any other type, actually) is serialized to JSON (or other format, according to the Accept header)
-        # page_number is just to demonstrate multiple parameters from different sources (path and query)
-        return {"id": str(id), "title": "The Lord of the Rings", "author": "J.R.R. Tolkien"}
+    def get_book(book_id: str, page_number: int = 1) -> dict:
+        return {"id": book_id, "title": "The Lord of the Rings", "author": "J.R.R. Tolkien", "page": page_number}
 
-    with start_http_server(ServerConfig()) as server:
-        while True:
-            server.run(app)
+    print("Starting server on http://localhost:8000")
+    print("Try: curl http://localhost:8000/hello/world")
+    print("Try: curl http://localhost:8000/openapi.json")
+    with make_server("", 8000, app.wsgi) as server:
+        server.serve_forever()
 
 
 if __name__ == "__main__":
