@@ -17,7 +17,7 @@ def main():
 
     @app.get("/hello/{name}")
     def hello(name: str) -> str | BadRequest[str]:
-        if name == "Donald":
+        if name.lower() == "donald":
             return BadRequest("Sorry, you are not welcome here")
 
         return f"Hello, {name}!"
@@ -29,6 +29,9 @@ def main():
     print("Starting server on http://localhost:8000")
     print("Try: curl http://localhost:8000/hello/world")
     print("Try: curl http://localhost:8000/openapi.json")
+    print("Docs: http://localhost:8000/docs (Swagger UI)")
+    print("Docs: http://localhost:8000/docs/redoc (ReDoc)")
+    print("Docs: http://localhost:8000/docs/scalar (Scalar)")
     with make_server("", 8000, app.wsgi) as server:
         server.serve_forever()
 

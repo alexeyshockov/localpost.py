@@ -11,6 +11,7 @@ from typing import Annotated, ParamSpec, Protocol, Self, TypeVar, final, get_arg
 import msgspec
 
 import localpost.spec.openapi as openapi_spec
+from localpost.http.openapi._docs import REDOC_HTML, SCALAR_HTML, SWAGGER_HTML
 from localpost.http.router import RequestCtx, RequestHandler, Response, Router
 from localpost.http.uritemplate import URITemplate
 
@@ -353,8 +354,7 @@ class HttpApp:
             else:
                 paths[target_key][op.method] = op.as_handler()
 
-        # Built-in /openapi.json route
-        openapi_template = URITemplate.parse("/openapi.json")
+        # Built-in routes
         app_ref = self
 
         def openapi_handler(ctx: RequestCtx) -> Response:
@@ -364,7 +364,27 @@ class HttpApp:
                 body=[app_ref.docs.to_json()],
             )
 
-        paths[openapi_template] = {HTTPMethod.GET: openapi_handler}
+        def _html_response(html: str) -> Response:
+            body = html.encode()
+            return Response(
+                status_code=200,
+                headers={"Content-Type": "text/html; charset=utf-8", "Content-Length": str(len(body))},
+                body=[body],
+            )
+
+        def swagger_handler(_: RequestCtx) -> Response:
+            return _html_response(SWAGGER_HTML)
+
+        def redoc_handler(_: RequestCtx) -> Response:
+            return _html_response(REDOC_HTML)
+
+        def scalar_handler(_: RequestCtx) -> Response:
+            return _html_response(SCALAR_HTML)
+
+        paths[URITemplate.parse("/openapi.json")] = {HTTPMethod.GET: openapi_handler}
+        paths[URITemplate.parse("/docs")] = {HTTPMethod.GET: swagger_handler}
+        paths[URITemplate.parse("/docs/redoc")] = {HTTPMethod.GET: redoc_handler}
+        paths[URITemplate.parse("/docs/scalar")] = {HTTPMethod.GET: scalar_handler}
         return Router(paths=paths)
 
     def register(self, op: FluentPathOp) -> FluentPathOp:
