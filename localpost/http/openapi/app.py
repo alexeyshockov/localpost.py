@@ -7,12 +7,15 @@ import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
-from typing import Annotated, Protocol, Self, final
+from typing import Annotated, ParamSpec, Protocol, Self, TypeVar, final
 
 import localpost.spec.openapi as openapi_spec
-from localpost.http.router import RequestHandler, Router
+from localpost.http.router import RequestCtx, RequestHandler, Response, Router
 
-FluentOpDecorator = Callable[[Callable[..., object]], RequestHandler]
+P = ParamSpec("P")
+R = TypeVar("R")
+# FluentOpDecorator = Callable[[Callable[..., object]], RequestHandler]
+FluentOpDecorator = Callable[[Callable[P, R]], Callable[P, R]]
 
 
 @final
@@ -22,8 +25,8 @@ class HttpApp:
         self._router_lock: threading.Lock = threading.Lock()
         self._path_ops: list[FluentPathOp] = []
 
-    def __call__(self, request: HTTPContext) -> None:
-        self.router(request)
+    def __call__(self, req_ctx) -> None:
+        self.router(req_ctx)
 
     def wsgi(self, environ, start_response):
         """WSGI app, to be used with any WSGI server, e.g. Granian."""
@@ -63,7 +66,7 @@ class HttpApp:
     def get(self, path: str) -> FluentOpDecorator:
         """Decorator to register a GET operation on the given path."""
 
-        def decorator(func) -> RequestHandler:
+        def decorator(func):
             return self.register(FluentPathOp(HTTPMethod.GET, path, func))
 
         return decorator
@@ -71,7 +74,7 @@ class HttpApp:
     def post(self, path: str) -> FluentOpDecorator:
         """Decorator to register a POST operation on the given path."""
 
-        def decorator(func) -> RequestHandler:
+        def decorator(func):
             return self.register(FluentPathOp(HTTPMethod.POST, path, func))
 
         return decorator
@@ -88,7 +91,7 @@ class FluentPathOp:
     arg_resolvers: Mapping[str, ArgResolver]
     response_resolver: ResponseResolver
     """
-    To resolve (create) a response from the target's return value. 
+    To resolve (create) a response from the target's return value.
 
     E.g. if the target returns a dict, we can serialize it to JSON and set the Content-Type header.
     """
@@ -264,8 +267,64 @@ class FromPath(ArgResolverFactory):
         return resolve
 
 
-class Example:
-    """Example value for a parameter or return type, to be included in the OpenAPI docs."""
+@dataclass(frozen=True, slots=True)
+class OpResult:
+    code: int
+    headers: Mapping[str, str]
+    body: object
 
-    def __init__(self, value: object):
-        self.value = value
+    def __init__(self, code: int, body: object, /, *, headers: Mapping[str, str] | None = None):
+        object.__setattr__(self, "code", code)
+        object.__setattr__(self, "body", body)
+        object.__setattr__(self, "headers", headers or {})
+
+
+ResultConverter = Callable[[OpResult], Response]
+
+
+@dataclass(frozen=True, slots=True)
+class Ok[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(200, body, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class Created[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(201, body, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class NoContent(OpResult):
+    def __init__(self, /, *, headers: dict[str, str] | None = None):
+        super().__init__(204, None, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class MovedPermanently(OpResult):
+    def __init__(self, location: str, /, *, headers: dict[str, str] | None = None):
+        super().__init__(301, None, headers={"Location": location, **(headers or {})})
+
+
+@dataclass(frozen=True, slots=True)
+class BadRequest[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(400, body, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class Unauthorized[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(401, body, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class Forbidden[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(403, body, headers=headers)
+
+
+@dataclass(frozen=True, slots=True)
+class NotFound[T](OpResult):
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        super().__init__(404, body, headers=headers)

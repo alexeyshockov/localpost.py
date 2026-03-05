@@ -1,144 +1,81 @@
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Buffer, Callable, Iterable, Mapping
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
-from http import HTTPMethod
+from http import Headers, HTTPMethod
+from typing import cast, final, override
 
 import h11
 
-from localpost.http.server import BorrowedHTTPReq, TrackedHTTPReq
+from localpost._utils import NOT_SET
+from localpost.http.config import DEFAULT_BUFFER_SIZE
+from localpost.http.server import HTTPReqCtx
 from localpost.http.uritemplate import URITemplate
 
 
-# See also: https://learn.microsoft.com/en-us/aspnet/core/fundamentals/use-http-context#httprequest
-@dataclass(eq=False, slots=True)
-class RESTContext:
-    _http: BorrowedHTTPReq
+@final
+@dataclass(frozen=True, eq=False, slots=True)
+class RequestCtx:
     exit_stack: ExitStack
 
-    request: h11.Request
-    path_info: str
+    headers: Headers
+    method: HTTPMethod
+    matched_template: URITemplate
+    path: str
     query_string: str
     query_args: Mapping[str, list[str]]
     path_args: Mapping[str, str]
     """Path params of the matched route."""
 
-    result: OpResult = field(default_factory=lambda: Ok(None), init=False)
+    receive: Callable[[int], bytes]
+    """Receive the body from the connection."""
 
-    _req_body: bytearray | None = field(default=None, init=False)
+    _req_body: bytearray | None | object = field(default=NOT_SET, init=False)
 
-    def receive_all(self, cache: bool = False) -> Buffer:
+    def body(self, cache: bool = False) -> Buffer:
         """Read the request body."""
-        if self._req_body is not None:
+        if self._req_body is None:
+            raise RuntimeError("body has been read and not cached")
+        if isinstance(self._req_body, bytearray):
             return self._req_body
+
         body = bytearray()
+        self._req_body = body if cache else None
         while True:
-            chunk = self._http.receive()
+            chunk = self.receive(DEFAULT_BUFFER_SIZE)
             if not chunk:
                 break
             body.extend(chunk)
-        if cache:
-            self._req_body = body
         return body
 
-    def get_header(self, name: str, /, default: str | None = None) -> str | None:
-        raw_name = name.encode()
-        for header_name, header_value in self.request.headers:
-            if header_name == raw_name:
-                return header_value.decode()
-        return default
+
+@dataclass(frozen=True, eq=False, slots=True)
+class Response:
+    status_code: int
+    headers: Headers
+    body: Iterable[bytes]
 
 
-RequestHandler = Callable[[RESTContext], None]
+RequestHandler = Callable[[RequestCtx], Response]
 RequestHandlerMiddleware = Callable[[RequestHandler], RequestHandler]
-
-# We cannot use h11 types here, to be compatible with WSGI too
-HTTPResponse = tuple[int, Iterable[tuple[str, str]], AbstractContextManager[Iterable[bytes]]]
-ResultConverter = Callable[[RESTContext], HTTPResponse]
-
-
-def not_found(req_ctx: TrackedHTTPReq) -> None:
-    """Default handler for unmatched routes."""
-    req_ctx.complete(h11.Response(status_code=404, headers=[(b"Content-Type", b"text/plain")]), b"Not Found")
-    # TODO Problem details if the client supports JSON (Accept header contains "json")
-
-
-def method_not_allowed(request: RESTContext) -> None:
-    """Default handler for unsupported HTTP methods."""
-    request.start_response(h11.Response(status_code=405, headers=[(b"Content-Type", b"text/plain")]))
-    # TODO Problem details if the client supports JSON (Accept header contains "json")
-    request.send(b"Method Not Allowed")
 
 
 @dataclass(eq=False, frozen=True, slots=True)
 class Router:
     paths: Mapping[URITemplate, Mapping[HTTPMethod, RequestHandler]]
 
-    def __call__(self, req_ctx: TrackedHTTPReq) -> None:
-        # FIXME Find a match, create RESTContext with extracted path_args, entered ExitStack, etc.
+    def __call__(self, req_ctx: HTTPReqCtx) -> None:
+        # If match not found — respond immediately with 404.
+        # FIXME Then — borrow, move to thread, create RequestCtx with extracted path_args, entered ExitStack, etc.
         pass
 
     def wsgi(self, environ, start_response):
         """WSGI app, to be used with any WSGI server, e.g. Gunicorn."""
-        # TODO Adapt from WSGI, create RESTContext, ...
+        # TODO Create RequestCtx with extracted path_args, entered ExitStack, etc.
 
-
-@dataclass(frozen=True, slots=True)
-class OpResult:
-    code: int
-    headers: Mapping[str, str]
-    body: object
-
-    def __init__(self, code: int, body: object, /, *, headers: Mapping[str, str] | None = None):
-        object.__setattr__(self, "code", code)
-        object.__setattr__(self, "body", body)
-        object.__setattr__(self, "headers", headers or {})
-
-
-@dataclass(frozen=True, slots=True)
-class Ok[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(200, body, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class Created[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(201, body, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class NoContent(OpResult):
-    def __init__(self, /, *, headers: dict[str, str] | None = None):
-        super().__init__(204, None, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class MovedPermanently(OpResult):
-    def __init__(self, location: str, /, *, headers: dict[str, str] | None = None):
-        super().__init__(301, None, headers={"Location": location, **(headers or {})})
-
-
-@dataclass(frozen=True, slots=True)
-class BadRequest[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(400, body, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class Unauthorized[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(401, body, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class Forbidden[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(403, body, headers=headers)
-
-
-@dataclass(frozen=True, slots=True)
-class NotFound[T](OpResult):
-    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
-        super().__init__(404, body, headers=headers)
+    async def asgi(self, scope, receive, send):
+        """ASGI app, to be used with any ASGI server, e.g. Uvicorn."""
+        # If match not found — respond immediately with 404.
+        # TODO Then — execute in a thread, create RequestCtx with extracted path_args, entered ExitStack, etc.

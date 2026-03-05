@@ -160,6 +160,7 @@ include = ["localpost"]
 reportAny = false
 reportExplicitAny = false
 reportUnusedCallResult = false
+reportIncompatibleMethodOverride = false
 
 [[tool.mypy.overrides]]
 module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]

@@ -57,7 +57,8 @@ HANDLED_SIGNALS = (
     signal.SIGTERM,  # Unix signal 15. Sent by `kill <pid>`.
 )
 if sys.platform == "win32":
-    HANDLED_SIGNALS += (signal.SIGBREAK,)  # Windows signal 21. Sent by Ctrl+Break.
+    # Windows signal 21. Sent by Ctrl+Break.
+    HANDLED_SIGNALS += (signal.SIGBREAK,)  # pyright: ignore[reportConstantRedefinition]
 
 
 class _IgnoredTaskStatus(TaskStatus[Any]):
