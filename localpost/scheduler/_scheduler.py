@@ -5,27 +5,20 @@ import inspect
 import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, ExitStack
+from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, to_thread
+from anyio import BrokenResourceError, WouldBlock, create_task_group, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
+    Event,
+    EventView,
     MemoryStream,
     Result,
     def_full_name,
     is_async_callable,
-)
-
-# from localpost.flow import AsyncHandlerManager, FlowHandlerManager, HandlerDecorator, ensure_async_handler_manager
-from localpost.hosting import (
-    AbstractHost,
-    ExposedService,
-    ExposedServiceBase,
-    HostedService,
-    HostedServiceSet,
-    ServiceLifetimeManager,
+    start_task_soon,
 )
 
 T = TypeVar("T")
@@ -34,6 +27,7 @@ R = TypeVar("R")
 DecF = TypeVar("DecF", bound=Callable[..., Any])
 
 TaskHandler: TypeAlias = Callable[[T], Awaitable[R]] | Callable[[], Awaitable[R]] | Callable[[T], R] | Callable[[], R]
+HandlerDecorator: TypeAlias = Callable[[Any], Any]
 
 logger = logging.getLogger("localpost.scheduler")
 
@@ -141,13 +135,9 @@ class ScheduledTaskTemplate(Generic[T]):
         n._handler_decorators = self._handler_decorators + (decorator,)
         return n
 
-    def resolve_handler(self, task: Task[T, Any]) -> AsyncHandlerManager[T]:
-        if not self._handler_decorators:
-            return task
-        hm = FlowHandlerManager(lambda: task)
-        for decorator in self._handler_decorators:
-            hm = decorator(hm)
-        return ensure_async_handler_manager(hm)
+    def resolve_handler(self, task: Task[T, Any]) -> AbstractAsyncContextManager[Callable[[T], Awaitable[None]]]:
+        # TODO: Support handler decorators (flow module)
+        return task
 
     @property
     def tf(self) -> TriggerFactory[T]:
@@ -157,37 +147,46 @@ class ScheduledTaskTemplate(Generic[T]):
         return tf
 
 
-class ScheduledTask(ExposedService, Protocol[T, R]):
+class ScheduledTask(Protocol[T, R]):
+    @property
+    def shutting_down(self) -> EventView: ...
+
     @property
     def task(self) -> Task[T, R]: ...
 
 
 @final
-class _ScheduledTask(Generic[T, R], ExposedServiceBase):
+class _ScheduledTask(Generic[T, R]):
     def __init__(self, task: Task[T, R], tf: TriggerFactory[T]):
-        super().__init__()
         self.task = task
         self._trigger_factory = tf
         tpl = ScheduledTaskTemplate.ensure(tf)
         self._handler = tpl.resolve_handler(task)
+        self._shutting_down: EventView = Event()  # Placeholder, resolved in run()
 
     def __repr__(self):
         return f"ScheduledTask({self.name!r})"
 
     @property
+    def shutting_down(self) -> EventView:
+        return self._shutting_down
+
+    @property
     def name(self) -> str:
         return self.task.name
 
-    async def __call__(self, service_lifetime: ServiceLifetimeManager) -> None:
-        self._lifetime = service_lifetime
+    async def run(self, shutting_down: EventView) -> None:
+        self._shutting_down = shutting_down
         trigger = self._trigger_factory(self)
 
         async with trigger as t_events, self._handler as message_handler:
-            service_lifetime.set_started()
             async for t_event in t_events:
                 await message_handler(t_event)
             logger.debug(f"{self!r} trigger is completed")
         logger.debug(f"{self!r} is done")
+
+    async def __call__(self, shutting_down: EventView) -> None:
+        return await self.run(shutting_down)
 
 
 Trigger: TypeAlias = AbstractAsyncContextManager[AsyncIterator[T]]
@@ -209,12 +208,12 @@ TriggerFactoryDecorator: TypeAlias = Callable[
 
 def scheduled_task(
     tf: TriggerFactory[T], /, *, name: str | None = None
-) -> Callable[[TaskHandler[T, R] | Task[T, R]], ScheduledTask[T, R]]:
+) -> Callable[[TaskHandler[T, R] | Task[T, R]], _ScheduledTask[T, R]]:
     """
     Schedule a task with the given trigger.
     """
 
-    def _decorator(func: TaskHandler[T, R] | Task[T, R]) -> ScheduledTask[T, R]:
+    def _decorator(func: TaskHandler[T, R] | Task[T, R]) -> _ScheduledTask[T, R]:
         t = func if isinstance(func, Task) else Task(func)
         if name:
             t.name = name
@@ -223,34 +222,30 @@ def scheduled_task(
     return _decorator
 
 
-class Scheduler(AbstractHost):
+class Scheduler:
     """
-    Custom host type, tailored to schedule periodic tasks.
+    Manages a collection of periodic tasks.
 
-    If you need to combine multiple different services together (like a Kafka consumer and a scheduled task), use the
-    generic Host instead.
+    Can be used standalone via `aserve()`, or integrated with hosting via `as_service()`.
     """
 
     def __init__(self, name: str = "scheduler"):
-        super().__init__()
         self._name = name
-        self._scheduled_tasks: list[ScheduledTask[Any, Any]] = []
+        self._scheduled_tasks: list[_ScheduledTask[Any, Any]] = []
+        self._shutting_down: Event | None = None
 
     @property
     def name(self) -> str:
         return self._name
 
-    def _prepare_for_run(self) -> HostedService:
-        return HostedService(HostedServiceSet(*self._scheduled_tasks))
-
     def task(
         self, tf: TriggerFactory[T], /, *, name: str | None = None
-    ) -> Callable[[TaskHandler[T, R] | Task[T, R] | ScheduledTask[T, R]], ScheduledTask[T, R]]:
+    ) -> Callable[[TaskHandler[T, R] | Task[T, R] | _ScheduledTask[T, R]], _ScheduledTask[T, R]]:
         """
         Schedule a task with the given trigger.
         """
 
-        def _decorator(func: TaskHandler[T, R] | Task[T, R] | ScheduledTask[T, R]):
+        def _decorator(func: TaskHandler[T, R] | Task[T, R] | _ScheduledTask[T, R]):
             if isinstance(func, _ScheduledTask):
                 func = func.task
             st = scheduled_task(tf, name=name)(cast(TaskHandler[T, R] | Task[T, R], func))
@@ -258,3 +253,26 @@ class Scheduler(AbstractHost):
             return st
 
         return _decorator
+
+    def shutdown(self) -> None:
+        if self._shutting_down:
+            self._shutting_down.set()
+
+    @asynccontextmanager
+    async def aserve(self):
+        """Run all scheduled tasks. Use `shutdown()` or exit the context to stop."""
+        shutting_down = self._shutting_down = Event()
+        if not self._scheduled_tasks:
+            yield
+            return
+        async with create_task_group() as tg:
+            for st in self._scheduled_tasks:
+                start_task_soon(tg, lambda s=st: s.run(shutting_down))
+            yield
+            shutting_down.set()
+
+    async def as_service(self, lt) -> None:
+        """Run the scheduler as a hosting service (accepts a ServiceLifetime)."""
+        async with self.aserve():
+            lt.set_started()
+            await lt.shutting_down.wait()

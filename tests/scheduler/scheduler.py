@@ -5,7 +5,6 @@ import anyio
 import pytest
 from anyio import fail_after
 
-from localpost.hosting import Host
 from localpost.scheduler import Scheduler, every, scheduled_task
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -20,10 +19,11 @@ async def test_task_decorator():
 
     assert callable(sample_task)
 
-    host = Host(sample_task)
-    async with host.aserve():
+    scheduler = Scheduler()
+    scheduler._scheduled_tasks.append(sample_task)
+    async with scheduler.aserve():
         await anyio.sleep(0.5)  # "App is working"
-        host.shutdown()
+        scheduler.shutdown()
 
     assert len(results) == 1  # Only one initial run
 

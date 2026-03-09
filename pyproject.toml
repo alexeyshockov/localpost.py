@@ -233,11 +233,8 @@ ignore = [
     "TRY400",  # Use `logging.exception` instead of `logging.error`
     "RUF012",  # Mutable class attributes should be annotated with `typing.ClassVar`
 ]
-per-file-ignores = {
-    "examples/*" = [
-        "T201",
-    ]
-}
+[tool.ruff.lint.per-file-ignores]
+"examples/*" = ["T201"]
 
 [tool.uv]
 build-backend.module-root = ""
