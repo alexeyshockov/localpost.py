@@ -6,26 +6,82 @@ import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
-from typing import Annotated, ParamSpec, Protocol, Self, TypeVar, final, get_args, get_origin
+from types import UnionType
+from typing import Annotated, Any, ParamSpec, Protocol, Self, TypeVar, Union, final, get_args, get_origin
 
 import msgspec
 
-import localpost.spec.openapi as openapi_spec
-from localpost.http.openapi._docs import REDOC_HTML, SCALAR_HTML, SWAGGER_HTML
-from localpost.http.router import RequestCtx, RequestHandler, Response, Router
-from localpost.http.uritemplate import URITemplate
+import localpost.openapi.spec as openapi_spec
+from localpost.http.router import RequestCtx, RequestHandler, Response, Router, URITemplate
+from localpost.openapi._docs import REDOC_HTML, SCALAR_HTML, SWAGGER_HTML
 
 P = ParamSpec("P")
 R = TypeVar("R")
 FluentOpDecorator = Callable[[Callable[P, R]], Callable[P, R]]
 
 
+class OpFilter(Protocol):
+    # def __call__(...) -> None | OpResult: ...
+    # def __call__(...) -> None | OpResult: ...
+
+    def update_doc(self, doc: openapi_spec.OpenAPI, op: openapi_spec.Operation | None = None): ...
+
+
+class HttpBasicAuth(OpFilter):
+    def handle_req(auth_details: Annotated[bytes, FromHeader("Authorization")]) -> None | Unauthorized:
+        pass  # TODO Implement
+
+    def update_doc(self, doc: openapi_spec.OpenAPI, op: openapi_spec.Operation | None = None):
+        pass  # TODO Add details to app's OpenAPI spec
+
+
+class HttpBearerAuth(OpFilter):
+    def __init__(self, format: str = "JWT"):
+        self.format = format
+
+    # So it can be used as a decorator
+    def __call__(self, f):
+        pass
+
+    def handle_req(auth_details: Annotated[bytes, FromHeader("Authorization")]) -> None | Unauthorized:
+        pass  # TODO Implement
+
+    def update_doc(self, doc: openapi_spec.OpenAPI, op: openapi_spec.Operation | None = None):
+        pass  # TODO Add details to app's OpenAPI spec
+
+
+class OpenIDConnectAuth:
+    pass  # TODO Implement, later
+
+
+class BodyConverter(Protocol):
+    def __call__(self, req: RequestCtx) -> Any: ...
+
+    def update_doc(self, op: openapi_spec.Operation, doc: openapi_spec.OpenAPI): ...
+
+
+class ResultConverter(Protocol):
+    def __call__(self, res: Any) -> Iterable[bytes]: ...
+
+    def update_doc(self, op: openapi_spec.Operation, doc: openapi_spec.OpenAPI): ...
+
+
+# Params:
+# - cache req body? Def NO
+class BodyConverterFactory(Protocol):
+    def __call__(self, param: inspect.Parameter) -> None | BodyConverter: ...
+
+
+class ResultConverterFactory(Protocol):
+    def __call__(self, return_annotation: type[Any]) -> None | ResultConverter: ...
+
+
 # --- OpResult hierarchy ---
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, eq=False, slots=True)
 class OpResult:
-    code: int
+    status_code: int
     headers: Mapping[str, str]
     body: object
 
@@ -36,28 +92,67 @@ class OpResult:
 
 
 class Ok[T](OpResult):
+    _status_code = 200
+    _description = "Successful response"
+
     def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
         OpResult.__init__(self, 200, body, headers=headers)
 
 
 class Created[T](OpResult):
+    _status_code = 201
+    _description = "Created"
+
     def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
         OpResult.__init__(self, 201, body, headers=headers)
 
 
 class NoContent(OpResult):
+    _status_code = 204
+    _description = "No Content"
+
     def __init__(self, /, *, headers: dict[str, str] | None = None):
         OpResult.__init__(self, 204, None, headers=headers)
 
 
 class BadRequest[T](OpResult):
+    _status_code = 400
+    _description = "Bad Request"
+
     def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
         OpResult.__init__(self, 400, body, headers=headers)
 
 
+class Unauthorized[T](OpResult):
+    _status_code = 401
+    _description = "Unauthorized"
+
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 401, body, headers=headers)
+
+
+class Forbidden[T](OpResult):
+    _status_code = 403
+    _description = "Forbidden"
+
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 403, body, headers=headers)
+
+
 class NotFound[T](OpResult):
+    _status_code = 404
+    _description = "Not Found"
+
     def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
         OpResult.__init__(self, 404, body, headers=headers)
+
+
+class TooManyRequests[T](OpResult):
+    _status_code = 429
+    _description = "Too Many Requests"
+
+    def __init__(self, body: T, /, *, headers: dict[str, str] | None = None):
+        OpResult.__init__(self, 429, body, headers=headers)
 
 
 # --- Protocols ---
@@ -84,7 +179,7 @@ class DefaultResponseResolver:
         headers: dict[str, str] = dict(result.headers)
 
         if result.body is None:
-            return Response(status_code=result.code, headers=headers, body=[])
+            return Response(status_code=result.status_code, headers=headers, body=[])
 
         if isinstance(result.body, bytes):
             body_bytes = result.body
@@ -100,7 +195,7 @@ class DefaultResponseResolver:
             headers.setdefault("Content-Type", "application/json")
 
         headers["Content-Length"] = str(len(body_bytes))
-        return Response(status_code=result.code, headers=headers, body=[body_bytes])
+        return Response(status_code=result.status_code, headers=headers, body=[body_bytes])
 
 
 @final
@@ -212,6 +307,49 @@ class FromPath(ArgResolverFactory):
         return resolve
 
 
+def _extract_responses(return_annotation) -> dict[str, openapi_spec.Response]:
+    """Build OpenAPI responses dict from a function's return type annotation."""
+    if return_annotation is inspect.Parameter.empty:
+        return {"200": openapi_spec.Response(description="Successful response")}
+
+    # Decompose Union types (str | BadRequest[str], Union[str, BadRequest[str]])
+    origin = get_origin(return_annotation)
+    if origin is Union or origin is UnionType:
+        members = get_args(return_annotation)
+    else:
+        members = (return_annotation,)
+
+    responses: dict[str, openapi_spec.Response] = {}
+    has_success = False
+
+    for member in members:
+        # Unwrap generic OpResult subclasses like BadRequest[str] → BadRequest
+        member_origin = get_origin(member)
+        cls = member_origin if member_origin is not None else member
+
+        if isinstance(cls, type) and issubclass(cls, OpResult):
+            code = str(cls._status_code)
+            description = cls._description
+            responses[code] = openapi_spec.Response(
+                description=description,
+                content={"application/json": openapi_spec.MediaType(schema={"type": "string"})},
+            )
+            if cls._status_code < 400:
+                has_success = True
+        else:
+            # Plain return type (str, Book, etc.) → 200
+            has_success = True
+            responses["200"] = openapi_spec.Response(
+                description="Successful response",
+                content={"application/json": openapi_spec.MediaType(schema={"type": "string"})},
+            )
+
+    if not has_success:
+        responses["200"] = openapi_spec.Response(description="Successful response")
+
+    return responses
+
+
 def _extract_resolver_factory(annotation) -> ArgResolverFactory | None:
     """Extract an ArgResolverFactory from an Annotated type, if present."""
     if get_origin(annotation) is Annotated:
@@ -315,16 +453,13 @@ class HttpApp:
                             name=arg_name, location="query", required=True, schema={"type": "string"}
                         )
                     )
+            return_annotation = inspect.signature(op.target).return_annotation
+            responses = _extract_responses(return_annotation)
             operation = openapi_spec.Operation(
                 summary=op.target.__doc__ or f"{op.method.value} {op.path}",
                 operation_id=f"{op.method.value.lower()}_{op.path.replace('/', '_').strip('_')}",
                 parameters=tuple(params),
-                responses={
-                    "200": openapi_spec.Response(
-                        description="Successful response",
-                        content={"application/json": openapi_spec.MediaType(schema={"type": "string"})},
-                    )
-                },
+                responses=responses,
             )
             spec = spec.add_operation(op.path, op.method.value, operation)
         return spec
