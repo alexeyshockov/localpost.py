@@ -4,7 +4,7 @@ import logging
 import random
 from datetime import timedelta
 
-from localpost.scheduler import delay, every, scheduled_task, take_first
+from localpost.scheduler import delay, every, run, scheduled_task, take_first
 
 
 @scheduled_task(every(timedelta(seconds=3)) // take_first(3) // delay((0, 3)))
@@ -17,10 +17,8 @@ async def task1():
 
 
 if __name__ == "__main__":
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(task1))
+    exit(run(task1))

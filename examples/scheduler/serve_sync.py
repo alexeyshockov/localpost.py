@@ -20,7 +20,7 @@ def main():
                 time.sleep(1)
                 print("Main thread is running...")
         except KeyboardInterrupt:
-            scheduler.shutdown()
+            pass
 
     print("Main thread is done, exiting the app")
 

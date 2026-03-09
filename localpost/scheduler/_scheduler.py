@@ -4,21 +4,26 @@ import dataclasses as dc
 import inspect
 import logging
 import math
+import threading
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager, contextmanager
 from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, create_task_group, to_thread
+import anyio
+from anyio import BrokenResourceError, WouldBlock, create_task_group, open_signal_receiver, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
+    HANDLED_SIGNALS,
     Event,
     EventView,
     MemoryStream,
     Result,
+    choose_anyio_backend,
     def_full_name,
     is_async_callable,
     start_task_soon,
+    wait_any,
 )
 
 T = TypeVar("T")
@@ -265,14 +270,77 @@ class Scheduler:
         if not self._scheduled_tasks:
             yield
             return
+        # The done event is set when all tasks complete naturally (e.g. finite triggers)
+        done = Event()
+
+        async def _run_task(st: _ScheduledTask[Any, Any], remaining: list[_ScheduledTask[Any, Any]]) -> None:
+            await st.run(shutting_down)
+            remaining.remove(st)
+            if not remaining:
+                done.set()
+
+        remaining = list(self._scheduled_tasks)
         async with create_task_group() as tg:
             for st in self._scheduled_tasks:
-                start_task_soon(tg, lambda s=st: s.run(shutting_down))
-            yield
+                start_task_soon(tg, lambda s=st: _run_task(s, remaining))
+            yield done
             shutting_down.set()
+
+    @contextmanager
+    def serve(self):
+        """Run the scheduler in a background thread with its own event loop."""
+        stop = threading.Event()
+
+        async def _run_loop():
+            async with self.aserve():
+                await to_thread.run_sync(stop.wait)
+
+        def _thread_target():
+            anyio.run(_run_loop, **choose_anyio_backend())
+
+        t = threading.Thread(target=_thread_target, daemon=True)
+        t.start()
+        try:
+            yield
+        finally:
+            self.shutdown()
+            stop.set()
+            t.join()
 
     async def as_service(self, lt) -> None:
         """Run the scheduler as a hosting service (accepts a ServiceLifetime)."""
         async with self.aserve():
             lt.set_started()
             await lt.shutting_down.wait()
+
+
+async def _arun(target: Scheduler | _ScheduledTask[Any, Any]) -> None:
+    """Run a scheduler or single scheduled task with signal handling."""
+    if isinstance(target, _ScheduledTask):
+        scheduler = Scheduler()
+        scheduler._scheduled_tasks.append(target)
+    else:
+        scheduler = target
+
+    async with scheduler.aserve() as done, create_task_group() as tg:
+
+        async def _handle_signals():
+            with open_signal_receiver(*HANDLED_SIGNALS) as signals:
+                async for _ in signals:
+                    logger.info("Shutting down...")
+                    scheduler.shutdown()
+                    break
+
+        tg.start_soon(_handle_signals)
+        # Wait for either shutdown signal or all tasks completing naturally
+        await wait_any(done, scheduler._shutting_down)  # type: ignore[arg-type]
+        tg.cancel_scope.cancel()
+
+
+def run(target: Scheduler | _ScheduledTask[Any, Any]) -> int:
+    """Run a scheduler or single scheduled task until completion or signal. Returns exit code."""
+    try:
+        anyio.run(_arun, target, **choose_anyio_backend())
+    except KeyboardInterrupt:
+        pass
+    return 0

@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from fast_depends import Depends, inject
 
-from localpost.scheduler import delay, every, scheduled_task
+from localpost.scheduler import delay, every, run, scheduled_task
 
 
 def roll_dice():
@@ -24,10 +24,8 @@ def print_task(
 
 
 if __name__ == "__main__":
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(print_task))
+    exit(run(print_task))

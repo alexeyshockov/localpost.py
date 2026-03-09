@@ -3,7 +3,7 @@
 import logging
 from datetime import timedelta
 
-from localpost.scheduler import Scheduler, delay, every, take_first
+from localpost.scheduler import Scheduler, delay, every, run, take_first
 
 scheduler = Scheduler()
 
@@ -21,10 +21,8 @@ def a_sync_task():
 
 
 if __name__ == "__main__":
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(scheduler))
+    exit(run(scheduler))
