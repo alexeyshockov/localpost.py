@@ -30,6 +30,10 @@ class ServiceProvider(Protocol):
         return self.resolve(service_type)
 
 
+class ServiceNotRegisteredError(ValueError):
+    """Raised when resolving a service that is not registered."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ServiceProvider(ServiceProvider):
     parent: ServiceProvider
@@ -47,7 +51,7 @@ class _ServiceProvider(ServiceProvider):
         # Look up the descriptor
         descriptor = self.registry.descriptors.get(service_type)
         if descriptor is None:
-            raise RuntimeError(f"No service of type {service_type} is registered")
+            raise ServiceNotRegisteredError(f"{service_type} is not registered")
 
         # Check if this service belongs to this scope
         if not isinstance(self.scope, descriptor.scope):
