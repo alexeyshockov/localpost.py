@@ -124,53 +124,83 @@ class ServiceDescriptor[T]:
     factory: ServiceFactory[T]
 
 
-def _auto_wire[T](factory: Callable[..., T | Generator[T]]) -> Callable[[ServiceProvider], T | Generator[T]]:
-    """Wrap a callable so its parameters are resolved from the service provider."""
+def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) -> list[tuple[str, type]]:
+    """Inspect a callable's parameters and collect (name, type) pairs for auto-wiring."""
     hints = get_type_hints(factory)
     params = inspect.signature(factory).parameters
 
-    # Check if the factory already accepts a single ServiceProvider parameter (or untyped single param)
-    param_list = list(params.values())
-    if len(param_list) == 1:
-        param_hint = hints.get(param_list[0].name)
-        if param_hint is ServiceProvider or param_hint is None:
-            return factory
-
-    # Collect (name, type) for each parameter
+    factory_name = getattr(factory, "__name__", repr(factory))
     deps: list[tuple[str, type]] = []
-    for name, param in params.items():
+    for name in params:
+        if skip_self and name == "self":
+            continue
         if name not in hints:
-            raise TypeError(f"Cannot auto-wire factory {getattr(factory, '__name__', repr(factory))}: parameter '{name}' has no type annotation")
+            raise TypeError(f"Cannot auto-wire {factory_name}: parameter '{name}' has no type annotation")
         deps.append((name, hints[name]))
+
+    return deps
+
+
+def _is_sp_factory(factory: Callable[..., object]) -> bool:
+    """Check if a callable already accepts a single ServiceProvider parameter (no auto-wiring needed)."""
+    hints = get_type_hints(factory)
+    params = list(inspect.signature(factory).parameters.values())
+    if len(params) == 1:
+        param_hint = hints.get(params[0].name)
+        return param_hint is ServiceProvider or param_hint is None
+    return False
+
+
+def _make_service_factory[T](factory: Callable[..., T | Generator[T]]) -> ServiceFactory[T]:
+    """Turn any callable (plain, generator, or already-wired) into a ServiceFactory."""
+    if _is_sp_factory(factory):
+        # Already accepts a single ServiceProvider param — just wrap for lifecycle
+        if inspect.isgeneratorfunction(factory):
+            return contextmanager(factory)
+
+        @contextmanager
+        def cm_passthrough(sp: ServiceProvider) -> Generator[T]:
+            yield cast(T, factory(sp))
+
+        return cm_passthrough
+
+    # Auto-wire: resolve deps from the provider, then call the factory
+    deps = _collect_deps(factory)
 
     if inspect.isgeneratorfunction(factory):
 
-        def gen_wrapper(provider: ServiceProvider) -> Generator[T]:
+        @contextmanager
+        def cm_gen(provider: ServiceProvider) -> Generator[T]:
             kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
             yield from factory(**kwargs)
 
-        return gen_wrapper
+        return cm_gen
 
-    def wrapper(provider: ServiceProvider) -> T:
-        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
-        return cast(T, factory(**kwargs))
-
-    return wrapper
-
-
-def _wrap_factory[T](factory: Callable[[ServiceProvider], T | Generator[T]]) -> ServiceFactory[T]:
-    """Wrap a plain or generator factory into one that always returns a context manager."""
-    if inspect.isgeneratorfunction(factory):
-        # Generator factory: wrap with contextmanager so yield produces a CM
-        cm_factory = contextmanager(factory)
-        return cm_factory
-
-    # Plain factory: wrap in a no-op context manager
     @contextmanager
-    def wrapper(sp: ServiceProvider) -> Generator[T]:
-        yield factory(sp)
+    def cm_plain(provider: ServiceProvider) -> Generator[T]:
+        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+        yield cast(T, factory(**kwargs))
 
-    return wrapper
+    return cm_plain
+
+
+def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
+    """Create a ServiceFactory that auto-wires a type's constructor."""
+    # Classes without a custom __init__ inherit object.__init__(*args, **kwargs) — no deps to wire
+    deps = _collect_deps(service_type.__init__, skip_self=True) if "__init__" in service_type.__dict__ else []
+    has_close = callable(getattr(service_type, "close", None))
+
+    @contextmanager
+    def cm(provider: ServiceProvider) -> Generator[T]:
+        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+        instance = service_type(**kwargs)
+        try:
+            yield instance
+        finally:
+            if has_close:
+                instance.close()  # type: ignore[union-attr]
+
+    return cm
 
 
 # Kinda like IServiceCollection in .NET, or svcs.Registry
@@ -190,7 +220,7 @@ class ServiceRegistry:
         factory: Callable[..., T | Generator[T]] | None = None,
         scope: type[ResolutionContext] | None = None,
     ) -> None:
-        wrapped = _wrap_factory(_auto_wire(factory)) if factory else _wrap_factory(factory_for(service_type))
+        wrapped = _make_service_factory(factory) if factory else _factory_for_type(service_type)
         sd = ServiceDescriptor(service_type, scope or AppContext, wrapped)
         self.descriptors[service_type] = sd
 
@@ -198,24 +228,3 @@ class ServiceRegistry:
     def app_scope(self) -> Generator[ServiceProvider]:
         with ExitStack() as ctx, scope(self, AppContext(ctx)) as provider:
             yield provider
-
-
-def factory_for[T](service_type: type[T]) -> Callable[[ServiceProvider], T]:
-    """Inspect the type's __init__ and create a factory that resolves all parameters from the provider."""
-    hints = get_type_hints(service_type.__init__)
-    params = inspect.signature(service_type).parameters
-
-    # Collect (name, type) for each constructor parameter
-    deps: list[tuple[str, type]] = []
-    for name, param in params.items():
-        if name == "self":
-            continue
-        if name not in hints:
-            raise TypeError(f"Cannot auto-wire {service_type.__name__}: parameter '{name}' has no type annotation")
-        deps.append((name, hints[name]))
-
-    def factory(provider: ServiceProvider) -> T:
-        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
-        return service_type(**kwargs)
-
-    return factory
