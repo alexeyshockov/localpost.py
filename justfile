@@ -10,18 +10,17 @@ deps-upgrade:
     uv lock --upgrade
     uv sync --all-groups --all-extras
 
-[doc("Check types (using both PyRight and MyPy)")]
+[doc("Check types (using ty)")]
 types:
-    -basedpyright --pythonpath $(which python) localpost
+    -ty check localpost
 
-[doc("Check types (using both PyRight and MyPy)")]
+[doc("Check types strictly (using ty)")]
 types-strict:
-    -basedpyright --pythonpath $(which python) localpost
+    -ty check localpost
 
 [doc("Check types (including examples and tests)")]
 types-all: types
-    -basedpyright --pythonpath $(which python) \
-      examples tests
+    -ty check examples tests
 
 [doc("Check that the public API is correctly typed")]
 type-coverage:
@@ -37,7 +36,7 @@ format-all: format
 
 check file:
     -ruff check --fix {{ file }}
-    -basedpyright --pythonpath $(which python) {{ file }}
+    -ty check {{ file }}
 
 tests:
     pytest --cov-report=term --cov-report=xml --cov-branch --cov -v

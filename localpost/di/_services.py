@@ -46,9 +46,6 @@ class _ServiceProvider(ServiceProvider):
     services: dict[type, object] = field(default_factory=dict)
     """Resolved services, keyed by service type."""
 
-    def create_instance[T](self, service_type: type[T]) -> T:
-        pass  # TODO Implement
-
     def resolve[T](self, service_type: type[T], /) -> T:
         # Return cached instance if already resolved in this scope
         if service_type in self.services:

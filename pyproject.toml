@@ -150,12 +150,8 @@ tests-integration = [
 [tool.coverage.run]
 omit = ["tests/*"]
 
-[tool.pyright]
-include = ["localpost"]
-reportAny = false
-reportExplicitAny = false
-reportUnusedCallResult = false
-reportIncompatibleMethodOverride = false
+[tool.ty]
+src = ["localpost"]
 
 [[tool.mypy.overrides]]
 module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]

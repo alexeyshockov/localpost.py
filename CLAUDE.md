@@ -17,12 +17,11 @@ Python 3.12+ required. Built on AnyIO for structured concurrency (works with asy
 ```bash
 just deps              # Install all dependencies (uses UV)
 just format            # Format code with ruff
-just types             # Check types (PyRight + MyPy)
-just type-coverage     # Verify public API types with pyright --verifytypes
+just types             # Check types (using ty)
 just tests             # Run all tests with coverage
 just unit-tests        # Unit tests only (exclude integration)
 just integration-tests # Integration tests (parallel with pytest-xdist)
-just check FILE        # Check single file (ruff + pyright + mypy)
+just check FILE        # Check single file (ruff + ty)
 ```
 
 Run a single test:
@@ -94,7 +93,7 @@ Files prefixed with `_` contain internal implementations. Public APIs are export
 ### Conventions
 
 - Use AnyIO for async work (structured concurrency)
-- **Public API**: Full type annotations, verified with PyRight (`just type-coverage`)
+- **Public API**: Full type annotations, checked with ty (`just types`)
 - **Internal API**: Types only where they improve readability
 
 ## Testing
