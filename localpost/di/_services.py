@@ -46,6 +46,9 @@ class _ServiceProvider(ServiceProvider):
     services: dict[type, object] = field(default_factory=dict)
     """Resolved services, keyed by service type."""
 
+    def create_instance[T](self, service_type: type[T]) -> T:
+        pass  # TODO Implement
+
     def resolve[T](self, service_type: type[T], /) -> T:
         # Return cached instance if already resolved in this scope
         if service_type in self.services:
@@ -124,6 +127,40 @@ class ServiceDescriptor[T]:
     factory: ServiceFactory[T]
 
 
+def _auto_wire[T](factory: Callable[..., T | Generator[T]]) -> Callable[[ServiceProvider], T | Generator[T]]:
+    """Wrap a callable so its parameters are resolved from the service provider."""
+    hints = get_type_hints(factory)
+    params = inspect.signature(factory).parameters
+
+    # Check if the factory already accepts a single ServiceProvider parameter (or untyped single param)
+    param_list = list(params.values())
+    if len(param_list) == 1:
+        param_hint = hints.get(param_list[0].name)
+        if param_hint is ServiceProvider or param_hint is None:
+            return factory  # type: ignore[return-value]
+
+    # Collect (name, type) for each parameter
+    deps: list[tuple[str, type]] = []
+    for name, param in params.items():
+        if name not in hints:
+            raise TypeError(f"Cannot auto-wire factory {factory.__name__}: parameter '{name}' has no type annotation")
+        deps.append((name, hints[name]))
+
+    if inspect.isgeneratorfunction(factory):
+
+        def gen_wrapper(provider: ServiceProvider) -> Generator[T]:
+            kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+            yield from factory(**kwargs)  # type: ignore[arg-type]
+
+        return gen_wrapper  # type: ignore[return-value]
+
+    def wrapper(provider: ServiceProvider) -> T:
+        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+        return factory(**kwargs)  # type: ignore[return-value]
+
+    return wrapper  # type: ignore[return-value]
+
+
 def _wrap_factory[T](factory: Callable[[ServiceProvider], T | Generator[T]]) -> ServiceFactory[T]:
     """Wrap a plain or generator factory into one that always returns a context manager."""
     if inspect.isgeneratorfunction(factory):
@@ -156,7 +193,7 @@ class ServiceRegistry:
         factory: Callable[[ServiceProvider], T | Generator[T]] | None = None,
         scope: type[ResolutionContext] | None = None,
     ) -> None:
-        wrapped = _wrap_factory(factory) if factory else _wrap_factory(factory_for(service_type))
+        wrapped = _wrap_factory(_auto_wire(factory)) if factory else _wrap_factory(factory_for(service_type))
         sd = ServiceDescriptor(service_type, scope or AppContext, wrapped)
         self.descriptors[service_type] = sd
 
