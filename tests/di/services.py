@@ -5,10 +5,11 @@ import pytest
 
 from localpost.di._services import (
     AppContext,
+    ServiceNotRegisteredError,
     ServiceProvider,
     ServiceRegistry,
-    current_provider,
     _factory_for_type,
+    current_provider,
     scope,
     service_provider,
 )
@@ -115,7 +116,7 @@ class TestServiceProvider:
         registry = ServiceRegistry()
 
         with registry.app_scope() as provider:
-            with pytest.raises(RuntimeError, match="No service of type"):
+            with pytest.raises(ServiceNotRegisteredError):
                 provider.resolve(Config)
 
     def test_resolve_unregistered_in_nested_scope_raises(self):
@@ -129,7 +130,7 @@ class TestServiceProvider:
         with outer_registry.app_scope():
             inner_ctx = AppContext()
             with inner_ctx.ctx, scope(inner_registry, inner_ctx) as inner_provider:
-                with pytest.raises(RuntimeError, match="No service of type"):
+                with pytest.raises(ServiceNotRegisteredError):
                     inner_provider.resolve(Database)
 
     def test_getitem(self):

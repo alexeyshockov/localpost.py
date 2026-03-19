@@ -44,6 +44,12 @@ class _ServiceProvider(ServiceProvider):
     """Resolved services, keyed by service type."""
 
     def resolve[T](self, service_type: type[T], /) -> T:
+        # Well-known DI types
+        if service_type is ServiceProvider:
+            return cast(T, self)
+        if service_type is ResolutionContext or service_type is AppContext:
+            return cast(T, self.scope)
+
         # Return cached instance if already resolved in this scope
         if service_type in self.services:
             return cast(T, self.services[service_type])
@@ -131,15 +137,6 @@ def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) ->
     return deps
 
 
-def _resolve_dep(provider: _ServiceProvider, dep_type: type) -> object:
-    """Resolve a dependency, handling well-known DI types specially."""
-    if dep_type is ServiceProvider:
-        return provider
-    if dep_type is ResolutionContext or dep_type is AppContext:
-        return provider.scope
-    return provider.resolve(dep_type)
-
-
 def _make_service_factory[T](factory: Callable[..., T | Generator[T]]) -> ServiceFactory[T]:
     """Turn any callable (plain, generator, or already-wired) into a ServiceFactory."""
     deps = _collect_deps(factory)
@@ -148,14 +145,14 @@ def _make_service_factory[T](factory: Callable[..., T | Generator[T]]) -> Servic
 
         @contextmanager
         def cm_gen(provider: ServiceProvider) -> Generator[T]:
-            kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
+            kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
             yield from factory(**kwargs)
 
         return cm_gen
 
     @contextmanager
     def cm_plain(provider: ServiceProvider) -> Generator[T]:
-        kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
+        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
         yield cast(T, factory(**kwargs))
 
     return cm_plain
@@ -169,7 +166,7 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 
     @contextmanager
     def cm(provider: ServiceProvider) -> Generator[T]:
-        kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
+        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
         instance = service_type(**kwargs)
         try:
             yield instance
