@@ -118,6 +118,20 @@ class TestServiceProvider:
             with pytest.raises(RuntimeError, match="No service of type"):
                 provider.resolve(Config)
 
+    def test_resolve_unregistered_in_nested_scope_raises(self):
+        """Unregistered type should raise even when a parent scope exists."""
+        outer_registry = ServiceRegistry()
+        outer_registry.register_value(Config(host="outer", port=1))
+
+        inner_registry = ServiceRegistry()
+        # Database is not registered in inner_registry
+
+        with outer_registry.app_scope():
+            inner_ctx = AppContext()
+            with inner_ctx.ctx, scope(inner_registry, inner_ctx) as inner_provider:
+                with pytest.raises(RuntimeError, match="No service of type"):
+                    inner_provider.resolve(Database)
+
     def test_getitem(self):
         registry = ServiceRegistry()
         config = Config(host="localhost", port=5432)

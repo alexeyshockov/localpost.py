@@ -47,8 +47,7 @@ class _ServiceProvider(ServiceProvider):
         # Look up the descriptor
         descriptor = self.registry.descriptors.get(service_type)
         if descriptor is None:
-            # Delegate to parent scope
-            return self.parent.resolve(service_type)
+            raise RuntimeError(f"No service of type {service_type} is registered")
 
         # Check if this service belongs to this scope
         if not isinstance(self.scope, descriptor.scope):
