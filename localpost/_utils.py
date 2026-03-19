@@ -94,11 +94,11 @@ class AsyncContextManagerAdapter(Generic[T]):
 
 
 class _SupportsClose(Protocol):
-    def close(self) -> object: ...
+    def close(self) -> Any: ...
 
 
 class _SupportsAsyncClose(Protocol):
-    async def aclose(self) -> object: ...
+    def aclose(self) -> Awaitable[Any]: ...
 
 
 # TODO Remove
