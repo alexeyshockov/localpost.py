@@ -150,9 +150,6 @@ tests-integration = [
 [tool.coverage.run]
 omit = ["tests/*"]
 
-[tool.ty]
-src = ["localpost"]
-
 [[tool.mypy.overrides]]
 module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]
 follow_untyped_imports = true

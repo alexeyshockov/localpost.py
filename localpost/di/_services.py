@@ -134,28 +134,28 @@ def _auto_wire[T](factory: Callable[..., T | Generator[T]]) -> Callable[[Service
     if len(param_list) == 1:
         param_hint = hints.get(param_list[0].name)
         if param_hint is ServiceProvider or param_hint is None:
-            return factory  # type: ignore[return-value]
+            return factory
 
     # Collect (name, type) for each parameter
     deps: list[tuple[str, type]] = []
     for name, param in params.items():
         if name not in hints:
-            raise TypeError(f"Cannot auto-wire factory {factory.__name__}: parameter '{name}' has no type annotation")
+            raise TypeError(f"Cannot auto-wire factory {getattr(factory, '__name__', repr(factory))}: parameter '{name}' has no type annotation")
         deps.append((name, hints[name]))
 
     if inspect.isgeneratorfunction(factory):
 
         def gen_wrapper(provider: ServiceProvider) -> Generator[T]:
             kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
-            yield from factory(**kwargs)  # type: ignore[arg-type]
+            yield from factory(**kwargs)
 
-        return gen_wrapper  # type: ignore[return-value]
+        return gen_wrapper
 
     def wrapper(provider: ServiceProvider) -> T:
         kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
-        return factory(**kwargs)  # type: ignore[return-value]
+        return cast(T, factory(**kwargs))
 
-    return wrapper  # type: ignore[return-value]
+    return wrapper
 
 
 def _wrap_factory[T](factory: Callable[[ServiceProvider], T | Generator[T]]) -> ServiceFactory[T]:
@@ -163,12 +163,12 @@ def _wrap_factory[T](factory: Callable[[ServiceProvider], T | Generator[T]]) -> 
     if inspect.isgeneratorfunction(factory):
         # Generator factory: wrap with contextmanager so yield produces a CM
         cm_factory = contextmanager(factory)
-        return cm_factory  # type: ignore[return-value]
+        return cm_factory
 
     # Plain factory: wrap in a no-op context manager
     @contextmanager
     def wrapper(sp: ServiceProvider) -> Generator[T]:
-        yield factory(sp)  # type: ignore[arg-type]
+        yield factory(sp)
 
     return wrapper
 
@@ -187,7 +187,7 @@ class ServiceRegistry:
     def register[T](
         self,
         service_type: type[T],
-        factory: Callable[[ServiceProvider], T | Generator[T]] | None = None,
+        factory: Callable[..., T | Generator[T]] | None = None,
         scope: type[ResolutionContext] | None = None,
     ) -> None:
         wrapped = _wrap_factory(_auto_wire(factory)) if factory else _wrap_factory(factory_for(service_type))
