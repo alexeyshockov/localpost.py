@@ -333,7 +333,18 @@ async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
         child_lt = ServiceLifetime(portal)
         tg = portal._task_group
         tg.start_soon(_run, svc, child_lt)
-        await child_lt.started
+        # Wait for either started or stopped (service may fail before starting)
+        async with create_task_group() as wait_tg:
+            async def wait_started():
+                await child_lt.started
+                wait_tg.cancel_scope.cancel()
+
+            async def wait_stopped():
+                await child_lt.stopped
+                wait_tg.cancel_scope.cancel()
+
+            wait_tg.start_soon(wait_started)
+            wait_tg.start_soon(wait_stopped)
         yield child_lt.view
         child_lt.view.shutdown()
         await child_lt.stopped
@@ -350,7 +361,18 @@ async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[Ser
     async with create_task_group() as observe_tg:
         # Bind the parent lifetime (if the child is stopped, shutdown the parent)
         observe_tg.start_soon(bind_parent_to, child_lt)
-        await child_lt.started
+        # Wait for either started or stopped (service may fail before starting)
+        async with create_task_group() as wait_tg:
+            async def wait_started():
+                await child_lt.started
+                wait_tg.cancel_scope.cancel()
+
+            async def wait_stopped():
+                await child_lt.stopped
+                wait_tg.cancel_scope.cancel()
+
+            wait_tg.start_soon(wait_started)
+            wait_tg.start_soon(wait_stopped)
         yield child_lt
         observe_tg.cancel_scope.cancel()
         child_lt.shutdown()

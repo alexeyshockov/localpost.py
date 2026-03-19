@@ -1,77 +1,124 @@
 import anyio
 import pytest
-from anyio import CancelScope
 
-import localpost
-from localpost._utils import wait_any  # noqa
-from localpost.hosting import Host, ServiceLifetimeManager
+from localpost.hosting import ServiceLifetime, ServiceLifetimeView, run, serve, Starting, Running, ShuttingDown, Stopped
 
 pytestmark = pytest.mark.anyio
 
 
-async def test_host_status():
-    async def test_service(lifetime):
-        shutdown_scope = CancelScope()
-        lifetime.set_started(graceful_shutdown_scope=shutdown_scope)
-        with shutdown_scope:
-            await anyio.sleep_forever()
+async def test_serve_and_state_transitions():
+    """Test the full lifecycle: starting → running → shutting_down → stopped."""
+    states_seen = []
 
-    host = Host(test_service)
-    assert not host.started
-    async with host.aserve():
-        await host.started
-        assert host.status  # TODO Check
-        host.shutdown()
+    async def test_service(lt: ServiceLifetime):
+        states_seen.append(type(lt.state))
+        lt.set_started()
+        states_seen.append(type(lt.state))
+        await lt.shutting_down.wait()
+        states_seen.append(type(lt.state))
+
+    async with serve(test_service) as lt:
+        await lt.started
+        assert isinstance(lt.state, Running)
+        lt.shutdown()
+        await lt.stopped
+
+    assert isinstance(lt.state, Stopped)
+    assert states_seen == [Starting, Running, ShuttingDown]
+
+
+async def test_serve_yields_lifetime_view():
+    async def test_service(lt: ServiceLifetime):
+        lt.set_started()
+        await lt.shutting_down.wait()
+
+    async with serve(test_service) as lt:
+        assert isinstance(lt, ServiceLifetimeView)
+        lt.shutdown()
+        await lt.stopped
 
 
 async def test_exit_code_on_error():
-    async def failing_service(_):
+    async def failing_service(lt: ServiceLifetime):
+        lt.set_started()
         raise Exception("Test error")
 
-    host = Host(failing_service)
-    async with host.aserve():
-        pass
+    async with serve(failing_service) as lt:
+        await lt.stopped
 
-    assert host.exit_code == 1
+    assert lt.exit_code == 1
+
+
+async def test_exit_code_on_success():
+    async def ok_service(lt: ServiceLifetime):
+        lt.set_started()
+
+    async with serve(ok_service) as lt:
+        await lt.stopped
+
+    assert lt.exit_code == 0
+
+
+async def test_run():
+    async def finite_service(lt: ServiceLifetime):
+        lt.set_started()
+        await anyio.sleep(0.05)
+
+    exit_code = await run(finite_service)
+    assert exit_code == 0
+
+
+async def test_run_failing():
+    async def failing_service(lt: ServiceLifetime):
+        lt.set_started()
+        raise Exception("boom")
+
+    exit_code = await run(failing_service)
+    assert exit_code == 1
 
 
 async def test_shutdown():
     shutdown_communicated = False
-    shutdown_reason = "Test shutdown"
 
-    async def test_service(lifetime: ServiceLifetimeManager) -> None:
-        lifetime.set_started()
-        await wait_any(anyio.sleep_forever, lifetime.shutting_down)
+    async def test_service(lt: ServiceLifetime):
+        lt.set_started()
+        await lt.shutting_down.wait()
         nonlocal shutdown_communicated
         shutdown_communicated = True
 
-    host = Host(test_service)
-    async with host.aserve():
-        await host.started.wait()
-        assert not host.shutting_down
-        host.shutdown(reason=shutdown_reason)
-        assert host.shutting_down
+    async with serve(test_service) as lt:
+        await lt.started
+        assert not lt.shutting_down
+        lt.shutdown(reason="Test shutdown")
+        await lt.stopped
 
-    assert shutdown_communicated  # Shutdown was communicated to the service
-    assert host.status  # TODO Check
-
-
-async def test_arun():
-    async def a_service(_: ServiceLifetimeManager):
-        await anyio.sleep(0.1)
-
-    with localpost.debug:
-        host = Host(a_service)
-        exit_code = await localpost.arun(host)
-
-    assert exit_code == 0
+    assert shutdown_communicated
+    assert isinstance(lt.state, Stopped)
 
 
-def test_run():
-    async def a_service(_: ServiceLifetimeManager):
-        await anyio.sleep(0.1)
+async def test_child_service():
+    child_started = False
+    child_stopped = False
 
-    with localpost.debug:
-        host = Host(a_service)
-        exit_code = localpost.run(host)
-    assert exit_code == 0
+    async def child(lt: ServiceLifetime):
+        nonlocal child_started, child_stopped
+        lt.set_started()
+        child_started = True
+        await lt.shutting_down.wait()
+        child_stopped = True
+
+    async def parent(lt: ServiceLifetime):
+        child_lt = lt.start(child)
+        await child_lt.started
+        lt.set_started()
+        await lt.shutting_down.wait()
+        child_lt.shutdown()
+        await child_lt.stopped
+
+    async with serve(parent) as lt:
+        await lt.started
+        assert child_started
+        lt.shutdown()
+        await lt.stopped
+
+    assert child_stopped
