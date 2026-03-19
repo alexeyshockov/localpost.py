@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Generator
-from contextlib import AbstractContextManager, ExitStack, closing, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Final, Protocol, cast, final, get_type_hints
-
-from localpost._utils import _SupportsClose
 
 
 class ResolutionContext(Protocol):
@@ -30,11 +28,6 @@ class ServiceProvider(Protocol):
 
     def __getitem__[T](self, service_type: type[T], /) -> T:
         return self.resolve(service_type)
-
-    def enter[T](self, cm: AbstractContextManager[T]) -> T: ...
-
-    def defer(self, resource: _SupportsClose, /):
-        return self.enter(closing(resource))
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,13 +56,10 @@ class _ServiceProvider(ServiceProvider):
             return self.parent.resolve(service_type)
 
         # Create the service instance via its factory (returns a CM), and enter it in the scope
-        instance = self.enter(descriptor.factory(self))
+        instance = self.scope.enter(descriptor.factory(self))
         # Cache for future resolutions within this scope
         self.services[service_type] = instance
         return instance
-
-    def enter[T](self, cm: AbstractContextManager[T]) -> T:
-        return self.scope.enter(cm)
 
 
 class NullServiceProvider(ServiceProvider):
@@ -106,9 +96,6 @@ class CurrentServiceProvider(ServiceProvider):
     def resolve[T](self, service_type: type[T], /) -> T:
         return current_provider().resolve(service_type)
 
-    def enter[T](self, cm: AbstractContextManager[T]) -> T:
-        return current_provider().enter(cm)
-
 
 service_provider: Final[CurrentServiceProvider] = CurrentServiceProvider()
 
@@ -141,44 +128,31 @@ def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) ->
     return deps
 
 
-def _is_sp_factory(factory: Callable[..., object]) -> bool:
-    """Check if a callable already accepts a single ServiceProvider parameter (no auto-wiring needed)."""
-    hints = get_type_hints(factory)
-    params = list(inspect.signature(factory).parameters.values())
-    if len(params) == 1:
-        param_hint = hints.get(params[0].name)
-        return param_hint is ServiceProvider or param_hint is None
-    return False
+def _resolve_dep(provider: _ServiceProvider, dep_type: type) -> object:
+    """Resolve a dependency, handling well-known DI types specially."""
+    if dep_type is ServiceProvider:
+        return provider
+    if dep_type is ResolutionContext or dep_type is AppContext:
+        return provider.scope
+    return provider.resolve(dep_type)
 
 
 def _make_service_factory[T](factory: Callable[..., T | Generator[T]]) -> ServiceFactory[T]:
     """Turn any callable (plain, generator, or already-wired) into a ServiceFactory."""
-    if _is_sp_factory(factory):
-        # Already accepts a single ServiceProvider param — just wrap for lifecycle
-        if inspect.isgeneratorfunction(factory):
-            return contextmanager(factory)
-
-        @contextmanager
-        def cm_passthrough(sp: ServiceProvider) -> Generator[T]:
-            yield cast(T, factory(sp))
-
-        return cm_passthrough
-
-    # Auto-wire: resolve deps from the provider, then call the factory
     deps = _collect_deps(factory)
 
     if inspect.isgeneratorfunction(factory):
 
         @contextmanager
         def cm_gen(provider: ServiceProvider) -> Generator[T]:
-            kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+            kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
             yield from factory(**kwargs)
 
         return cm_gen
 
     @contextmanager
     def cm_plain(provider: ServiceProvider) -> Generator[T]:
-        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+        kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
         yield cast(T, factory(**kwargs))
 
     return cm_plain
@@ -192,7 +166,7 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 
     @contextmanager
     def cm(provider: ServiceProvider) -> Generator[T]:
-        kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
+        kwargs = {name: _resolve_dep(cast(_ServiceProvider, provider), dep_type) for name, dep_type in deps}
         instance = service_type(**kwargs)
         try:
             yield instance
@@ -212,7 +186,12 @@ class ServiceRegistry:
     def register_value[T](
         self, value: T, service_type: type[T] | None = None, scope: type[ResolutionContext] | None = None
     ) -> None:
-        self.register(service_type or type(value), lambda _: value, scope)
+        @contextmanager
+        def value_factory(_: ServiceProvider) -> Generator[T]:
+            yield value
+
+        sd = ServiceDescriptor(service_type or type(value), scope or AppContext, value_factory)
+        self.descriptors[sd.service_type] = sd
 
     def register[T](
         self,

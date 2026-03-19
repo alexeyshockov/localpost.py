@@ -127,8 +127,11 @@ class TestServiceProvider:
             assert provider[Config] is config
 
     def test_register_with_custom_factory(self):
+        def custom_factory() -> Config:
+            return Config(host="custom", port=9999)
+
         registry = ServiceRegistry()
-        registry.register(Config, lambda _: Config(host="custom", port=9999))
+        registry.register(Config, custom_factory)
 
         with registry.app_scope() as provider:
             config = provider.resolve(Config)
@@ -191,43 +194,6 @@ class TestScope:
 
 
 class TestAppScopeLifecycle:
-    def test_enter_context_manager(self):
-        """Resources entered via provider.enter() should be cleaned up when the scope exits."""
-        closed = False
-
-        class Resource:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                nonlocal closed
-                closed = True
-
-        registry = ServiceRegistry()
-
-        with registry.app_scope() as provider:
-            provider.enter(Resource())
-            assert not closed
-
-        assert closed
-
-    def test_defer_closeable(self):
-        """provider.defer() should close the resource when the scope exits."""
-        closed = False
-
-        class Closeable:
-            def close(self):
-                nonlocal closed
-                closed = True
-
-        registry = ServiceRegistry()
-
-        with registry.app_scope() as provider:
-            provider.defer(Closeable())
-            assert not closed
-
-        assert closed
-
     def test_auto_close_on_scope_exit(self):
         """Services with close() registered without a factory should be auto-closed on scope exit."""
         closed = []

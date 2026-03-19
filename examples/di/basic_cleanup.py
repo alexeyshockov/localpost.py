@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from icecream import ic
 
-from localpost.di._services import ServiceRegistry
+from localpost.di._services import AppContext, ServiceRegistry, ServiceProvider
 
 
 @dataclass
@@ -13,7 +13,8 @@ class Config:
     db_dsn: str
 
 
-def create_db_conn_pool(conf: Config):
+# ctx and sp are just to show how to use things
+def create_db_conn_pool(conf: Config, ctx: AppContext, sp: ServiceProvider):
     db = DBConnectionPool(conf.db_dsn)
     try:
         yield db
