@@ -97,18 +97,21 @@ class ServiceRegistry:
     def __init__(self):
         self.descriptors: dict[type, ServiceDescriptor] = {}
 
-    def bind[T](
+    def register_value[T](self, service_type: type[T], value: T, scope: type[ResolutionContext] | None = None) -> None:
+        self.register(service_type, lambda _: value, scope)
+
+    def register[T](
         self,
         service_type: type[T],
         factory: Callable[[ServiceProvider], T] | None = None,
         scope: type[ResolutionContext] | None = None,
     ) -> None:
-        sd = ServiceDescriptor(service_type, scope or AppContext, factory or default_factory_for(service_type))
+        sd = ServiceDescriptor(service_type, scope or AppContext, factory or factory_for(service_type))
         self.descriptors[service_type] = sd
 
     def app_scope(self) -> AbstractContextManager[ServiceProvider]:
         pass  # TODO Implement
 
 
-def default_factory_for[T](service_type: type[T]) -> Callable[[ServiceProvider], T]:
+def factory_for[T](service_type: type[T]) -> Callable[[ServiceProvider], T]:
     pass  # TODO Inspect the type constructor, extract all the params and create a factory function, to bind them from the provider
