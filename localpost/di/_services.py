@@ -62,8 +62,8 @@ class _ServiceProvider(ServiceProvider):
             # Delegate to parent scope (the service belongs to an outer scope)
             return self.parent.resolve(service_type)
 
-        # Create the service instance via its factory
-        instance = descriptor.factory(self)
+        # Create the service instance via its factory (returns a CM), and enter it in the scope
+        instance = self.enter(descriptor.factory(self))
         # Cache for future resolutions within this scope
         self.services[service_type] = instance
         return instance
@@ -113,11 +113,30 @@ class CurrentServiceProvider(ServiceProvider):
 service_provider: Final[CurrentServiceProvider] = CurrentServiceProvider()
 
 
+# A factory that returns a context manager — the provider enters it to get the instance and manage its lifecycle.
+type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceDescriptor[T]:
     service_type: type[T]
     scope: type[ResolutionContext]
-    factory: Callable[[ServiceProvider], T]
+    factory: ServiceFactory[T]
+
+
+def _wrap_factory[T](factory: Callable[[ServiceProvider], T | Generator[T]]) -> ServiceFactory[T]:
+    """Wrap a plain or generator factory into one that always returns a context manager."""
+    if inspect.isgeneratorfunction(factory):
+        # Generator factory: wrap with contextmanager so yield produces a CM
+        cm_factory = contextmanager(factory)
+        return cm_factory  # type: ignore[return-value]
+
+    # Plain factory: wrap in a no-op context manager
+    @contextmanager
+    def wrapper(sp: ServiceProvider) -> Generator[T]:
+        yield factory(sp)  # type: ignore[arg-type]
+
+    return wrapper
 
 
 # Kinda like IServiceCollection in .NET, or svcs.Registry
@@ -134,10 +153,11 @@ class ServiceRegistry:
     def register[T](
         self,
         service_type: type[T],
-        factory: Callable[[ServiceProvider], T] | None = None,
+        factory: Callable[[ServiceProvider], T | Generator[T]] | None = None,
         scope: type[ResolutionContext] | None = None,
     ) -> None:
-        sd = ServiceDescriptor(service_type, scope or AppContext, factory or factory_for(service_type))
+        wrapped = _wrap_factory(factory) if factory else _wrap_factory(factory_for(service_type))
+        sd = ServiceDescriptor(service_type, scope or AppContext, wrapped)
         self.descriptors[service_type] = sd
 
     @contextmanager

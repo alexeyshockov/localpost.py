@@ -7,8 +7,8 @@ Inspired by .NET DependencyInjection
 - no async for now (maybe in the future)
 - Scope is defined by it's type
 - Only one registration per type
-- Service Locator, no @inject decorator as in other DI-oriented frameworks
-    - But constructor wiring is supported
+- Service Locator (no @inject decorator as in other DI-oriented frameworks)
+- Automatic wiring, if a service is resolved via ServiceProvider
 
 ## TODO
 
