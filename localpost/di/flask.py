@@ -37,7 +37,7 @@ def init_app(app: Flask, registry: ServiceRegistry) -> None:
     @app.before_request
     def _open_request_scope() -> None:
         req_ctx = RequestContext()
-        req_ctx.enter(scope(registry, req_ctx))
+        req_ctx.enter(scope(registry, req_ctx, parent=registry._app_provider))
         g._localpost_req_ctx = req_ctx
 
     @app.teardown_request

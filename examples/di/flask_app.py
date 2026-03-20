@@ -1,3 +1,4 @@
+import signal
 from collections.abc import Generator
 from dataclasses import dataclass
 
@@ -56,12 +57,16 @@ def index() -> str:
     return f"Hello, {repo.get_current_user()}!\n"
 
 
-if __name__ == "__main__":
+def main():
     server = Server(("127.0.0.1", 8080), app)
+    signal.signal(signal.SIGINT, lambda *_: server.stop())
+    signal.signal(signal.SIGTERM, lambda *_: server.stop())
+
     with services.app_scope():
         print("Listening on http://127.0.0.1:8080")
-        try:
-            server.start()
-        except KeyboardInterrupt:
-            server.stop()
+        server.start()
     print("App scope closed, all resources cleaned up.")
+
+
+if __name__ == "__main__":
+    main()
