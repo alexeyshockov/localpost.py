@@ -3,14 +3,15 @@ from dataclasses import dataclass
 
 import pytest
 
+from localpost._utils import set_cvar
 from localpost.di._services import (
     AppContext,
+    DefaultServiceProvider,
     ServiceNotRegisteredError,
     ServiceProvider,
     ServiceRegistry,
     _factory_for_type,
-    get_current_provider,
-    scope,
+    current_provider,
     service_provider,
 )
 
@@ -121,17 +122,13 @@ class TestServiceProvider:
 
     def test_resolve_unregistered_in_nested_scope_raises(self):
         """Unregistered type should raise even when a parent scope exists."""
-        outer_registry = ServiceRegistry()
-        outer_registry.register_value(Config(host="outer", port=1))
+        registry = ServiceRegistry()
+        registry.register_value(Config(host="outer", port=1))
+        # Database is not registered
 
-        inner_registry = ServiceRegistry()
-        # Database is not registered in inner_registry
-
-        with outer_registry.app_scope():
-            inner_ctx = AppContext()
-            with inner_ctx.ctx, scope(inner_registry, inner_ctx) as inner_provider:
-                with pytest.raises(ServiceNotRegisteredError):
-                    inner_provider.resolve(Database)
+        with registry.app_scope() as provider:
+            with pytest.raises(ServiceNotRegisteredError):
+                provider.resolve(Database)
 
     def test_getitem(self):
         registry = ServiceRegistry()
@@ -161,7 +158,7 @@ class TestScope:
 
         with registry.app_scope():
             # current_provider() should work inside the scope
-            provider = get_current_provider()
+            provider = current_provider.get()
             config = provider.resolve(Config)
             assert config.host == "localhost"
 
@@ -171,8 +168,7 @@ class TestScope:
         with registry.app_scope():
             pass
 
-        with pytest.raises(RuntimeError, match="No active DI scope"):
-            get_current_provider()
+        assert current_provider.get(None) is None
 
     def test_service_provider_proxy(self):
         """The module-level `service_provider` proxy should delegate to the current scope."""
@@ -194,18 +190,18 @@ class TestScope:
         with registry.app_scope() as outer_provider:
             assert outer_provider.resolve(Config).host == "outer"
 
-            # Create a new registry for the inner scope with a different value
+            # Override the value in the same registry for the inner scope
             inner_registry = ServiceRegistry()
             inner_registry.register_value(inner_config)
 
             inner_ctx = AppContext()
-            with inner_ctx.ctx:
-                with scope(inner_registry, inner_ctx) as inner_provider:
-                    assert inner_provider.resolve(Config).host == "inner"
-                    assert get_current_provider().resolve(Config).host == "inner"
+            inner_provider = DefaultServiceProvider(outer_provider, inner_registry, inner_ctx)
+            with inner_ctx.ctx, set_cvar(current_provider, inner_provider):
+                assert inner_provider.resolve(Config).host == "inner"
+                assert current_provider.get().resolve(Config).host == "inner"
 
             # After exiting inner scope, outer is restored
-            assert get_current_provider().resolve(Config).host == "outer"
+            assert current_provider.get().resolve(Config).host == "outer"
 
 
 class TestAppScopeLifecycle:

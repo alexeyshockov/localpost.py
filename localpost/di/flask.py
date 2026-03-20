@@ -56,4 +56,4 @@ def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider) -
     def _close_request_scope(exc: BaseException | None) -> None:
         ctx: AbstractContextManager[Any] | None = getattr(g, "_localpost_di_scope", None)
         if ctx is not None:
-            ctx.__exit__(exc)
+            ctx.__exit__(type(exc) if exc else None, exc, None)

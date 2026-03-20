@@ -42,7 +42,6 @@ from anyio import (
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from execnet.script.socketserver import old
 from typing_extensions import TypeVar
 
 T = TypeVar("T", default=Any)
