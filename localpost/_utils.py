@@ -9,7 +9,8 @@ import signal
 import sys
 import typing
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterable
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from functools import wraps
 from typing import (
@@ -41,6 +42,7 @@ from anyio import (
 from anyio.abc import TaskGroup, TaskStatus
 from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+from execnet.script.socketserver import old
 from typing_extensions import TypeVar
 
 T = TypeVar("T", default=Any)
@@ -99,6 +101,16 @@ class _SupportsClose(Protocol):
 
 class _SupportsAsyncClose(Protocol):
     def aclose(self) -> Awaitable[Any]: ...
+
+
+@contextmanager
+def set_cvar[T](cvar: ContextVar[T], value: T) -> Generator[T]:
+    """To emulate what Python 3.14 cvar.set() does by default."""
+    old_value = cvar.set(value)
+    try:
+        yield value
+    finally:
+        cvar.reset(old_value)
 
 
 # TODO Remove

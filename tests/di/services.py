@@ -9,7 +9,7 @@ from localpost.di._services import (
     ServiceProvider,
     ServiceRegistry,
     _factory_for_type,
-    current_provider,
+    get_current_provider,
     scope,
     service_provider,
 )
@@ -161,7 +161,7 @@ class TestScope:
 
         with registry.app_scope():
             # current_provider() should work inside the scope
-            provider = current_provider()
+            provider = get_current_provider()
             config = provider.resolve(Config)
             assert config.host == "localhost"
 
@@ -172,7 +172,7 @@ class TestScope:
             pass
 
         with pytest.raises(RuntimeError, match="No active DI scope"):
-            current_provider()
+            get_current_provider()
 
     def test_service_provider_proxy(self):
         """The module-level `service_provider` proxy should delegate to the current scope."""
@@ -202,10 +202,10 @@ class TestScope:
             with inner_ctx.ctx:
                 with scope(inner_registry, inner_ctx) as inner_provider:
                     assert inner_provider.resolve(Config).host == "inner"
-                    assert current_provider().resolve(Config).host == "inner"
+                    assert get_current_provider().resolve(Config).host == "inner"
 
             # After exiting inner scope, outer is restored
-            assert current_provider().resolve(Config).host == "outer"
+            assert get_current_provider().resolve(Config).host == "outer"
 
 
 class TestAppScopeLifecycle:

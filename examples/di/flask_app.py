@@ -6,7 +6,7 @@ from cheroot.wsgi import Server
 from flask import Flask, Request
 
 from localpost.di._services import ServiceRegistry, service_provider
-from localpost.di.flask import RequestContext, init_app, propagate_context
+from localpost.di.flask import RequestContext, init_app
 
 
 @dataclass
@@ -48,7 +48,6 @@ services.register(DBConnectionPool, create_db_pool)
 services.register(UserRepository, scope=RequestContext)
 
 app = Flask(__name__)
-init_app(app, services)
 
 
 @app.get("/")
@@ -58,11 +57,12 @@ def index() -> str:
 
 
 def main():
-    with services.app_scope():
-        # Wrap after entering app scope so worker threads inherit the context
-        server = Server(("127.0.0.1", 8080), propagate_context(app))
-        signal.signal(signal.SIGINT, lambda *_: server.stop())
-        signal.signal(signal.SIGTERM, lambda *_: server.stop())
+    server = Server(("127.0.0.1", 8080), app)
+    signal.signal(signal.SIGINT, lambda *_: server.stop())
+    signal.signal(signal.SIGTERM, lambda *_: server.stop())
+
+    with services.app_scope() as app_scope:
+        init_app(app, services, app_scope)
         print("Listening on http://127.0.0.1:8080")
         server.start()
     print("App scope closed, all resources cleaned up.")

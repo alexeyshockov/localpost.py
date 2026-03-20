@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
-import contextvars
-from collections.abc import Iterable
-from contextlib import AbstractContextManager, ExitStack
+from collections.abc import Generator
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
-from typing import final
-from wsgiref.types import StartResponse, WSGIApplication, WSGIEnvironment
+from typing import Any, final
 
 from flask import Flask, Request, g, request
 
+from localpost._utils import set_cvar
 from localpost.di._services import (
+    DefaultServiceProvider,
     ResolutionContext,
+    ServiceProvider,
     ServiceRegistry,
-    scope,
+    current_provider,
 )
+
+_EXT_KEY = "localpost.di.provider"
 
 
 @final
@@ -27,41 +30,30 @@ class RequestContext(ResolutionContext):
         return self.ctx.enter_context(cm)
 
 
-def propagate_context(wsgi_app: WSGIApplication) -> WSGIApplication:
-    """WSGI middleware that propagates the calling thread's context vars to worker threads.
-
-    Captures the context at the time of wrapping, then runs each request in a fresh copy.
-    This makes context vars (e.g. the DI app scope) visible in threaded servers like Cheroot.
-    """
-    base_ctx = contextvars.copy_context()
-
-    def middleware(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
-        # Each request gets its own copy so context var changes are isolated per request
-        request_ctx = base_ctx.run(contextvars.copy_context)
-        return request_ctx.run(wsgi_app, environ, start_response)
-
-    return middleware
-
-
-def init_app(app: Flask, registry: ServiceRegistry) -> None:
-    """Initialize request-scoped DI for a Flask app.
+def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider) -> None:
+    """Initialize DI for a Flask app.
 
     Opens a RequestContext scope per request. Flask's Request object is automatically
     available for injection in request-scoped services.
-
-    The app-level scope must be managed externally (e.g. wrapped around the WSGI server).
-    Use `propagate_context()` to make the app scope visible in threaded servers.
     """
     registry.register(Request, lambda: request, RequestContext)
+    app.extensions[_EXT_KEY] = (registry, provider)
+
+    @contextmanager
+    def flask_req_ctx() -> Generator[None]:
+        registry, parent = app.extensions[_EXT_KEY]
+        req_scope = RequestContext()
+        provider = DefaultServiceProvider(parent, registry, req_scope)
+        with req_scope.ctx, set_cvar(current_provider, provider):
+            yield
 
     @app.before_request
     def _open_request_scope() -> None:
-        req_ctx = RequestContext()
-        req_ctx.enter(scope(registry, req_ctx))
-        g._localpost_req_ctx = req_ctx
+        g._localpost_di_scope = ctx = flask_req_ctx()
+        ctx.__enter__()
 
     @app.teardown_request
     def _close_request_scope(exc: BaseException | None) -> None:
-        req_ctx: RequestContext | None = getattr(g, "_localpost_req_ctx", None)
-        if req_ctx is not None:
-            req_ctx.ctx.close()
+        ctx: AbstractContextManager[Any] | None = getattr(g, "_localpost_di_scope", None)
+        if ctx is not None:
+            ctx.__exit__(exc)

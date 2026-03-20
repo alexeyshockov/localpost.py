@@ -5,7 +5,10 @@ from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Final, Protocol, cast, final, get_type_hints
+from dataclasses import dataclass as define
+from typing import Final, Protocol, Self, cast, final, get_type_hints
+
+from localpost._utils import set_cvar
 
 
 class ResolutionContext(Protocol):
@@ -13,7 +16,7 @@ class ResolutionContext(Protocol):
 
 
 @final
-@dataclass(frozen=True, eq=False, slots=True)
+@define(frozen=True, eq=False, slots=True)
 class AppContext(ResolutionContext):
     ctx: ExitStack = field(default_factory=ExitStack)
 
@@ -34,14 +37,21 @@ class ServiceNotRegisteredError(ValueError):
     """Raised when resolving a service that is not registered."""
 
 
-@dataclass(frozen=True, slots=True)
-class _ServiceProvider(ServiceProvider):
+@final
+@define(frozen=True, slots=True)
+class DefaultServiceProvider(ServiceProvider):
     parent: ServiceProvider
     registry: ServiceRegistry
     scope: ResolutionContext
     """Scope stack, from outermost to innermost."""
     services: dict[type, object] = field(default_factory=dict)
     """Resolved services, keyed by service type."""
+
+    @classmethod
+    def from_current(cls, scope: ResolutionContext) -> Self:
+        if parent := current_provider.get(None):
+            return cls(parent=parent, registry=parent.registry, scope=scope)
+        raise RuntimeError("No active DI scope")  # Did you forget to enter the app scope?
 
     def resolve[T](self, service_type: type[T], /) -> T:
         # Well-known DI types
@@ -79,34 +89,23 @@ class NullServiceProvider(ServiceProvider):
         raise RuntimeError("No active DI scope")
 
 
-NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
-
-
-_provider: ContextVar[ServiceProvider] = ContextVar("_provider")
-
-
-def current_provider() -> ServiceProvider:
-    if provider := _provider.get(None):
-        return provider
-    raise RuntimeError("No active DI scope")
-
-
 @contextmanager
-def scope(registry: ServiceRegistry, ctx: ResolutionContext, /) -> Generator[ServiceProvider]:
-    provider = _ServiceProvider(parent=_provider.get(NULL_PROVIDER), registry=registry, scope=ctx)
-    contextvar_token = _provider.set(provider)
-    try:
+def scope(ctx: ResolutionContext, /) -> Generator[ServiceProvider]:
+    with set_cvar(current_provider, DefaultServiceProvider.from_current(ctx)) as provider:
         yield provider
-    finally:
-        _provider.reset(contextvar_token)
 
 
 class CurrentServiceProvider(ServiceProvider):
     def resolve[T](self, service_type: type[T], /) -> T:
-        return current_provider().resolve(service_type)
+        if provider := current_provider.get(None):
+            return provider.resolve(service_type)
+        raise RuntimeError("No active DI scope")
 
 
 service_provider: Final[CurrentServiceProvider] = CurrentServiceProvider()
+"""Proxy for the current DI service provider."""
+current_provider: ContextVar[DefaultServiceProvider] = ContextVar("current_provider")
+NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
 
 
 # A factory that returns a context manager — the provider enters it to get the instance and manage its lifecycle.
@@ -117,7 +116,7 @@ type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
 class ServiceDescriptor[T]:
     service_type: type[T]
     scope: type[ResolutionContext]
-    factory: ServiceFactory[T]
+    factory: ServiceFactory[T] = field(compare=False, repr=False)
 
 
 def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) -> list[tuple[str, type]]:
@@ -204,6 +203,8 @@ class ServiceRegistry:
         self.descriptors[service_type] = sd
 
     @contextmanager
-    def app_scope(self) -> Generator[ServiceProvider]:
-        with ExitStack() as ctx, scope(self, AppContext(ctx)) as provider:
+    def app_scope(self) -> Generator[DefaultServiceProvider]:
+        app_scope = AppContext()
+        provider = DefaultServiceProvider(NULL_PROVIDER, self, app_scope)
+        with app_scope.ctx, set_cvar(current_provider, provider):
             yield provider
