@@ -92,10 +92,8 @@ def current_provider() -> ServiceProvider:
 
 
 @contextmanager
-def scope(
-    registry: ServiceRegistry, ctx: ResolutionContext, /, parent: ServiceProvider | None = None
-) -> Generator[ServiceProvider]:
-    provider = _ServiceProvider(parent=parent or _provider.get(NULL_PROVIDER), registry=registry, scope=ctx)
+def scope(registry: ServiceRegistry, ctx: ResolutionContext, /) -> Generator[ServiceProvider]:
+    provider = _ServiceProvider(parent=_provider.get(NULL_PROVIDER), registry=registry, scope=ctx)
     contextvar_token = _provider.set(provider)
     try:
         yield provider
@@ -184,7 +182,6 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 class ServiceRegistry:
     def __init__(self):
         self.descriptors: dict[type, ServiceDescriptor] = {}
-        self._app_provider: ServiceProvider | None = None
 
     def register_value[T](
         self, value: T, service_type: type[T] | None = None, scope: type[ResolutionContext] | None = None
@@ -209,8 +206,4 @@ class ServiceRegistry:
     @contextmanager
     def app_scope(self) -> Generator[ServiceProvider]:
         with ExitStack() as ctx, scope(self, AppContext(ctx)) as provider:
-            self._app_provider = provider
-            try:
-                yield provider
-            finally:
-                self._app_provider = None
+            yield provider
