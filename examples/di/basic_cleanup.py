@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from icecream import ic
 
-from localpost.di._services import AppContext, ServiceRegistry, ServiceProvider
+from localpost.di._services import AppContext, ServiceProvider, ServiceRegistry
 
 
 @dataclass

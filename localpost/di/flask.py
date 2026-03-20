@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass, field
-from typing import Any, final
+from typing import final
+from wsgiref.types import StartResponse, WSGIApplication, WSGIEnvironment
 
 from flask import Flask, Request, g, request
 
@@ -26,10 +27,7 @@ class RequestContext(ResolutionContext):
         return self.ctx.enter_context(cm)
 
 
-type WSGIApp = Callable[[dict[str, Any], Callable[..., Any]], Iterable[bytes]]
-
-
-def propagate_context(wsgi_app: WSGIApp) -> WSGIApp:
+def propagate_context(wsgi_app: WSGIApplication) -> WSGIApplication:
     """WSGI middleware that propagates the calling thread's context vars to worker threads.
 
     Captures the context at the time of wrapping, then runs each request in a fresh copy.
@@ -37,7 +35,7 @@ def propagate_context(wsgi_app: WSGIApp) -> WSGIApp:
     """
     base_ctx = contextvars.copy_context()
 
-    def middleware(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
+    def middleware(environ: WSGIEnvironment, start_response: StartResponse) -> Iterable[bytes]:
         # Each request gets its own copy so context var changes are isolated per request
         request_ctx = base_ctx.run(contextvars.copy_context)
         return request_ctx.run(wsgi_app, environ, start_response)
