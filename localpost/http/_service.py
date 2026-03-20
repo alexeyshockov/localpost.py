@@ -1,12 +1,12 @@
 from collections.abc import Awaitable
 from wsgiref.types import WSGIApplication
 
-from anyio import create_task_group, to_thread, from_thread, CapacityLimiter
+from anyio import CapacityLimiter, from_thread, to_thread
 
 from localpost import hosting
 from localpost.hosting import ServiceLifetime
 from localpost.http.config import ServerConfig
-from localpost.http.server import start_http_server, RequestHandler
+from localpost.http.server import RequestHandler, start_http_server
 from localpost.threadtools import create_executor
 
 

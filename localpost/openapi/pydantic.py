@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import inspect
-from collections.abc import Collection, Iterable
-from typing import Any, Protocol
-
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel
 
 import localpost.spec.openapi as openapi_spec
 from localpost.http.openapi.app import BadRequest, OpResult

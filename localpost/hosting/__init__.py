@@ -4,9 +4,9 @@ from .._utils import choose_anyio_backend
 from ._host import (
     Running,
     ServiceF,
-    ServiceState,
     ServiceLifetime,
     ServiceLifetimeView,
+    ServiceState,
     ShuttingDown,
     Starting,
     Stopped,
