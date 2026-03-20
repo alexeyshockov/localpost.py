@@ -106,6 +106,7 @@ dev-consumers = [
 ]
 dev-http = [
     "flask ~=3.1",
+    "cheroot ~=10.0",
 #    "defspec ~=0.5",  # Replaced by our own implementation
     "pydantic ~=2.11",
     "a2wsgi",

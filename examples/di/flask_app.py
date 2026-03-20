@@ -1,6 +1,7 @@
 from collections.abc import Generator
 from dataclasses import dataclass
 
+from cheroot.wsgi import Server
 from flask import Flask, Request
 
 from localpost.di._services import ServiceRegistry, service_provider
@@ -40,15 +41,12 @@ class UserRepository:
         return f"user (from {self.request_path}, db={self.db.dsn})"
 
 
-app = Flask(__name__)
-
-# Set up services
 services = ServiceRegistry()
 services.register_value(Config(db_dsn=":memory:"))
 services.register(DBConnectionPool, create_db_pool)
 services.register(UserRepository, scope=RequestContext)
 
-# Initialize the Flask DI extension
+app = Flask(__name__)
 init_app(app, services)
 
 
@@ -59,4 +57,11 @@ def index() -> str:
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    server = Server(("127.0.0.1", 8080), app)
+    with services.app_scope():
+        print("Listening on http://127.0.0.1:8080")
+        try:
+            server.start()
+        except KeyboardInterrupt:
+            server.stop()
+    print("App scope closed, all resources cleaned up.")
