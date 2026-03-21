@@ -9,14 +9,7 @@ from typing import Any, final
 
 from flask import Flask, Request, g, request
 
-from localpost._utils import set_cvar
-from localpost.di._services import (
-    DefaultServiceProvider,
-    ResolutionContext,
-    ServiceProvider,
-    ServiceRegistry,
-    current_provider,
-)
+from localpost.di._services import DefaultServiceProvider, ResolutionContext, ServiceProvider, ServiceRegistry, scope
 
 _EXT_KEY = "localpost.di.provider"
 
@@ -44,8 +37,7 @@ def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider, /
         registry, parent = app.extensions[_EXT_KEY]
         req_scope = RequestContext()
         provider = DefaultServiceProvider(parent, registry, req_scope)
-        with req_scope.ctx, set_cvar(current_provider, provider):
-            registry._resolve_eager(provider)
+        with req_scope.ctx, scope(provider):
             yield
 
     @app.before_request

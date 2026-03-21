@@ -74,10 +74,10 @@ class DefaultServiceProvider(ServiceProvider):
         if service_type in self.services:
             return cast(T, self.services[service_type])
 
-        # Look up the factory for this scope
-        factory = self.registry.factories.get((service_type, type(self.scope)))
-        if factory is not None:
-            instance = self.services[service_type] = self.scope.enter(factory(self))
+        # Look up the descriptor for this scope
+        descriptor = self.registry.descriptors.get((service_type, type(self.scope)))
+        if descriptor is not None:
+            instance = self.services[service_type] = self.scope.enter(descriptor.factory(self))
             return instance
 
         # Delegate to parent scope
@@ -96,8 +96,13 @@ class NullServiceProvider(ServiceProvider):
 
 
 @contextmanager
-def scope(ctx: ResolutionContext, /) -> Generator[ServiceProvider]:
-    with set_cvar(current_provider, DefaultServiceProvider.from_current(ctx)) as provider:
+def scope(provider: DefaultServiceProvider, /) -> Generator[ServiceProvider]:
+    with set_cvar(current_provider, provider):
+        # Eagerly resolve services marked with create_on_enter for this scope type
+        scope_type = type(provider.scope)
+        for desc in provider.registry.descriptors.values():
+            if desc.create_on_enter and desc.scope is scope_type:
+                provider.resolve(desc.service_type)
         yield provider
 
 
@@ -121,6 +126,14 @@ NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
 
 # A factory that returns a context manager — the provider enters it to get the instance and manage its lifecycle.
 type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
+
+
+@define(frozen=True, slots=True)
+class ServiceDescriptor[T]:
+    service_type: type[T]
+    scope: type[ResolutionContext]
+    factory: ServiceFactory[T] = field(repr=False)
+    create_on_enter: bool = False
 
 
 def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) -> list[tuple[str, type]]:
@@ -177,13 +190,13 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 @final
 class ServiceRegistry:
     def __init__(self):
-        self.factories: dict[tuple[type, type[ResolutionContext]], ServiceFactory] = {}
-        self._eager: set[tuple[type, type[ResolutionContext]]] = set()
+        self.descriptors: dict[tuple[type, type[ResolutionContext]], ServiceDescriptor] = {}
 
     def register_instance[T](
         self, value: T, service_type: type[T] | None = None, scope: type[ResolutionContext] | None = None
     ) -> None:
-        self.factories[(service_type or type(value), scope or AppContext)] = lambda _: nullcontext(value)
+        sd = ServiceDescriptor(service_type or type(value), scope or AppContext, lambda _: nullcontext(value))
+        self.descriptors[(sd.service_type, sd.scope)] = sd
 
     def register[T](
         self,
@@ -193,22 +206,12 @@ class ServiceRegistry:
         create_on_enter: bool = False,
     ) -> None:
         wrapped = _make_service_factory(factory) if factory else _factory_for_type(service_type)
-        key = (service_type, scope or AppContext)
-        self.factories[key] = wrapped
-        if create_on_enter:
-            self._eager.add(key)
-
-    def _resolve_eager(self, provider: DefaultServiceProvider) -> None:
-        """Eagerly resolve services marked with create_on_enter for the given scope type."""
-        scope_type = type(provider.scope)
-        for svc_type, svc_scope in self._eager:
-            if svc_scope is scope_type:
-                provider.resolve(svc_type)
+        sd = ServiceDescriptor(service_type, scope or AppContext, wrapped, create_on_enter)
+        self.descriptors[(sd.service_type, sd.scope)] = sd
 
     @contextmanager
     def app_scope(self) -> Generator[DefaultServiceProvider]:
         app_scope = AppContext()
         provider = DefaultServiceProvider(NULL_PROVIDER, self, app_scope)
-        with app_scope.ctx, set_cvar(current_provider, provider):
-            self._resolve_eager(provider)
+        with app_scope.ctx, scope(provider):
             yield provider
