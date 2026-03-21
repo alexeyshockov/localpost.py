@@ -241,8 +241,8 @@ class TestScope:
 
 
 class TestAppScopeLifecycle:
-    def test_auto_close_on_scope_exit(self):
-        """Services with close() registered without a factory should be auto-closed on scope exit."""
+    def test_no_auto_close_on_scope_exit(self):
+        """Services registered without a factory should NOT be auto-closed on scope exit."""
         closed = []
 
         class Pool:
@@ -252,25 +252,14 @@ class TestAppScopeLifecycle:
             def close(self):
                 closed.append("pool")
 
-        class Server:
-            def __init__(self, config: Config):
-                self.config = config
-
-            def close(self):
-                closed.append("server")
-
         registry = ServiceRegistry()
         registry.register_instance(Config(host="localhost", port=5432))
         registry.register(Pool)
-        registry.register(Server)
 
         with registry.app_scope() as provider:
             provider.resolve(Pool)
-            provider.resolve(Server)
-            assert closed == []
 
-        assert "pool" in closed
-        assert "server" in closed
+        assert closed == []
 
     def test_generator_factory_cleanup(self):
         """A generator factory should run cleanup code after scope exit."""

@@ -165,19 +165,12 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
     """Create a ServiceFactory that auto-wires a type's constructor."""
     # Classes without a custom __init__ inherit object.__init__(*args, **kwargs) — no deps to wire
     deps = _collect_deps(service_type.__init__, skip_self=True) if "__init__" in service_type.__dict__ else []
-    has_close = callable(getattr(service_type, "close", None))
 
-    @contextmanager
-    def cm(provider: ServiceProvider) -> Generator[T]:
+    def factory(provider: ServiceProvider) -> AbstractContextManager[T]:
         kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}
-        instance = service_type(**kwargs)
-        try:
-            yield instance
-        finally:
-            if has_close:
-                instance.close()  # type: ignore[union-attr]
+        return nullcontext(service_type(**kwargs))
 
-    return cm
+    return factory
 
 
 # Kinda like IServiceCollection in .NET, or svcs.Registry
