@@ -177,8 +177,8 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 @final
 class ServiceRegistry:
     def __init__(self):
-        # self.descriptors: dict[type, ServiceDescriptor] = {}
         self.factories: dict[tuple[type, type[ResolutionContext]], ServiceFactory] = {}
+        self._eager: set[tuple[type, type[ResolutionContext]]] = set()
 
     def register_instance[T](
         self, value: T, service_type: type[T] | None = None, scope: type[ResolutionContext] | None = None
@@ -190,13 +190,25 @@ class ServiceRegistry:
         service_type: type[T],
         factory: Callable[..., T | Generator[T]] | None = None,
         scope: type[ResolutionContext] | None = None,
+        create_on_enter: bool = False,
     ) -> None:
         wrapped = _make_service_factory(factory) if factory else _factory_for_type(service_type)
-        self.factories[(service_type, scope or AppContext)] = wrapped
+        key = (service_type, scope or AppContext)
+        self.factories[key] = wrapped
+        if create_on_enter:
+            self._eager.add(key)
+
+    def _resolve_eager(self, provider: DefaultServiceProvider) -> None:
+        """Eagerly resolve services marked with create_on_enter for the given scope type."""
+        scope_type = type(provider.scope)
+        for svc_type, svc_scope in self._eager:
+            if svc_scope is scope_type:
+                provider.resolve(svc_type)
 
     @contextmanager
     def app_scope(self) -> Generator[DefaultServiceProvider]:
         app_scope = AppContext()
         provider = DefaultServiceProvider(NULL_PROVIDER, self, app_scope)
         with app_scope.ctx, set_cvar(current_provider, provider):
+            self._resolve_eager(provider)
             yield provider

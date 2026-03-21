@@ -240,6 +240,63 @@ class TestScope:
             assert current_provider.get().resolve(Config).host == "outer"
 
 
+class TestCreateOnEnter:
+    def test_eager_resolution(self):
+        """Services with create_on_enter=True should be resolved when the scope is entered."""
+        created = []
+
+        class Pool:
+            def __init__(self, config: Config):
+                self.config = config
+                created.append("pool")
+
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(Pool, create_on_enter=True)
+
+        assert created == []
+        with registry.app_scope() as provider:
+            assert created == ["pool"]
+            # Should return the same cached instance
+            pool = provider.resolve(Pool)
+            assert isinstance(pool, Pool)
+            assert created == ["pool"]
+
+    def test_eager_generator_factory(self):
+        """Generator factories with create_on_enter=True should run setup on scope entry and cleanup on exit."""
+        events: list[str] = []
+
+        def create_pool(config: Config):
+            events.append("setup")
+            yield f"pool({config.host})"
+            events.append("cleanup")
+
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(str, create_pool, create_on_enter=True)
+
+        assert events == []
+        with registry.app_scope() as provider:
+            assert events == ["setup"]
+            assert provider.resolve(str) == "pool(localhost)"
+        assert events == ["setup", "cleanup"]
+
+    def test_non_eager_not_resolved(self):
+        """Services without create_on_enter should NOT be resolved on scope entry."""
+        created = []
+
+        class Pool:
+            def __init__(self, config: Config):
+                created.append("pool")
+
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(Pool)
+
+        with registry.app_scope():
+            assert created == []
+
+
 class TestAppScopeLifecycle:
     def test_no_auto_close_on_scope_exit(self):
         """Services registered without a factory should NOT be auto-closed on scope exit."""

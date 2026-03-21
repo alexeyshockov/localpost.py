@@ -45,6 +45,7 @@ def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider, /
         req_scope = RequestContext()
         provider = DefaultServiceProvider(parent, registry, req_scope)
         with req_scope.ctx, set_cvar(current_provider, provider):
+            registry._resolve_eager(provider)
             yield
 
     @app.before_request
