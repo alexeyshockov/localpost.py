@@ -4,8 +4,9 @@ import inspect
 from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from dataclasses import dataclass as define
-from dataclasses import field
+from functools import partial
 from typing import Any, Final, Protocol, Self, cast, final, get_type_hints
 
 from localpost._utils import set_cvar
@@ -59,7 +60,7 @@ class DefaultServiceProvider(ServiceProvider):
 
     def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
         """Create an instance of the given type, resolving constructor deps not provided in kwargs."""
-        deps = _collect_deps(target_type.__init__, skip_self=True) if "__init__" in target_type.__dict__ else []
+        deps = _collect_deps(target_type) if "__init__" in target_type.__dict__ else []
         resolved = {name: self.resolve(dep_type) for name, dep_type in deps if name not in kwargs}
         return target_type(**resolved, **kwargs)
 
@@ -128,7 +129,7 @@ NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
 type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
 
 
-@define(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True)
 class ServiceDescriptor[T]:
     service_type: type[T]
     scope: type[ResolutionContext]
@@ -136,15 +137,29 @@ class ServiceDescriptor[T]:
     create_on_enter: bool = False
 
 
-def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) -> list[tuple[str, type]]:
-    """Inspect a callable's parameters and collect (name, type) pairs for auto-wiring."""
-    hints = get_type_hints(factory)
-    params = inspect.signature(factory).parameters
+def _collect_deps(factory: Callable[..., object]) -> list[tuple[str, type]]:
+    """Inspect a callable's parameters and collect (name, type) pairs for auto-wiring.
 
-    factory_name = getattr(factory, "__name__", repr(factory))
+    Handles classes, classmethods, partial functions, etc. Uses inspect.signature for the effective
+    parameter list (excludes self/cls, accounts for positional partial args) and get_type_hints on the
+    underlying callable for type annotations.
+    """
+    # Unwrap to get the real callable for type hints
+    unwrapped = factory
+    bound_kwargs: set[str] = set()
+    while isinstance(unwrapped, partial):
+        bound_kwargs.update(unwrapped.keywords)
+        unwrapped = unwrapped.func
+
+    # inspect.signature handles partial, classmethod, staticmethod, classes, etc.
+    params = inspect.signature(factory).parameters
+    # get_type_hints needs the real callable; for classes, use __init__ to get param hints
+    hints = get_type_hints(unwrapped.__init__ if isinstance(unwrapped, type) else unwrapped)
+
+    factory_name = getattr(unwrapped, "__name__", repr(factory))
     deps: list[tuple[str, type]] = []
     for name in params:
-        if skip_self and name == "self":
+        if name in bound_kwargs:
             continue
         if name not in hints:
             raise TypeError(f"Cannot auto-wire {factory_name}: parameter '{name}' has no type annotation")
@@ -177,7 +192,7 @@ def _make_service_factory[T](factory: Callable[..., T | Generator[T]]) -> Servic
 def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
     """Create a ServiceFactory that auto-wires a type's constructor."""
     # Classes without a custom __init__ inherit object.__init__(*args, **kwargs) — no deps to wire
-    deps = _collect_deps(service_type.__init__, skip_self=True) if "__init__" in service_type.__dict__ else []
+    deps = _collect_deps(service_type) if "__init__" in service_type.__dict__ else []
 
     def factory(provider: ServiceProvider) -> AbstractContextManager[T]:
         kwargs = {name: provider.resolve(dep_type) for name, dep_type in deps}

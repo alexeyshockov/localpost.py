@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from dataclasses import dataclass
+from functools import partial
 
 import pytest
 
@@ -37,6 +38,15 @@ class UserRepository:
 class NoAnnotations:
     def __init__(self, something):
         self.something = something
+
+
+class DBPoolWithClassmethod:
+    def __init__(self, dsn: str):
+        self.dsn = dsn
+
+    @classmethod
+    def from_config(cls, config: Config) -> "DBPoolWithClassmethod":
+        return cls(dsn=f"postgres://{config.host}:{config.port}")
 
 
 # --- Tests ---
@@ -149,6 +159,30 @@ class TestServiceProvider:
             config = provider.resolve(Config)
             assert config.host == "custom"
             assert config.port == 9999
+
+    def test_register_with_classmethod_factory(self):
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(DBPoolWithClassmethod, DBPoolWithClassmethod.from_config)
+
+        with registry.app_scope() as provider:
+            pool = provider.resolve(DBPoolWithClassmethod)
+            assert pool.dsn == "postgres://localhost:5432"
+
+    def test_register_with_partial_factory(self):
+        def make_config(host: str, port: int) -> Config:
+            return Config(host=host, port=port)
+
+        factory = partial(make_config, host="partial-host")
+
+        registry = ServiceRegistry()
+        registry.register_instance(4321, int)
+        registry.register(Config, factory)
+
+        with registry.app_scope() as provider:
+            config = provider.resolve(Config)
+            assert config.host == "partial-host"
+            assert config.port == 4321
 
 
 class TestCreate:
