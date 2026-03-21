@@ -45,7 +45,7 @@ class NoAnnotations:
 class TestFactoryFor:
     def test_resolves_constructor_params(self):
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
         registry.register(Database)
 
         with registry.app_scope() as provider:
@@ -75,7 +75,7 @@ class TestServiceProvider:
     def test_resolve_registered_value(self):
         registry = ServiceRegistry()
         config = Config(host="127.0.0.1", port=8080)
-        registry.register_value(config)
+        registry.register_instance(config)
 
         with registry.app_scope() as provider:
             resolved = provider.resolve(Config)
@@ -83,7 +83,7 @@ class TestServiceProvider:
 
     def test_resolve_with_auto_wiring(self):
         registry = ServiceRegistry()
-        registry.register_value(Config(host="127.0.0.1", port=8080))
+        registry.register_instance(Config(host="127.0.0.1", port=8080))
         registry.register(Database)
 
         with registry.app_scope() as provider:
@@ -93,7 +93,7 @@ class TestServiceProvider:
 
     def test_resolve_transitive_dependencies(self):
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
         registry.register(Database)
         registry.register(UserRepository)
 
@@ -105,7 +105,7 @@ class TestServiceProvider:
 
     def test_resolve_caches_within_scope(self):
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
         registry.register(Database)
 
         with registry.app_scope() as provider:
@@ -123,7 +123,7 @@ class TestServiceProvider:
     def test_resolve_unregistered_in_nested_scope_raises(self):
         """Unregistered type should raise even when a parent scope exists."""
         registry = ServiceRegistry()
-        registry.register_value(Config(host="outer", port=1))
+        registry.register_instance(Config(host="outer", port=1))
         # Database is not registered
 
         with registry.app_scope() as provider:
@@ -133,7 +133,7 @@ class TestServiceProvider:
     def test_getitem(self):
         registry = ServiceRegistry()
         config = Config(host="localhost", port=5432)
-        registry.register_value(config)
+        registry.register_instance(config)
 
         with registry.app_scope() as provider:
             assert provider[Config] is config
@@ -151,10 +151,46 @@ class TestServiceProvider:
             assert config.port == 9999
 
 
+class TestCreate:
+    def test_create_resolves_deps(self):
+        """create() should resolve constructor dependencies from the provider."""
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(Database)
+
+        with registry.app_scope() as provider:
+            repo = provider.create(UserRepository)
+            assert isinstance(repo, UserRepository)
+            assert isinstance(repo.db, Database)
+            assert repo.db.config.host == "localhost"
+
+    def test_create_with_kwargs_override(self):
+        """create() should allow overriding specific dependencies via kwargs."""
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+
+        custom_db = Database(Config(host="custom", port=9999))
+
+        with registry.app_scope() as provider:
+            repo = provider.create(UserRepository, db=custom_db)
+            assert repo.db is custom_db
+
+    def test_create_no_caching(self):
+        """create() should return a new instance each time (not cached)."""
+        registry = ServiceRegistry()
+        registry.register_instance(Config(host="localhost", port=5432))
+        registry.register(Database)
+
+        with registry.app_scope() as provider:
+            repo1 = provider.create(UserRepository)
+            repo2 = provider.create(UserRepository)
+            assert repo1 is not repo2
+
+
 class TestScope:
     def test_sets_context_var(self):
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
 
         with registry.app_scope():
             # current_provider() should work inside the scope
@@ -174,7 +210,7 @@ class TestScope:
         """The module-level `service_provider` proxy should delegate to the current scope."""
         registry = ServiceRegistry()
         config = Config(host="proxy-test", port=1234)
-        registry.register_value(config)
+        registry.register_instance(config)
 
         with registry.app_scope():
             assert service_provider.resolve(Config) is config
@@ -185,14 +221,14 @@ class TestScope:
         outer_config = Config(host="outer", port=1)
         inner_config = Config(host="inner", port=2)
 
-        registry.register_value(outer_config)
+        registry.register_instance(outer_config)
 
         with registry.app_scope() as outer_provider:
             assert outer_provider.resolve(Config).host == "outer"
 
             # Override the value in the same registry for the inner scope
             inner_registry = ServiceRegistry()
-            inner_registry.register_value(inner_config)
+            inner_registry.register_instance(inner_config)
 
             inner_ctx = AppContext()
             inner_provider = DefaultServiceProvider(outer_provider, inner_registry, inner_ctx)
@@ -224,7 +260,7 @@ class TestAppScopeLifecycle:
                 closed.append("server")
 
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
         registry.register(Pool)
         registry.register(Server)
 
@@ -278,7 +314,7 @@ class TestAppScopeLifecycle:
             pool.close()
 
         registry = ServiceRegistry()
-        registry.register_value(Config(host="localhost", port=5432))
+        registry.register_instance(Config(host="localhost", port=5432))
         registry.register(DBPool, db_pool_factory)
 
         with registry.app_scope() as provider:

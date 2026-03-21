@@ -41,7 +41,7 @@ class Server:
 
 def main():
     services = ServiceRegistry()
-    services.register_value(Config(host="127.0.0.1", port=8080, db_dsn=":memory:"))
+    services.register_instance(Config(host="127.0.0.1", port=8080, db_dsn=":memory:"))
     services.register(DBConnectionPool, create_db_conn_pool)
     services.register(Server)
 

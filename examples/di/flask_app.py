@@ -43,7 +43,7 @@ class UserRepository:
 
 
 services = ServiceRegistry()
-services.register_value(Config(db_dsn=":memory:"))
+services.register_instance(Config(db_dsn=":memory:"))
 services.register(DBConnectionPool, create_db_pool)
 services.register(UserRepository, scope=RequestContext)
 

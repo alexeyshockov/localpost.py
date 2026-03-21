@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, field
 from dataclasses import dataclass as define
+from dataclasses import field
 from typing import Any, Final, Protocol, Self, cast, final, get_type_hints
 
 from localpost._utils import set_cvar
@@ -57,6 +57,12 @@ class DefaultServiceProvider(ServiceProvider):
             return cls(parent=parent, registry=parent.registry, scope=scope)
         raise RuntimeError("No active DI scope")  # Did you forget to enter the app scope?
 
+    def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
+        """Create an instance of the given type, resolving constructor deps not provided in kwargs."""
+        deps = _collect_deps(target_type.__init__, skip_self=True) if "__init__" in target_type.__dict__ else []
+        resolved = {name: self.resolve(dep_type) for name, dep_type in deps if name not in kwargs}
+        return target_type(**resolved, **kwargs)
+
     def resolve[T](self, service_type: type[T], /) -> T:
         # Well-known DI types
         if service_type is ServiceProvider:
@@ -68,21 +74,20 @@ class DefaultServiceProvider(ServiceProvider):
         if service_type in self.services:
             return cast(T, self.services[service_type])
 
-        # Look up the descriptor
-        descriptor = self.registry.descriptors.get(service_type)
-        if descriptor is None:
-            raise ServiceNotRegisteredError(f"{service_type} is not registered")
+        # Look up the factory for this scope
+        factory = self.registry.factories.get((service_type, type(self.scope)))
+        if factory is not None:
+            instance = self.services[service_type] = self.scope.enter(factory(self))
+            return instance
 
-        # Check if this service belongs to this scope
-        if not isinstance(self.scope, descriptor.scope):
-            # Delegate to parent scope (the service belongs to an outer scope)
-            return self.parent.resolve(service_type)
-
-        instance = self.services[service_type] = self.scope.enter(descriptor.factory(self))
-        return instance
+        # Delegate to parent scope
+        return self.parent.resolve(service_type)
 
 
 class NullServiceProvider(ServiceProvider):
+    def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
+        raise RuntimeError("No active DI scope")
+
     def resolve[T](self, service_type: type[T], /) -> T:
         raise ServiceNotRegisteredError(f"{service_type} is not registered")
 
@@ -97,6 +102,11 @@ def scope(ctx: ResolutionContext, /) -> Generator[ServiceProvider]:
 
 
 class CurrentServiceProvider(ServiceProvider):
+    def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
+        if provider := current_provider.get(None):
+            return provider.create(target_type, **kwargs)
+        raise RuntimeError("No active DI scope")
+
     def resolve[T](self, service_type: type[T], /) -> T:
         if provider := current_provider.get(None):
             return provider.resolve(service_type)

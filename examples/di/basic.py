@@ -18,7 +18,7 @@ class Server:
 
 def main():
     services = ServiceRegistry()
-    services.register_value(Config(host="127.0.0.1", port=8080))
+    services.register_instance(Config(host="127.0.0.1", port=8080))
     services.register(Server)
 
     with services.app_scope() as service_provider:
