@@ -30,7 +30,7 @@ class RequestContext(ResolutionContext):
         return self.ctx.enter_context(cm)
 
 
-def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider) -> None:
+def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider, /) -> None:
     """Initialize DI for a Flask app.
 
     Opens a RequestContext scope per request. Flask's Request object is automatically

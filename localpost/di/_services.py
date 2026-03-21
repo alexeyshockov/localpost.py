@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Generator
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from collections.abc import Callable, Generator, Iterable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from dataclasses import dataclass as define
-from typing import Final, Protocol, Self, cast, final, get_type_hints
+from typing import Any, Final, Protocol, Self, cast, final, get_type_hints
 
 from localpost._utils import set_cvar
 
@@ -27,7 +27,11 @@ class AppContext(ResolutionContext):
 class ServiceProvider(Protocol):
     """Service provider, scoped to the current resolution context."""
 
-    def resolve[T](self, service_type: type[T], /) -> T: ...
+    def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
+        """Create an instance of the given type by calling its constructor, resolving any dependencies."""
+
+    def resolve[T](self, service_type: type[T], /) -> T:
+        """Create an instance (or take already created one) for the service type, resolving any dependencies."""
 
     def __getitem__[T](self, service_type: type[T], /) -> T:
         return self.resolve(service_type)
@@ -74,19 +78,16 @@ class DefaultServiceProvider(ServiceProvider):
             # Delegate to parent scope (the service belongs to an outer scope)
             return self.parent.resolve(service_type)
 
-        # Create the service instance via its factory (returns a CM), and enter it in the scope
-        instance = self.scope.enter(descriptor.factory(self))
-        # Cache for future resolutions within this scope
-        self.services[service_type] = instance
+        instance = self.services[service_type] = self.scope.enter(descriptor.factory(self))
         return instance
 
 
 class NullServiceProvider(ServiceProvider):
     def resolve[T](self, service_type: type[T], /) -> T:
-        raise RuntimeError(f"No service of type {service_type} is registered")
+        raise ServiceNotRegisteredError(f"{service_type} is not registered")
 
     def enter[T](self, cm: AbstractContextManager[T]) -> T:
-        raise RuntimeError("No active DI scope")
+        raise RuntimeError("not in DI scope")
 
 
 @contextmanager
@@ -110,13 +111,6 @@ NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
 
 # A factory that returns a context manager — the provider enters it to get the instance and manage its lifecycle.
 type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
-
-
-@dataclass(frozen=True, slots=True)
-class ServiceDescriptor[T]:
-    service_type: type[T]
-    scope: type[ResolutionContext]
-    factory: ServiceFactory[T] = field(compare=False, repr=False)
 
 
 def _collect_deps(factory: Callable[..., object], *, skip_self: bool = False) -> list[tuple[str, type]]:
@@ -180,17 +174,13 @@ def _factory_for_type[T](service_type: type[T]) -> ServiceFactory[T]:
 @final
 class ServiceRegistry:
     def __init__(self):
-        self.descriptors: dict[type, ServiceDescriptor] = {}
+        # self.descriptors: dict[type, ServiceDescriptor] = {}
+        self.factories: dict[tuple[type, type[ResolutionContext]], ServiceFactory] = {}
 
-    def register_value[T](
+    def register_instance[T](
         self, value: T, service_type: type[T] | None = None, scope: type[ResolutionContext] | None = None
     ) -> None:
-        @contextmanager
-        def value_factory(_: ServiceProvider) -> Generator[T]:
-            yield value
-
-        sd = ServiceDescriptor(service_type or type(value), scope or AppContext, value_factory)
-        self.descriptors[sd.service_type] = sd
+        self.factories[(service_type or type(value), scope or AppContext)] = lambda _: nullcontext(value)
 
     def register[T](
         self,
@@ -199,8 +189,7 @@ class ServiceRegistry:
         scope: type[ResolutionContext] | None = None,
     ) -> None:
         wrapped = _make_service_factory(factory) if factory else _factory_for_type(service_type)
-        sd = ServiceDescriptor(service_type, scope or AppContext, wrapped)
-        self.descriptors[service_type] = sd
+        self.factories[(service_type, scope or AppContext)] = wrapped
 
     @contextmanager
     def app_scope(self) -> Generator[DefaultServiceProvider]:
