@@ -48,15 +48,9 @@ class DefaultServiceProvider(ServiceProvider):
     parent: ServiceProvider
     registry: ServiceRegistry
     scope: ResolutionContext
-    """Scope stack, from outermost to innermost."""
-    services: dict[type, object] = field(default_factory=dict)
-    """Resolved services, keyed by service type."""
-
-    @classmethod
-    def from_current(cls, scope: ResolutionContext) -> Self:
-        if parent := current_provider.get(None):
-            return cls(parent=parent, registry=parent.registry, scope=scope)
-        raise RuntimeError("No active DI scope")  # Did you forget to enter the app scope?
+    scope_type: type[ResolutionContext]
+    services: dict[type, object] = field(default_factory=dict, init=False)
+    """Resolved services."""
 
     def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
         """Create an instance of the given type, resolving constructor deps not provided in kwargs."""
@@ -68,20 +62,17 @@ class DefaultServiceProvider(ServiceProvider):
         # Well-known DI types
         if service_type is ServiceProvider:
             return cast(T, self)
-        if service_type is ResolutionContext or service_type is AppContext:
+        if service_type is self.scope_type:
             return cast(T, self.scope)
 
-        # Return cached instance if already resolved in this scope
-        if service_type in self.services:
+        if service_type in self.services:  # Already resolved in this scope
             return cast(T, self.services[service_type])
 
         # Look up the descriptor for this scope
-        descriptor = self.registry.descriptors.get((service_type, type(self.scope)))
-        if descriptor is not None:
+        if descriptor := self.registry.descriptors.get((service_type, self.scope_type)):
             instance = self.services[service_type] = self.scope.enter(descriptor.factory(self))
             return instance
 
-        # Delegate to parent scope
         return self.parent.resolve(service_type)
 
 
@@ -119,11 +110,12 @@ class CurrentServiceProvider(ServiceProvider):
         raise RuntimeError("No active DI scope")
 
 
+NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
+current_provider: ContextVar[DefaultServiceProvider] = ContextVar("current_provider")
+
+# TODO Rename to "services"
 service_provider: Final[CurrentServiceProvider] = CurrentServiceProvider()
 """Proxy for the current DI service provider."""
-current_provider: ContextVar[DefaultServiceProvider] = ContextVar("current_provider")
-NULL_PROVIDER: Final[ServiceProvider] = NullServiceProvider()
-
 
 # A factory that returns a context manager — the provider enters it to get the instance and manage its lifecycle.
 type ServiceFactory[T] = Callable[[ServiceProvider], AbstractContextManager[T]]
@@ -227,6 +219,6 @@ class ServiceRegistry:
     @contextmanager
     def app_scope(self) -> Generator[DefaultServiceProvider]:
         app_scope = AppContext()
-        provider = DefaultServiceProvider(NULL_PROVIDER, self, app_scope)
+        provider = DefaultServiceProvider(NULL_PROVIDER, self, app_scope, AppContext)
         with app_scope.ctx, scope(provider):
             yield provider

@@ -36,7 +36,7 @@ def init_app(app: Flask, registry: ServiceRegistry, provider: ServiceProvider, /
     def flask_req_ctx() -> Generator[None]:
         registry, parent = app.extensions[_EXT_KEY]
         req_scope = RequestContext()
-        provider = DefaultServiceProvider(parent, registry, req_scope)
+        provider = DefaultServiceProvider(parent, registry, req_scope, RequestContext)
         with req_scope.ctx, scope(provider):
             yield
 
