@@ -1,37 +1,128 @@
-## HTTP server
+# localpost.http
+
+> **Status:** stable — public API is not expected to break in patch/minor releases.
+
+A small synchronous HTTP/1.1 server built on [h11](https://h11.readthedocs.io/),
+plus a router for URI-template-based request dispatch, and a WSGI bridge. About
+400 lines of focused, sync code — easy to read, easy to embed.
+
+Pair it with `localpost.hosting` for lifecycle management, or run it standalone.
+For OpenAPI / content negotiation / validation, see
+[`localpost.openapi`](../openapi/README.md).
+
+## Install
+
+```bash
+pip install localpost[http-server]
+```
+
+## Quick start
+
+```python
+import h11
+from localpost import threadtools
+from localpost.http.config import ServerConfig
+from localpost.http.server import HTTPReqCtx, start_http_server
+
+threadtools.check_cancelled = lambda: None   # not running under hosting
 
 
-## REST (OpenAPI) framework
-
-Focus:
-- LLM apps, APIs
-    - streaming
-
-Vision:
-- batteries not included
-    - no DB, just Python to/from HTTP orchestration
-- go from specs
-    - OpenAPI app
-    - OpenRPC app
-    - JSON-API app
-        - application/vnd.api+json
-        - https://github.com/apiad/jsonapi
-    - ...
-- plain old (sync) Python, to eliminate async complexity and pitfalls
-- (type) inference as much as possible, to eliminate boilerplate
-    - make life easier when possible, when we can infer things from Python code (like OpenAPI schema from types, etc.)
-- 
+def simple_app(ctx: HTTPReqCtx):
+    ctx.complete(
+        h11.Response(status_code=200, headers=[(b"Content-Type", b"text/plain")]),
+        b"Hello, World!\n",
+    )
 
 
-### How is it different from?
-- Flask
-  - web first (templates, etc), no built-in OpenAPI support
-      - https://flask-restless.readthedocs.io/en/latest/
-- FastAPI
-  - Pydantic only
-  - OpenAPI only
-  - async only
-  - more complex (dependencies, etc.)
+with start_http_server(ServerConfig()) as server:
+    while True:
+        server.run(simple_app)
+```
 
+See [`examples/http/simple_server.py`](../../examples/http/simple_server.py),
+`threaded_server.py`, `wsgi_app_server.py`.
 
-## JSON-RPC (OpenRPC) framework
+Running under hosting:
+
+```python
+from localpost.hosting import run_app
+from localpost.http._service import http_server
+from localpost.http.config import ServerConfig
+
+sys.exit(run_app(http_server(ServerConfig(), simple_app)))
+```
+
+## Key concepts
+
+- **`ServerConfig`** — host, port, backlog, `keep_alive_timeout`, `max_body_size`.
+- **`start_http_server(config)`** — context manager; yields a `Server` bound to
+  a non-blocking listening socket with a `selectors` poller.
+- **`HTTPReqCtx`** — per-request context carrying the parsed h11 request, the
+  raw socket, headers, and `complete(response, body)`. Request bodies are
+  streamed via `receive(n_bytes)`.
+- **`RequestHandler = Callable[[HTTPReqCtx], None]`** — the handler
+  interface. The server calls `server.run(handler)` once per accepted request.
+- **`URITemplate`** — RFC 6570 Level 1 only (`/books/{id}` style variables,
+  matched with a generated regex). `match(uri) → dict | None`.
+- **`Router`** — pick a `RequestHandler` by `(method, template)`. Exposed via
+  `Router.wsgi` too, for deployment under Gunicorn / Granian / etc.
+
+## Public API
+
+### `localpost.http.server`
+
+| Symbol                    | Notes                                      |
+| ------------------------- | ------------------------------------------ |
+| `start_http_server(cfg)`  | Context manager yielding a `Server`        |
+| `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`) |
+| `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
+
+### `localpost.http.router`
+
+| Symbol                    | Notes                                      |
+| ------------------------- | ------------------------------------------ |
+| `URITemplate`             | Parse and match RFC 6570 L1 templates      |
+| `RequestCtx`              | Routed request context (path args, query, body access) |
+| `Router`                  | Register `(method, template) → RequestHandler` mappings, expose `.wsgi` |
+| `Response`                | Simple `(status, headers, body)` tuple     |
+
+### `localpost.http.wsgi`
+
+| Symbol                    | Notes                                      |
+| ------------------------- | ------------------------------------------ |
+| `wrap_wsgi(app)`          | Turn a WSGI app into a `RequestHandler`    |
+
+### `localpost.http.config`
+
+| Symbol        | Notes                                              |
+| ------------- | -------------------------------------------------- |
+| `ServerConfig` | Frozen dataclass of server tuning parameters      |
+| `LOGGER_NAME` | `"localpost.http"`                                 |
+
+### Hosting integration — `localpost.http._service`
+
+Two `@hosting.service` wrappers for running the server inside a hosted app:
+
+| Service                                      | Notes                                 |
+| -------------------------------------------- | ------------------------------------- |
+| `http_server(config, handler)`               | Runs the server loop with your handler |
+| `wsgi_server(config, app)`                   | Same, for a WSGI app                  |
+
+The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
+is driven by `sl.shutting_down` via `threadtools.check_cancelled()`.
+
+## How is it different from…
+
+- **Flask** — Flask is web-first (templates, Jinja, sessions) with no built-in
+  OpenAPI support. `localpost.http` is a low-level server; pair it with
+  `localpost.openapi` for type-driven OpenAPI.
+- **FastAPI** — FastAPI is async, Pydantic-only, OpenAPI-only, and ships a
+  dependency-injection system. `localpost.http` is sync, has no opinions on
+  serialization, and is small enough to read in one sitting.
+
+## See also
+
+- Examples: [`examples/http/`](../../examples/http/)
+- OpenAPI on top: [`../openapi/README.md`](../openapi/README.md)
+- Server source: [`server.py`](server.py)
+- Router source: [`router.py`](router.py)
