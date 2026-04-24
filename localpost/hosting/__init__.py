@@ -10,6 +10,7 @@ from ._host import (
     ShuttingDown,
     Starting,
     Stopped,
+    _run_many,
     current_service,
     observe_services,
     run,
@@ -35,8 +36,9 @@ __all__ = [
 ]
 
 
-def run_app(svc: ServiceF, /) -> int:
+def run_app(*svcs: ServiceF) -> int:
     """Run the target app until it stops or is interrupted by a signal."""
 
-    app = shutdown_on_signal()(svc)
+    root_svc = svcs[0] if len(svcs) == 1 else _run_many(*svcs)
+    app = shutdown_on_signal()(root_svc)
     return anyio.run(run, app, None, **choose_anyio_backend())

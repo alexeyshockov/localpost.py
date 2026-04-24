@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-import dataclasses as dc
 import inspect
 import logging
 import threading
 from _contextvars import ContextVar
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    nullcontext,
+)
+from dataclasses import dataclass, field
+from dataclasses import dataclass as define
 from functools import cached_property, wraps
 from typing import Any, ClassVar, Literal, TypeVar, final, overload
 
@@ -14,7 +21,17 @@ from anyio import CancelScope, CapacityLimiter, create_task_group, get_cancelled
 from anyio.abc import TaskGroup
 from anyio.from_thread import BlockingPortal
 
-from localpost._utils import Event, EventView, cancellable_from, is_async_callable, unwrap_exc, wait_all
+from localpost._utils import (
+    Event,
+    EventView,
+    _SupportsAsyncClose,
+    _SupportsClose,
+    cancellable_from,
+    is_async_callable,
+    maybe_closing,
+    unwrap_exc,
+    wait_all,
+)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -22,20 +39,20 @@ logger = logging.getLogger("localpost.hosting")
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True)
 class Starting:
     name: ClassVar[Literal["starting"]] = "starting"
     # timeout: float
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True)
 class Running:
     name: ClassVar[Literal["running"]] = "running"
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True)
 class ShuttingDown:
     name: ClassVar[Literal["shutting_down"]] = "shutting_down"
     reason: BaseException | str | None = None
@@ -43,7 +60,7 @@ class ShuttingDown:
 
 
 @final
-@dc.dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True)
 class Stopped:
     name: ClassVar[Literal["stopped"]] = "stopped"
     shutdown_reason: BaseException | str | None = None
@@ -53,20 +70,24 @@ class Stopped:
 ServiceState = Starting | Running | ShuttingDown | Stopped
 
 
+# FIXME Set
+_app_lt: ContextVar[ServiceLifetime] = ContextVar("localpost.current_app")
 _svc_lt: ContextVar[ServiceLifetime] = ContextVar("localpost.current_service")
 
 
-def _current_service() -> ServiceLifetime:
-    if lt := _svc_lt.get(None):
-        return lt
+def current_app() -> ServiceLifetimeView:
+    if lt := _app_lt.get(None):
+        return lt.view
     raise RuntimeError("Not in hosting context")
 
 
 def current_service() -> ServiceLifetimeView:
-    return _current_service().view
+    if lt := _svc_lt.get(None):
+        return lt.view
+    raise RuntimeError("Not in hosting context")
 
 
-@dc.dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ServiceLifetimeView:
     _state: ServiceLifetime
 
@@ -138,20 +159,46 @@ class ServiceLifetimeView:
         in_host_thread(self._state, self._state.run_scope.cancel)
 
 
-@dc.dataclass(eq=False, unsafe_hash=True)
+@define(eq=False, unsafe_hash=True)
 class ServiceLifetime:
     portal: BlockingPortal
-    tg: TaskGroup = dc.field(default_factory=create_task_group)
-    thread_id: int = dc.field(default_factory=threading.get_ident)
+    tg: TaskGroup = field(default_factory=create_task_group)
+    scope: AsyncExitStack = field(default_factory=AsyncExitStack)
 
-    started: Event = dc.field(default_factory=Event)
-    shutting_down: Event = dc.field(default_factory=Event)
-    stopped: Event = dc.field(default_factory=Event)
+    thread_id: int = field(default_factory=threading.get_ident)
+
+    started: Event = field(default_factory=Event)
+    shutting_down: Event = field(default_factory=Event)
+    stopped: Event = field(default_factory=Event)
 
     shutdown_reason: BaseException | str | None = None
     exception: BaseException | None = None
 
     _exit_code: int | None = None
+
+    @overload
+    def defer[T](self, t: AbstractContextManager[T]) -> T: ...
+
+    @overload
+    def defer[T: _SupportsClose](self, t: T) -> T: ...
+
+    def defer(self, t):
+        def as_cm(t) -> AbstractContextManager:
+            return t if isinstance(t, AbstractContextManager) else maybe_closing(t)
+
+        return self.scope.enter_context(as_cm(t))
+
+    @overload
+    async def adefer[T](self, t: AbstractAsyncContextManager[T]) -> T: ...
+
+    @overload
+    async def adefer[T: _SupportsAsyncClose](self, t: T) -> T: ...
+
+    async def adefer(self, t):
+        def as_acm(t) -> AbstractAsyncContextManager:
+            return t if isinstance(t, AbstractAsyncContextManager) else maybe_closing(t)
+
+        return await self.scope.enter_async_context(as_acm(t))
 
     @cached_property
     def view(self) -> ServiceLifetimeView:
@@ -225,10 +272,10 @@ ServiceF = Callable[[ServiceLifetime], Awaitable[None]]
 # AppF = Callable[[HostLifetime], Awaitable[None]]
 
 
-@dc.dataclass()
+@define()
 class _ResolvedService(AbstractAsyncContextManager[ServiceLifetimeView]):
     func: ServiceF
-    _run: AbstractAsyncContextManager | None = dc.field(default=None, compare=False, repr=False)
+    _run: AbstractAsyncContextManager | None = field(default=None, compare=False, repr=False)
 
     def __call__(self, lt: ServiceLifetime, /) -> Awaitable[None]:
         return self.func(lt)
@@ -306,7 +353,7 @@ async def observe_services(*lifetimes: ServiceLifetimeView):
 
 
 async def _run(svc_f: ServiceF, lt: ServiceLifetime) -> None:
-    outer_ctx_token = _svc_lt.set(lt)
+    parent_svc_lt = _svc_lt.set(lt)
     try:
         async with lt.tg as tg:
             await svc_f(lt)
@@ -314,11 +361,11 @@ async def _run(svc_f: ServiceF, lt: ServiceLifetime) -> None:
     except get_cancelled_exc_class() as exc:  # BaseException
         lt.exception = exc
         raise  # Always reraise cancellations
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         lt.exception = unwrap_exc(exc)
     finally:
         lt.stopped.set()
-        _svc_lt.reset(outer_ctx_token)
+        _svc_lt.reset(parent_svc_lt)
 
 
 def serve(
@@ -329,20 +376,20 @@ def serve(
 
 @asynccontextmanager
 async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
+    async def wait_started():
+        await child_lt.started
+        wait_tg.cancel_scope.cancel()
+
+    async def wait_stopped():
+        await child_lt.stopped
+        wait_tg.cancel_scope.cancel()
+
     async with BlockingPortal() as portal:
         child_lt = ServiceLifetime(portal)
         tg = portal._task_group
         tg.start_soon(_run, svc, child_lt)
         # Wait for either started or stopped (service may fail before starting)
         async with create_task_group() as wait_tg:
-            async def wait_started():
-                await child_lt.started
-                wait_tg.cancel_scope.cancel()
-
-            async def wait_stopped():
-                await child_lt.stopped
-                wait_tg.cancel_scope.cancel()
-
             wait_tg.start_soon(wait_started)
             wait_tg.start_soon(wait_stopped)
         yield child_lt.view
@@ -363,6 +410,7 @@ async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[Ser
         observe_tg.start_soon(bind_parent_to, child_lt)
         # Wait for either started or stopped (service may fail before starting)
         async with create_task_group() as wait_tg:
+
             async def wait_started():
                 await child_lt.started
                 wait_tg.cancel_scope.cancel()
@@ -380,7 +428,16 @@ async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[Ser
 
 
 async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
-    async with (nullcontext(parent.portal) if parent else BlockingPortal()) as portal:
+    async with nullcontext(parent.portal) if parent else BlockingPortal() as portal:
         lt = ServiceLifetime(portal)
         await _run(svc_f, lt)
         return lt.exit_code
+
+
+def _run_many(*svcs: ServiceF) -> ServiceF:
+    async def _run(lt: ServiceLifetime) -> None:
+        children = [lt.start(svc) for svc in svcs]
+        # TODO Shutdown everything in case of an exception in any child
+        await wait_all(c.stopped for c in children)
+
+    return _run

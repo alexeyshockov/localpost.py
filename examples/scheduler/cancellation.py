@@ -6,7 +6,8 @@ from datetime import timedelta
 
 import anyio
 
-from localpost.scheduler import every, run, scheduled_task
+from localpost.hosting import run_app
+from localpost.scheduler import every, scheduled_task
 
 
 @scheduled_task(every(timedelta(seconds=3)))
@@ -30,4 +31,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run(long_async_task))
+    sys.exit(run_app(long_async_task))

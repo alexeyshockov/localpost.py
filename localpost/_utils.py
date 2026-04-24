@@ -112,28 +112,25 @@ def set_cvar[T](cvar: ContextVar[T], value: T) -> Generator[T]:
         cvar.reset(old_value)
 
 
-# TODO Remove
 @final
-class ClosingContext[T](AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
+class maybe_closing[T](AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
     def __init__(self, enter_result: T):
-        self.enter_result = enter_result
+        self._enter_result = enter_result
 
     def __enter__(self) -> T:
-        return self.enter_result
+        return self._enter_result
 
     async def __aenter__(self) -> T:
-        return self.enter_result
+        return self._enter_result
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        if hasattr(t := self.enter_result, "close"):
-            cast(_SupportsClose, t).close()
+        getattr(self._enter_result, "close", lambda: None)()
 
     async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        t = self.enter_result
-        if hasattr(t, "aclose"):
-            await cast(_SupportsAsyncClose, t).aclose()
-        elif hasattr(t, "close"):
-            cast(_SupportsClose, t).close()
+        target = self._enter_result
+        close = getattr(target, "aclose", getattr(target, "close", lambda: None))
+        if inspect.isawaitable(result := close()):
+            await result
 
 
 def ensure_int_or_inf(value: int | float, *, min_value: int = 0, name: str = "Value") -> int | float:
@@ -350,11 +347,13 @@ class MemorySendStream(Generic[T], MemoryObjectSendStream[T]):
             pass
 
 
+# TODO Remove
 # For better typing in PyCharm
 class MemoryStream(Generic[T]):
     @staticmethod
     def create(max_buffer_size: float = 0) -> tuple[MemorySendStream[T], MemoryObjectReceiveStream[T]]:
-        return create_memory_object_stream(max_buffer_size)  # type: ignore[return-value]
+        send, receive = create_memory_object_stream(max_buffer_size)
+        return cast(Mem
 
 
 class AsyncBackendConfig(TypedDict):

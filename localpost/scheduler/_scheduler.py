@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import dataclasses as dc
 import inspect
 import logging
 import math
 import threading
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager, contextmanager
-from typing import Any, Generic, Protocol, TypeAlias, TypeVar, cast, final
+from dataclasses import dataclass
+from dataclasses import dataclass as define
+from functools import partial
+from typing import Any, TypeAlias, TypeVar, cast, final
 
 import anyio
 from anyio import BrokenResourceError, WouldBlock, create_task_group, open_signal_receiver, to_thread
+from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
@@ -25,45 +28,29 @@ from localpost._utils import (
     start_task_soon,
     wait_any,
 )
+from localpost.hosting import ServiceLifetime
 
-T = TypeVar("T")
-T2 = TypeVar("T2")
-R = TypeVar("R")
+# T = TypeVar("T")
+# T2 = TypeVar("T2")
+# R = TypeVar("R")
 DecF = TypeVar("DecF", bound=Callable[..., Any])
 
-TaskHandler: TypeAlias = Callable[[T], Awaitable[R]] | Callable[[], Awaitable[R]] | Callable[[T], R] | Callable[[], R]
-HandlerDecorator: TypeAlias = Callable[[Any], Any]
+type AnyTaskHandler[T, R] = Callable[[T], Awaitable[R]] | Callable[[T], R]
+type TaskHandler[T, R] = Callable[[T], Awaitable[R]]
 
 logger = logging.getLogger("localpost.scheduler")
 
 
+def task_handler[T, R](func: AnyTaskHandler[T, R]) -> TaskHandler[T, R]:
+    return func if is_async_callable(func) else partial(to_thread.run_sync, func)
+
+
 @final
-@dc.dataclass()
-class Task(
-    Generic[T, R],
-    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],  # AsyncHandlerManager[T]
-):
-    name: str
-    event_aware: bool
-
-    def __init__(self, target: TaskHandler[T, R], /, *, name: str | None = None):
-        self.name = name or def_full_name(target)
-        self._target = target
-        e_aware = self.event_aware = len(inspect.signature(target).parameters) > 0
-
-        def e_handler(t) -> Callable[[T], Awaitable[R]]:
-            if is_async_callable(t):
-                return t if e_aware else lambda _: t()  # type: ignore[misc]
-            return (lambda e: to_thread.run_sync(t, e)) if e_aware else (lambda _: to_thread.run_sync(t))
-
-        self._handle = e_handler(target)
-
-        self._cm = ExitStack()
-        self._subscribers: list[MemoryObjectSendStream[Result[R]]] = []
-        self._users = 0
-
-    def __repr__(self):
-        return f"<{self.__class__.__name__} {self.name!r}>"
+@define()
+class ScheduledTaskRun[T, R]:
+    task: ScheduledTask[T, R]
+    sl: ServiceLifetime
+    handle: TaskHandler[T, R]
 
     def subscribe(self, buffer_max_size: float = math.inf) -> MemoryObjectReceiveStream[Result[R]]:
         # By default, a stream is created with a buffer size of 0, which means that any write will be blocked until
@@ -95,90 +82,9 @@ class Task(
             self._publish_result(result)
             raise
 
-    async def __aenter__(self):
-        self._users += 1
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> bool | None:
-        self._users -= 1
-        # A task can be scheduled multiple times, so we need to keep the results streams open until all the scheduled
-        # tasks are completed
-        if self._users == 0:
-            return self._cm.__exit__(exc_type, exc_value, traceback)
-        return False  # Do not suppress exceptions
-
-
-@final
-class ScheduledTaskTemplate(Generic[T]):
-    @classmethod
-    def ensure(cls, tpl: TriggerFactory[T]) -> ScheduledTaskTemplate[T]:
-        if isinstance(tpl, cls):
-            return tpl
-        return cls(tpl)
-
-    def __init__(self, tf: TriggerFactory[T]):
-        self._tf = tf
-        self._tf_queue: tuple[TriggerFactoryDecorator, ...] = ()
-        self._handler_decorators: tuple[HandlerDecorator, ...] = ()
-
-    # TriggerFactory[T]
-    def __call__(self, *args, **kwargs) -> Trigger[T]:
-        return self.tf(*args, **kwargs)
-
-    def __truediv__(self, middleware: TriggerFactoryMiddleware[T, T2]) -> ScheduledTaskTemplate[T2]:
-        from ._trigger import trigger_factory_middleware  # noqa: PLC0415
-
-        return self // trigger_factory_middleware(middleware)
-
-    def __floordiv__(self, decorator: TriggerFactoryDecorator[T, T2]) -> ScheduledTaskTemplate[T2]:
-        n = ScheduledTaskTemplate(self._tf)
-        n._tf_queue = self._tf_queue + (decorator,)
-        return cast(ScheduledTaskTemplate[T2], n)
-
-    def __rshift__(self, decorator: HandlerDecorator) -> ScheduledTaskTemplate[T]:
-        n = ScheduledTaskTemplate[T](self._tf)
-        n._handler_decorators = self._handler_decorators + (decorator,)
-        return n
-
-    def resolve_handler(self, task: Task[T, Any]) -> AbstractAsyncContextManager[Callable[[T], Awaitable[None]]]:
-        # TODO: Support handler decorators (flow module)
-        return task
-
-    @property
-    def tf(self) -> TriggerFactory[T]:
-        tf = self._tf
-        for decorator in self._tf_queue:
-            tf = decorator(tf)
-        return tf
-
-
-class ScheduledTask(Protocol[T, R]):
-    @property
-    def shutting_down(self) -> EventView: ...
-
-    @property
-    def task(self) -> Task[T, R]: ...
-
-
-@final
-class _ScheduledTask(Generic[T, R]):
-    def __init__(self, task: Task[T, R], tf: TriggerFactory[T]):
-        self.task = task
-        self._trigger_factory = tf
-        tpl = ScheduledTaskTemplate.ensure(tf)
-        self._handler = tpl.resolve_handler(task)
-        self._shutting_down: EventView = Event()  # Placeholder, resolved in run()
-
-    def __repr__(self):
-        return f"ScheduledTask({self.name!r})"
-
     @property
     def shutting_down(self) -> EventView:
         return self._shutting_down
-
-    @property
-    def name(self) -> str:
-        return self.task.name
 
     async def run(self, shutting_down: EventView) -> None:
         self._shutting_down = shutting_down
@@ -190,157 +96,46 @@ class _ScheduledTask(Generic[T, R]):
             logger.debug(f"{self!r} trigger is completed")
         logger.debug(f"{self!r} is done")
 
-    async def __call__(self, shutting_down: EventView) -> None:
-        return await self.run(shutting_down)
+
+@final
+@define()
+class ScheduledTask[T, R]:
+    name: str
+    _until_running: EventView
+    current_run: ScheduledTaskRun[T, R] | None = None
+
+    def __init__(self, h: TaskHandler[T, R], tf: TriggerFactory[T], /, *, name: str | None = None):
+        self.name = name or def_full_name(h)
+        self._handler = h
+        self._trigger_f = tf
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} {self.name!r}>"
+
+    async def get_current_run(self) -> ScheduledTaskRun[T, R]:
+        await self._until_running.wait()
+        assert self.current_run is not None
+        return self.current_run
+
+    async def run(self, sl: ServiceLifetime) -> None:
+        # TODO
+        #  - sl.set_started()
+        #  - create and set current_run
+        #  -
+        pass
 
 
-Trigger: TypeAlias = AbstractAsyncContextManager[AsyncIterator[T]]
-TriggerFactory: TypeAlias = Callable[
-    [ScheduledTask[T, Any]], AbstractAsyncContextManager[AsyncIterator[T]]  # Trigger[T]
-]
-TriggerFactoryMiddleware: TypeAlias = Callable[
-    [
-        AbstractAsyncContextManager[AsyncIterator[T]],  # Trigger[T] (source)
-        ScheduledTask,
-    ],
-    AsyncIterable[T2],  # TODO AbstractAsyncContextManager[AsyncIterator[T2]]
-]
-TriggerFactoryDecorator: TypeAlias = Callable[
-    [Callable[[ScheduledTask], AbstractAsyncContextManager[AsyncIterator[T]]]],  # TriggerFactory[T]
-    Callable[[ScheduledTask], AbstractAsyncContextManager[AsyncIterator[T2]]],  # TriggerFactory[T2]
-]
+type TriggerEvents[T] = AbstractAsyncContextManager[AsyncIterator[T]]
+type TriggerFactory[T] = Callable[[TaskGroup, EventView], TriggerEvents[T]]
 
 
-def scheduled_task(
-    tf: TriggerFactory[T], /, *, name: str | None = None
-) -> Callable[[TaskHandler[T, R] | Task[T, R]], _ScheduledTask[T, R]]:
-    """
-    Schedule a task with the given trigger.
-    """
+def scheduled_task[T](tf: TriggerFactory[T], /, *, name: str | None = None) -> Callable[..., ScheduledTask[T, Any]]:
+    """Schedule a task with the given trigger."""
 
-    def _decorator(func: TaskHandler[T, R] | Task[T, R]) -> _ScheduledTask[T, R]:
-        t = func if isinstance(func, Task) else Task(func)
+    def _decorator[R](func: AnyTaskHandler[T, R]) -> ScheduledTask[T, R]:
+        st = ScheduledTask(task_handler(func), tf)
         if name:
-            t.name = name
-        return _ScheduledTask(t, tf)
+            st.name = name
+        return st
 
     return _decorator
-
-
-class Scheduler:
-    """
-    Manages a collection of periodic tasks.
-
-    Can be used standalone via `aserve()`, or integrated with hosting via `as_service()`.
-    """
-
-    def __init__(self, name: str = "scheduler"):
-        self._name = name
-        self._scheduled_tasks: list[_ScheduledTask[Any, Any]] = []
-        self._shutting_down: Event | None = None
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    def task(
-        self, tf: TriggerFactory[T], /, *, name: str | None = None
-    ) -> Callable[[TaskHandler[T, R] | Task[T, R] | _ScheduledTask[T, R]], _ScheduledTask[T, R]]:
-        """
-        Schedule a task with the given trigger.
-        """
-
-        def _decorator(func: TaskHandler[T, R] | Task[T, R] | _ScheduledTask[T, R]):
-            if isinstance(func, _ScheduledTask):
-                func = func.task
-            st = scheduled_task(tf, name=name)(cast(TaskHandler[T, R] | Task[T, R], func))
-            self._scheduled_tasks.append(st)
-            return st
-
-        return _decorator
-
-    def shutdown(self) -> None:
-        if self._shutting_down:
-            self._shutting_down.set()
-
-    @asynccontextmanager
-    async def aserve(self):
-        """Run all scheduled tasks. Use `shutdown()` or exit the context to stop."""
-        shutting_down = self._shutting_down = Event()
-        if not self._scheduled_tasks:
-            yield
-            return
-        # The done event is set when all tasks complete naturally (e.g. finite triggers)
-        done = Event()
-
-        async def _run_task(st: _ScheduledTask[Any, Any], remaining: list[_ScheduledTask[Any, Any]]) -> None:
-            await st.run(shutting_down)
-            remaining.remove(st)
-            if not remaining:
-                done.set()
-
-        remaining = list(self._scheduled_tasks)
-        async with create_task_group() as tg:
-            for st in self._scheduled_tasks:
-                start_task_soon(tg, lambda s=st: _run_task(s, remaining))
-            yield done
-            shutting_down.set()
-
-    @contextmanager
-    def serve(self):
-        """Run the scheduler in a background thread with its own event loop."""
-        stop = threading.Event()
-
-        async def _run_loop():
-            async with self.aserve():
-                await to_thread.run_sync(stop.wait)
-
-        def _thread_target():
-            anyio.run(_run_loop, **choose_anyio_backend())
-
-        t = threading.Thread(target=_thread_target, daemon=True)
-        t.start()
-        try:
-            yield
-        finally:
-            self.shutdown()
-            stop.set()
-            t.join()
-
-    async def as_service(self, lt) -> None:
-        """Run the scheduler as a hosting service (accepts a ServiceLifetime)."""
-        async with self.aserve():
-            lt.set_started()
-            await lt.shutting_down.wait()
-
-
-async def _arun(target: Scheduler | _ScheduledTask[Any, Any]) -> None:
-    """Run a scheduler or single scheduled task with signal handling."""
-    if isinstance(target, _ScheduledTask):
-        scheduler = Scheduler()
-        scheduler._scheduled_tasks.append(target)
-    else:
-        scheduler = target
-
-    async with scheduler.aserve() as done, create_task_group() as tg:
-
-        async def _handle_signals():
-            with open_signal_receiver(*HANDLED_SIGNALS) as signals:
-                async for _ in signals:
-                    logger.info("Shutting down...")
-                    scheduler.shutdown()
-                    break
-
-        tg.start_soon(_handle_signals)
-        # Wait for either shutdown signal or all tasks completing naturally
-        await wait_any(done, scheduler._shutting_down)  # type: ignore[arg-type]
-        tg.cancel_scope.cancel()
-
-
-def run(target: Scheduler | _ScheduledTask[Any, Any]) -> int:
-    """Run a scheduler or single scheduled task until completion or signal. Returns exit code."""
-    try:
-        anyio.run(_arun, target, **choose_anyio_backend())
-    except KeyboardInterrupt:
-        pass
-    return 0

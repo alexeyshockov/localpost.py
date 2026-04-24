@@ -1,14 +1,13 @@
 #!/usr/bin/env python
-
 import logging
 import random
+import sys
 
-from localpost.scheduler import Scheduler, after, delay, every, run, take_first
+from localpost.hosting import run_app
+from localpost.scheduler import after, delay, every, scheduled_task, take_first
 
-scheduler = Scheduler()
 
-
-@scheduler.task(every("3s") // delay((0, 1)))
+@scheduled_task(every("3s") // delay((0, 1)))
 async def task1():
     """
     A simple repeating task that returns a random number.
@@ -17,7 +16,7 @@ async def task1():
     return random.randint(1, 22)
 
 
-@scheduler.task(after(task1) // take_first(3))
+@scheduled_task(after(task1) // take_first(3))
 async def task2(task1_result: int):
     """
     A task that runs after task1 and prints its result.
@@ -30,4 +29,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(run(scheduler))
+    sys.exit(run_app(task1, task2))
