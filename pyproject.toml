@@ -66,6 +66,9 @@ http-openapi = [
 http-flask = [
     "flask ~=3.1",
 ]
+http-sentry = [
+    "sentry-sdk ~=2.51",
+]
 sqs = [
     "botocore ~=1.38",  # Sync SQS client (default)
 #    "boto3 ~=1.38",  # In case boto3 is available, the default session will be used

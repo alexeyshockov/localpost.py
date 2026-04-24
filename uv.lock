@@ -1073,6 +1073,9 @@ http-flask = [
 http-openapi = [
     { name = "msgspec" },
 ]
+http-sentry = [
+    { name = "sentry-sdk" },
+]
 http-server = [
     { name = "h11" },
 ]
@@ -1168,8 +1171,9 @@ requires-dist = [
     { name = "msgspec", marker = "extra == 'http-openapi'", specifier = "~=0.19" },
     { name = "nats-py", marker = "extra == 'nats'", specifier = "~=2.8" },
     { name = "pytimeparse2", marker = "extra == 'scheduler'", specifier = "~=1.6" },
+    { name = "sentry-sdk", marker = "extra == 'http-sentry'", specifier = "~=2.51" },
 ]
-provides-extras = ["cron", "scheduler", "http-server", "http-openapi", "http-flask", "sqs", "kafka", "nats", "pubsub", "azure-queue", "azure-servicebus"]
+provides-extras = ["cron", "scheduler", "http-server", "http-openapi", "http-flask", "http-sentry", "sqs", "kafka", "nats", "pubsub", "azure-queue", "azure-servicebus"]
 
 [package.metadata.requires-dev]
 dev = [

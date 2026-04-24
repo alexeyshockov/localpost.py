@@ -110,6 +110,39 @@ straight to h11. See [`flask.py`](flask.py).
 | `flask_handler(app)`                      | Flask → `RequestHandler`                                            |
 | `flask_server(config, app, *, max_concurrency=1)` | Hosted service serving a Flask app                          |
 
+### `localpost.http.router_sentry`
+
+Sentry tracing wrapper for `Router`. Optional extra `[http-sentry]`. No Flask
+dependency — use this with the native `Router` + `http_server` flow.
+
+| Symbol                                          | Notes                                                                  |
+| ----------------------------------------------- | ---------------------------------------------------------------------- |
+| `sentry_router_handler(router, *, op="http.server")` | Wraps `router.as_handler()` in a Sentry transaction per request. |
+
+Transaction is named `"METHOD /books/{id}"` (the URI template, low cardinality)
+on a match, or `"METHOD /raw/path"` on a miss. `http.method`, `http.url`,
+`http.response.status_code` are recorded. Spans started inside the handler
+attach to the request transaction.
+
+### `localpost.http.flask_sentry`
+
+Sentry tracing wrapper for the native Flask adapter. Requires both
+`[http-flask]` and `[http-sentry]`.
+
+| Symbol                                          | Notes                                                                  |
+| ----------------------------------------------- | ---------------------------------------------------------------------- |
+| `sentry_flask_handler(app, *, op="http.server")` | Wraps Flask in a Sentry transaction that covers the entire request, **including response-body streaming**. |
+
+Why this exists: Sentry's stock `FlaskIntegration` ends the transaction when
+the WSGI `wsgi_app` returns — *before* the body is iterated. Spans / errors
+inside a streaming generator land outside the request transaction (or are
+dropped). Because our Flask adapter holds the request context (and the
+transaction) open through `response.iter_encoded()`, this fix-pack version
+keeps everything on the same transaction.
+
+Transaction is named after Flask's `url_rule.rule` (e.g. `"GET /hello/<name>"`)
+once routing has matched.
+
 **Behavior differences from `wsgi_server`** (with a Flask app):
 
 - Flask's **request context is active during response-body iteration**. A

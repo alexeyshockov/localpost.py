@@ -205,6 +205,9 @@ class HTTPReqCtx:
     _conn: HTTPConn
     request: h11.Request
 
+    response_status: int | None = field(default=None, init=False)
+    """Status code of the response sent for this request (set by start_response / complete)."""
+
     @property
     def borrowed(self) -> bool:
         return not self._conn.tracked
@@ -250,6 +253,8 @@ class HTTPReqCtx:
                 raise RuntimeError(f"Unexpected h11 event: {event!r}")
 
     def start_response(self, response: h11.Response | h11.InformationalResponse, /) -> None:
+        if isinstance(response, h11.Response):
+            object.__setattr__(self, "response_status", response.status_code)
         self._conn.send(response)
 
     # TODO Accept any Buffer, later

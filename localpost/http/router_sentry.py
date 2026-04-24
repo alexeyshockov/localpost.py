@@ -1,0 +1,71 @@
+"""Sentry tracing wrapper for :class:`localpost.http.Router`.
+
+Each request becomes a Sentry transaction named after the matched URI template
+(e.g. ``"GET /books/{id}"``) — a low-cardinality identifier suitable for
+Sentry's transaction metrics. Unmatched URLs fall back to the raw path with
+``source="url"``.
+
+Install::
+
+    pip install localpost[http-sentry]
+
+Usage::
+
+    routes = Routes()
+    @routes.get("/books/{id}")
+    def get_book(ctx): ...
+    router = routes.build()
+
+    sentry_sdk.init(dsn=..., traces_sample_rate=1.0)
+    handler = sentry_router_handler(router)
+
+    run_app(http_server(config, handler, max_concurrency=16))
+
+Pure Router instrumentation — no Flask import. Use
+:mod:`localpost.http.flask_sentry` for Flask apps.
+"""
+
+from __future__ import annotations
+
+import sentry_sdk
+
+from localpost.http.router import Router
+from localpost.http.server import HTTPReqCtx, RequestHandler
+
+__all__ = ["sentry_router_handler"]
+
+
+def sentry_router_handler(router: Router, *, op: str = "http.server") -> RequestHandler:
+    """Wrap a :class:`Router` with a Sentry transaction per request."""
+    inner = router.as_handler()
+
+    def handle(ctx: HTTPReqCtx) -> None:
+        req = ctx.request
+        method = req.method.decode("ascii")
+        target = req.target.decode("iso-8859-1")
+        path = target.split("?", 1)[0] if "?" in target else target
+
+        # Pre-match so the transaction name uses the URI template (low cardinality).
+        # Router's dispatch will match again, but template matching is a single
+        # combined regex run — cheap.
+        match = router._match(path, method)
+        if match.kind == "ok" and match.matched_template is not None:
+            tx_name = f"{method} {match.matched_template.template}"
+            source = "route"
+        else:
+            tx_name = f"{method} {path}"
+            source = "url"
+
+        with (
+            sentry_sdk.isolation_scope(),
+            sentry_sdk.start_transaction(op=op, name=tx_name, source=source) as tx,
+        ):
+            tx.set_tag("http.method", method)
+            tx.set_data("http.url", target)
+            try:
+                inner(ctx)
+            finally:
+                if ctx.response_status is not None:
+                    tx.set_http_status(ctx.response_status)
+
+    return handle
