@@ -63,6 +63,9 @@ http-server = [
 http-openapi = [
     "msgspec ~=0.19",
 ]
+http-flask = [
+    "flask ~=3.1",
+]
 sqs = [
     "botocore ~=1.38",  # Sync SQS client (default)
 #    "boto3 ~=1.38",  # In case boto3 is available, the default session will be used

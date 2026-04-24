@@ -1067,6 +1067,9 @@ azure-servicebus = [
 cron = [
     { name = "croniter" },
 ]
+http-flask = [
+    { name = "flask" },
+]
 http-openapi = [
     { name = "msgspec" },
 ]
@@ -1158,6 +1161,7 @@ requires-dist = [
     { name = "botocore", marker = "extra == 'sqs'", specifier = "~=1.38" },
     { name = "confluent-kafka", marker = "extra == 'kafka'", specifier = "~=2.4" },
     { name = "croniter", marker = "extra == 'cron'", specifier = ">=2.0,<4.0" },
+    { name = "flask", marker = "extra == 'http-flask'", specifier = "~=3.1" },
     { name = "google-cloud-pubsub", marker = "extra == 'pubsub'", specifier = "~=2.28" },
     { name = "h11", marker = "extra == 'http-server'", specifier = "~=0.16" },
     { name = "humanize", marker = "extra == 'scheduler'", specifier = ">=3.0,<5.0" },
@@ -1165,7 +1169,7 @@ requires-dist = [
     { name = "nats-py", marker = "extra == 'nats'", specifier = "~=2.8" },
     { name = "pytimeparse2", marker = "extra == 'scheduler'", specifier = "~=1.6" },
 ]
-provides-extras = ["cron", "scheduler", "http-server", "http-openapi", "sqs", "kafka", "nats", "pubsub", "azure-queue", "azure-servicebus"]
+provides-extras = ["cron", "scheduler", "http-server", "http-openapi", "http-flask", "sqs", "kafka", "nats", "pubsub", "azure-queue", "azure-servicebus"]
 
 [package.metadata.requires-dev]
 dev = [

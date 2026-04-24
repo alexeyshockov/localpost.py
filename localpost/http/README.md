@@ -99,6 +99,33 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 | ------------------------- | ------------------------------------------ |
 | `wrap_wsgi(app)`          | Turn a WSGI app into a `RequestHandler`    |
 
+### `localpost.http.flask`
+
+Native Flask adapter — optional extra `[http-flask]`. Bypasses WSGI on both
+sides: drives Flask's pipeline directly and streams the Werkzeug `Response`
+straight to h11. See [`flask.py`](flask.py).
+
+| Symbol                                    | Notes                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------- |
+| `flask_handler(app)`                      | Flask → `RequestHandler`                                            |
+| `flask_server(config, app, *, max_concurrency=1)` | Hosted service serving a Flask app                          |
+
+**Behavior differences from `wsgi_server`** (with a Flask app):
+
+- Flask's **request context is active during response-body iteration**. A
+  generator returned from a view can use `flask.request`, `session`, `g`
+  without `@stream_with_context`. (`stream_with_context` still works, just
+  becomes a no-op.)
+- `teardown_request` / `teardown_appcontext` run **after** the body is fully
+  sent (the opposite of standard WSGI Flask). Resources like DB sessions
+  stay alive for the duration of streaming.
+
+Trade-off: the adapter touches Werkzeug/Flask internals (`app.request_context`,
+`app.full_dispatch_request`, `Response.iter_encoded`). Stable across Flask 3.x
+but not a long-term contract. Use `wsgi_server` for framework-agnostic WSGI
+(Django, Flask without the extras, anything else) or when you want to stay
+on the documented public Flask API.
+
 ### `localpost.http.config`
 
 | Symbol        | Notes                                              |
@@ -108,12 +135,13 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 
 ### Hosting integration — `localpost.http._service`
 
-Two `@hosting.service` wrappers for running the server inside a hosted app:
+`@hosting.service` wrappers for running the server inside a hosted app:
 
-| Service                                      | Notes                                 |
-| -------------------------------------------- | ------------------------------------- |
-| `http_server(config, handler)`               | Runs the server loop with your handler |
-| `wsgi_server(config, app)`                   | Same, for a WSGI app                  |
+| Service                                      | Notes                                       |
+| -------------------------------------------- | ------------------------------------------- |
+| `http_server(config, handler)`               | Runs the server loop with your handler      |
+| `wsgi_server(config, app)`                   | Same, for a generic WSGI app                |
+| `flask_server(config, app)`                  | Native Flask — see `localpost.http.flask`   |
 
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
 is driven by `sl.shutting_down` via `threadtools.check_cancelled()`.
