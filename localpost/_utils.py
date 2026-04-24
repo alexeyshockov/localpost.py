@@ -353,7 +353,7 @@ class MemoryStream(Generic[T]):
     @staticmethod
     def create(max_buffer_size: float = 0) -> tuple[MemorySendStream[T], MemoryObjectReceiveStream[T]]:
         send, receive = create_memory_object_stream(max_buffer_size)
-        return cast(Mem
+        return cast(MemorySendStream[T], send), cast(MemoryObjectReceiveStream[T], receive)
 
 
 class AsyncBackendConfig(TypedDict):

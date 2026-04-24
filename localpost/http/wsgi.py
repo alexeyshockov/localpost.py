@@ -1,135 +1,172 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterable
-from contextlib import AbstractContextManager, closing, suppress
-from io import BufferedReader, IOBase, RawIOBase
+from collections.abc import Buffer, Callable
+from io import RawIOBase
 from typing import Any, final, override
 from wsgiref.types import WSGIApplication
 
 import h11
 
-from localpost.http.server import BorrowedHTTPReq, RequestHandler
+from localpost.http.server import HTTPReqCtx, RequestHandler
+
+__all__ = ["wrap_wsgi"]
 
 
 @final
-class RequestBodyStream(RawIOBase):
-    def __init__(self, ctx: BorrowedHTTPReq) -> None:
+class _RequestBodyStream(RawIOBase):
+    """Expose ``HTTPReqCtx.receive`` as a readable file-like object for ``wsgi.input``."""
+
+    def __init__(self, ctx: HTTPReqCtx) -> None:
         self._ctx = ctx
-        self.completed = False
+        self._eof = False
+        self._leftover = b""
 
     @override
-    def writable(self):
+    def writable(self) -> bool:
         return False
 
     @override
-    def seekable(self):
+    def seekable(self) -> bool:
         return False
 
     @override
-    def readable(self):
+    def readable(self) -> bool:
         return True
 
     @override
-    def readall(self):
-        chunks = bytearray()
-        while not self.completed:
-            chunks.extend(self._ctx.receive())
-        return chunks
+    def readall(self) -> bytes:
+        buf = bytearray(self._leftover)
+        self._leftover = b""
+        while not self._eof:
+            chunk = self._ctx.receive()
+            if not chunk:
+                self._eof = True
+                break
+            buf.extend(chunk)
+        return bytes(buf)
 
     @override
-    def readinto(self, b: bytearray, /) -> int:
-        try:
-            data = self._ctx.receive(len(b))
-            size = len(data)
-            b[:size] = data
-            return size
-        except EOFError:
+    def readinto(self, buffer: Buffer, /) -> int:
+        view = memoryview(buffer).cast("B")
+        n = len(view)
+        if self._leftover:
+            take = min(n, len(self._leftover))
+            view[:take] = self._leftover[:take]
+            self._leftover = self._leftover[take:]
+            return take
+        if self._eof:
             return 0
+        data = self._ctx.receive(n)
+        if not data:
+            self._eof = True
+            return 0
+        if len(data) <= n:
+            view[: len(data)] = data
+            return len(data)
+        view[:n] = data[:n]
+        self._leftover = data[n:]
+        return n
 
 
 def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
-    """Wrap a WSGI application as a RequestHandler."""
+    """Wrap a WSGI application as a native :class:`RequestHandler`."""
 
-    def handler(
-        client: HTTPConn, request: h11.Request, body: IOBase
-    ) -> tuple[h11.Response, AbstractContextManager[Iterable[h11.Data]]]:
-        environ = _build_environ(client, request, body)
-        response: h11.Response | None = None
+    def handler(ctx: HTTPReqCtx) -> None:
+        environ = _build_environ(ctx)
 
-        def wsgi_start_response(
+        response_state: dict[str, Any] = {}
+
+        def start_response(
             status: str,
             headers: list[tuple[str, str]],
             exc_info: Any = None,
         ) -> Callable[[bytes], None]:
-            nonlocal response
             if exc_info:
                 try:
-                    raise exc_info[1].with_traceback(exc_info[2])
+                    if response_state.get("started"):
+                        raise exc_info[1].with_traceback(exc_info[2])
                 finally:
-                    exc_info = None  # Avoid circular reference
-            status_code = int(status.split(" ", 1)[0])  # Parse from "200 OK" format
-            response = h11.Response(
+                    exc_info = None
+            status_code = int(status.split(" ", 1)[0])
+            reason = status.split(" ", 1)[1] if " " in status else ""
+            h11_headers = [
+                (name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in headers
+            ]
+            response_state["response"] = h11.Response(
                 status_code=status_code,
-                headers=[(name.encode("ISO-8859-1"), value.encode("ISO-8859-1")) for name, value in headers],
+                headers=h11_headers,
+                reason=reason.encode("iso-8859-1") if reason else b"",
             )
-            return _wsgi_response_write
+            return _wsgi_write_deprecated
 
-        def wsgi_run():
-            chunks = app(environ, wsgi_start_response)
-            yield  # Skip the first iteration, to call the app and set the response object
-            with closing(chunks) if hasattr(chunks, "close") else suppress():  # type: ignore
-                for chunk in chunks:
-                    yield h11.Data(chunk)
-
-        response_body = wsgi_run()
-        next(response_body)
-        assert response, "WSGI app did not call start_response"
-        return response, closing(response_body)
+        body_iter = app(environ, start_response)
+        try:
+            first_nonempty: bytes | None = None
+            # Materialize the first chunk (even if empty) — guarantees start_response has been called.
+            iterator = iter(body_iter)
+            for chunk in iterator:
+                if chunk:
+                    first_nonempty = chunk
+                    break
+            response = response_state.get("response")
+            if response is None:
+                raise RuntimeError("WSGI app returned without calling start_response")
+            ctx.start_response(response)
+            response_state["started"] = True
+            if first_nonempty is not None:
+                ctx.send(first_nonempty)
+                for chunk in iterator:
+                    if chunk:
+                        ctx.send(chunk)
+            ctx.finish_response()
+        finally:
+            close = getattr(body_iter, "close", None)
+            if close is not None:
+                close()
 
     return handler
 
 
-def _wsgi_response_write(_: bytes) -> None:
-    raise NotImplementedError("write() is deprecated and not supported")
+def _wsgi_write_deprecated(_: bytes) -> None:
+    raise NotImplementedError("The WSGI write() callable is deprecated and not supported")
 
 
-def _build_environ(client: HTTPConn, request: h11.Request, body: IOBase) -> dict[str, Any]:
-    # Decode path and parse query string
-    path = request.target.decode("ISO-8859-1")
-    if "?" in path:
-        path, query_string = path.split("?", 1)
+def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
+    request = ctx.request
+    target = request.target.decode("iso-8859-1")
+    if "?" in target:
+        path, query_string = target.split("?", 1)
     else:
-        query_string = ""
+        path, query_string = target, ""
 
-    headers_dict = {}
+    headers_dict: dict[str, str] = {}
     for name, value in request.headers:
-        headers_dict[name.decode("ISO-8859-1").lower()] = value.decode("ISO-8859-1")
+        headers_dict[name.decode("iso-8859-1").lower()] = value.decode("iso-8859-1")
 
-    # See https://wsgi.readthedocs.io/en/latest/definitions.html
-    environ = {
+    environ: dict[str, Any] = {
         "REQUEST_METHOD": request.method.decode("ascii"),
+        "SCRIPT_NAME": "",
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
         "CONTENT_TYPE": headers_dict.get("content-type", ""),
         "CONTENT_LENGTH": headers_dict.get("content-length", ""),
-        "SERVER_NAME": client.config.host,
-        "SERVER_PORT": str(client.server.port),
+        "SERVER_NAME": ctx._server.config.host,
+        "SERVER_PORT": str(ctx._server.port),
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": "http",
-        "wsgi.input": BufferedReader(body),
-        "wsgi.errors": sys.stderr,  # Handle it later with the logger
+        "wsgi.input": _RequestBodyStream(ctx),
+        "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
         "wsgi.multiprocess": False,
         "wsgi.run_once": False,
     }
 
-    # Add HTTP headers
     for name, value in request.headers:
-        name_str = name.decode("ISO-8859-1").upper().replace("-", "_")
-        if name_str not in ("CONTENT_TYPE", "CONTENT_LENGTH"):
-            name_str = f"HTTP_{name_str}"
-        environ[name_str] = value.decode("ISO-8859-1")
+        name_str = name.decode("iso-8859-1").upper().replace("-", "_")
+        if name_str in ("CONTENT_TYPE", "CONTENT_LENGTH"):
+            continue
+        environ[f"HTTP_{name_str}"] = value.decode("iso-8859-1")
 
     return environ

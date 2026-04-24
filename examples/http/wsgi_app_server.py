@@ -1,40 +1,52 @@
+"""Serve a Flask (WSGI) app via ``localpost.http.wsgi_server``.
+
+Run::
+
+    uv run --group dev-http examples/http/wsgi_app_server.py
+
+    curl http://localhost:8000/hello/world
+    curl http://localhost:8000/hello-stream/world
+"""
+
+from __future__ import annotations
+
 import logging
+import sys
 
-from anyio import from_thread, to_thread
-from flask import Flask, stream_with_context
+from flask import Flask
 from flask import request as flask_request
+from flask.helpers import stream_with_context  # type: ignore[import-untyped]
 
-from localpost.http.config import ServerConfig
-from localpost.http.server import start_http_server
-from localpost.http.wsgi import wrap_wsgi
+from localpost.hosting import run_app
+from localpost.http import ServerConfig, wsgi_server
 
 
-async def main():
-    logging.basicConfig(level=logging.DEBUG)
-
+def build_app() -> Flask:
     app = Flask(__name__)
 
     @app.route("/hello/<name>")
-    def hello(name):
+    def hello(name: str):
         user_agent = flask_request.headers.get("User-Agent", "Unknown")
         return f"Hello, {name}! Your User-Agent is: {user_agent}\n"
 
     @app.route("/hello-stream/<name>")
-    @stream_with_context
-    def hello_stream(name):
+    def hello_stream(name: str):
         user_agent = flask_request.headers.get("User-Agent", "Unknown")
-        yield f"Hello, {name}! "
-        yield f"Your User-Agent is: {user_agent}\n"
 
-    def run_server():
-        with start_http_server(ServerConfig()) as server:
-            while True:
-                from_thread.check_cancelled()
-                server.run(req_handler)
+        def generate():
+            yield f"Hello, {name}! "
+            yield f"Your User-Agent is: {user_agent}\n"
 
-    async with wrap_wsgi(app) as req_handler:
-        await to_thread.run_sync(run_server)
+        return stream_with_context(generate())
+
+    return app
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO)
+    config = ServerConfig(host="127.0.0.1", port=8000)
+    return run_app(wsgi_server(config, build_app(), max_concurrency=8))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

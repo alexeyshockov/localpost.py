@@ -1,33 +1,24 @@
 from __future__ import annotations
 
 import dataclasses as dc
-import os
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator, Sequence
-from contextlib import asynccontextmanager
-from typing import Any, Protocol, Self, final, override
+from collections.abc import Iterator
+from typing import Protocol, Self, final, override
 
 from anyio import (
-    CapacityLimiter,
     ClosedResourceError,
     EndOfStream,
     WouldBlock,
-    create_task_group,
     from_thread,
-    to_thread,
 )
 
 __all__ = [
     "Channel",
     "SendChannel",
     "ReceiveChannel",
-    "create_executor",
-    "gather",
 ]
-
-from localpost._utils import NOT_SET, RandomDelay, is_async_callable
 
 CHECK_TIMEOUT: float = 1.0
 """Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
