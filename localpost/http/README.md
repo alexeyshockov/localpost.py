@@ -40,7 +40,7 @@ with start_http_server(ServerConfig()) as server:
 ```
 
 See [`examples/http/simple_server.py`](../../examples/http/simple_server.py),
-`threaded_server.py`, `wsgi_app_server.py`.
+`multithread_server.py`, `wsgi_app_server.py`.
 
 Running under hosting:
 
@@ -64,8 +64,14 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
   interface. The server calls `server.run(handler)` once per accepted request.
 - **`URITemplate`** — RFC 6570 Level 1 only (`/books/{id}` style variables,
   matched with a generated regex). `match(uri) → dict | None`.
-- **`Router`** — pick a `RequestHandler` by `(method, template)`. Exposed via
-  `Router.wsgi` too, for deployment under Gunicorn / Granian / etc.
+- **`Routes`** — mutable builder. Accumulate routes via decorators
+  (`@routes.get("/path")`, `.post`, `.put`, `.delete`, `.patch`, `.add`), then
+  call `.build()` to compile into a `Router`.
+- **`Router`** — immutable, compiled URI-template dispatcher. One regex
+  alternation over all templates, templates ordered by longest literal prefix,
+  `Allow` headers pre-rendered. Exposes `.as_handler()` (native
+  `RequestHandler`) and `.wsgi` (for deployment under Gunicorn / Granian /
+  etc.). Build via `routes.build()` or `Router.from_routes(routes)`.
 
 ## Public API
 
@@ -83,7 +89,8 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 | ------------------------- | ------------------------------------------ |
 | `URITemplate`             | Parse and match RFC 6570 L1 templates      |
 | `RequestCtx`              | Routed request context (path args, query, body access) |
-| `Router`                  | Register `(method, template) → RequestHandler` mappings, expose `.wsgi` |
+| `Routes`                  | Mutable builder — decorators (`.get`, `.post`, …) / `.add`. Call `.build()` to freeze |
+| `Router`                  | Immutable, compiled dispatcher. `.as_handler()` for native, `.wsgi` for WSGI |
 | `Response`                | Simple `(status, headers, body)` tuple     |
 
 ### `localpost.http.wsgi`

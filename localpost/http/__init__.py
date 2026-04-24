@@ -4,6 +4,7 @@ from localpost.http.router import (
     RequestCtx,
     Response,
     Router,
+    Routes,
     URITemplate,
 )
 from localpost.http.router import (
@@ -22,6 +23,7 @@ __all__ = [
     "RequestHandler",
     # router
     "Router",
+    "Routes",
     "URITemplate",
     "RequestCtx",
     "Response",

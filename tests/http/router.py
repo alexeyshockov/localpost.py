@@ -10,7 +10,15 @@ import httpx
 import pytest
 
 from localpost import threadtools
-from localpost.http import RequestCtx, Response, Router, ServerConfig, URITemplate, start_http_server
+from localpost.http import (
+    RequestCtx,
+    Response,
+    Router,
+    Routes,
+    ServerConfig,
+    URITemplate,
+    start_http_server,
+)
 
 # --- URITemplate ----------------------------------------------------------
 
@@ -64,32 +72,34 @@ def _fake_wsgi(router: Router, method: str, path: str, query: str = "", body: by
 
 class TestRouterWSGI:
     def test_matches_and_dispatches(self):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/hello/{name}")
+        @routes.get("/hello/{name}")
         def hello(ctx: RequestCtx) -> Response:
             return Response(200, {"content-type": "text/plain"}, [f"hi {ctx.path_args['name']}".encode()])
 
         assert hello  # keep reference so pyright is happy
+        router = routes.build()
 
         status, _, body = _fake_wsgi(router, "GET", "/hello/alice")
         assert status.startswith("200")
         assert body == b"hi alice"
 
     def test_404_on_miss(self):
-        router = Router()
+        router = Routes().build()
         status, _, body = _fake_wsgi(router, "GET", "/nope")
         assert status.startswith("404")
         assert body == b"Not Found"
 
     def test_405_with_allow_header(self):
-        router = Router()
+        routes = Routes()
 
-        @router.post("/resource")
+        @routes.post("/resource")
         def create(_: RequestCtx) -> Response:
             return Response(201, {}, [])
 
         assert create
+        router = routes.build()
 
         status, headers, body = _fake_wsgi(router, "GET", "/resource")
         assert status.startswith("405")
@@ -98,32 +108,34 @@ class TestRouterWSGI:
         assert header_names.get("allow") == "POST"
 
     def test_query_parsing(self):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/search")
+        @routes.get("/search")
         def search(ctx: RequestCtx) -> Response:
             q = ctx.query_args.get("q", [""])[0]
             return Response(200, {"content-type": "text/plain"}, [q.encode()])
 
         assert search
+        router = routes.build()
 
         status, _, body = _fake_wsgi(router, "GET", "/search", query="q=books&extra=1")
         assert status.startswith("200")
         assert body == b"books"
 
     def test_multiple_methods_same_template(self):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/item")
+        @routes.get("/item")
         def _get(_: RequestCtx) -> Response:
             return Response(200, {}, [b"g"])
 
-        @router.post("/item")
+        @routes.post("/item")
         def _post(_: RequestCtx) -> Response:
             return Response(200, {}, [b"p"])
 
         assert _get is not None
         assert _post is not None
+        router = routes.build()
 
         s_g, _, b_g = _fake_wsgi(router, "GET", "/item")
         s_p, _, b_p = _fake_wsgi(router, "POST", "/item")
@@ -133,17 +145,42 @@ class TestRouterWSGI:
         assert b_p == b"p"
 
     def test_request_body_read(self):
-        router = Router()
+        routes = Routes()
 
-        @router.post("/echo")
+        @routes.post("/echo")
         def echo(ctx: RequestCtx) -> Response:
             return Response(200, {}, [ctx.body()])
 
         assert echo
+        router = routes.build()
 
         status, _, body = _fake_wsgi(router, "POST", "/echo", body=b"payload")
         assert status.startswith("200")
         assert body == b"payload"
+
+    def test_longer_literal_prefix_wins(self):
+        """Ambiguous templates: /books/new should beat /books/{id}."""
+        routes = Routes()
+        hits: list[str] = []
+
+        @routes.get("/books/{id}")
+        def get_book(_: RequestCtx) -> Response:
+            hits.append("by_id")
+            return Response(200, {}, [b"id"])
+
+        @routes.get("/books/new")
+        def new_book(_: RequestCtx) -> Response:
+            hits.append("new")
+            return Response(200, {}, [b"new"])
+
+        assert get_book is not None
+        assert new_book is not None
+        router = routes.build()
+
+        _fake_wsgi(router, "GET", "/books/new")
+        _fake_wsgi(router, "GET", "/books/42")
+
+        assert hits == ["new", "by_id"]
 
 
 # --- Router.as_handler (native) -------------------------------------------
@@ -169,13 +206,14 @@ def _run_iterations(server, handler, n=15):
 
 class TestRouterAsHandler:
     def test_dispatch_200(self, server_config):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/ping")
+        @routes.get("/ping")
         def ping(_: RequestCtx) -> Response:
             return Response(200, {"content-type": "text/plain"}, [b"pong"])
 
         assert ping
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -187,10 +225,10 @@ class TestRouterAsHandler:
         assert resp.text == "pong"
 
     def test_dispatch_path_params(self, server_config):
-        router = Router()
+        routes = Routes()
         captured: dict = {}
 
-        @router.get("/books/{book_id}")
+        @routes.get("/books/{book_id}")
         def get_book(ctx: RequestCtx) -> Response:
             captured["book_id"] = ctx.path_args["book_id"]
             captured["method"] = ctx.method
@@ -198,6 +236,7 @@ class TestRouterAsHandler:
             return Response(200, {"content-type": "text/plain"}, [b"ok"])
 
         assert get_book
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -210,7 +249,7 @@ class TestRouterAsHandler:
         assert captured["matched_template"] == "/books/{book_id}"
 
     def test_404(self, server_config):
-        router = Router()
+        router = Routes().build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -222,13 +261,14 @@ class TestRouterAsHandler:
         assert resp.text == "Not Found"
 
     def test_405_with_allow_header(self, server_config):
-        router = Router()
+        routes = Routes()
 
-        @router.post("/resource")
+        @routes.post("/resource")
         def _post(_: RequestCtx) -> Response:
             return Response(201, {}, [])
 
         assert _post
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -240,16 +280,17 @@ class TestRouterAsHandler:
         assert resp.headers.get("allow") == "POST"
 
     def test_query_parsing(self, server_config):
-        router = Router()
+        routes = Routes()
         captured: dict = {}
 
-        @router.get("/search")
+        @routes.get("/search")
         def search(ctx: RequestCtx) -> Response:
             captured["q"] = ctx.query_args.get("q", [""])[0]
             captured["raw"] = ctx.query_string
             return Response(200, {"content-type": "text/plain"}, [b"ok"])
 
         assert search
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -261,9 +302,9 @@ class TestRouterAsHandler:
         assert captured["raw"] == "q=books"
 
     def test_streaming_response(self, server_config):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/stream")
+        @routes.get("/stream")
         def stream(_: RequestCtx) -> Response:
             return Response(
                 200,
@@ -272,6 +313,7 @@ class TestRouterAsHandler:
             )
 
         assert stream
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -283,15 +325,16 @@ class TestRouterAsHandler:
         assert resp.content == b"firstsecondthird"
 
     def test_handler_sees_request_headers(self, server_config):
-        router = Router()
+        routes = Routes()
         captured: dict = {}
 
-        @router.get("/hdr")
+        @routes.get("/hdr")
         def hdr(ctx: RequestCtx) -> Response:
             captured["x_custom"] = ctx.headers.get("x-custom")
             return Response(200, {}, [b"ok"])
 
         assert hdr
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
@@ -302,15 +345,16 @@ class TestRouterAsHandler:
         assert captured["x_custom"] == "yo"
 
     def test_ctx_can_read_body(self, server_config):
-        router = Router()
+        routes = Routes()
         captured: dict = {}
 
-        @router.post("/echo")
+        @routes.post("/echo")
         def echo(ctx: RequestCtx) -> Response:
             captured["body"] = ctx.body()
             return Response(200, {}, [captured["body"]])
 
         assert echo
+        router = routes.build()
 
         with start_http_server(server_config) as server:
             t = threading.Thread(target=_run_iterations, args=(server, router.as_handler(), 25))
@@ -322,42 +366,72 @@ class TestRouterAsHandler:
         assert captured["body"] == b"hello body"
 
 
-# --- Router registration API ---------------------------------------------
+# --- Routes registration API ---------------------------------------------
 
 
-class TestRouterRegistration:
+class TestRoutesRegistration:
     def test_explicit_add(self):
-        router = Router()
+        routes = Routes()
 
         def handler(_: RequestCtx) -> Response:
             return Response(200, {}, [b"x"])
 
-        router.add("GET", "/thing", handler)
-        assert len(router.paths) == 1
+        routes.add("GET", "/thing", handler)
+        assert len(routes.paths) == 1
 
     def test_same_template_multiple_methods_stored_once(self):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/r")
+        @routes.get("/r")
         def g(_: RequestCtx) -> Response:
             return Response(200, {}, [])
 
-        @router.post("/r")
+        @routes.post("/r")
         def p(_: RequestCtx) -> Response:
             return Response(200, {}, [])
 
         assert g is not None
         assert p is not None
 
-        assert len(router.paths) == 1
-        methods = next(iter(router.paths.values()))
+        assert len(routes.paths) == 1
+        methods = next(iter(routes.paths.values()))
         assert set(methods) == {HTTPMethod.GET, HTTPMethod.POST}
 
     def test_decorator_returns_original_handler(self):
-        router = Router()
+        routes = Routes()
 
         def handler(_: RequestCtx) -> Response:
             return Response(200, {}, [])
 
-        registered = router.get("/x")(handler)
+        registered = routes.get("/x")(handler)
         assert registered is handler
+
+
+# --- Router build-time checks --------------------------------------------
+
+
+class TestRouterBuild:
+    def test_empty_routes_produce_empty_router(self):
+        """An empty Routes still builds a valid (never-matching) Router."""
+        router = Routes().build()
+        status, _, body = _fake_wsgi(router, "GET", "/")
+        assert status.startswith("404")
+        assert body == b"Not Found"
+
+    def test_build_is_idempotent_snapshot(self):
+        """Building twice produces equivalent routers with the same templates tuple."""
+        routes = Routes()
+        routes.add("GET", "/a", lambda ctx: Response(200, {}, []))
+        routes.add("GET", "/b", lambda ctx: Response(200, {}, []))
+        r1 = routes.build()
+        r2 = routes.build()
+        assert [t.template for t in r1.templates] == [t.template for t in r2.templates]
+
+    def test_allow_header_precomputed(self):
+        routes = Routes()
+        routes.add("GET", "/x", lambda ctx: Response(200, {}, []))
+        routes.add("POST", "/x", lambda ctx: Response(200, {}, []))
+        router = routes.build()
+        # Methods are sorted for a stable header; both methods end up in the header.
+        assert router.allow_headers[0] in ("GET, POST", "POST, GET")
+        assert set(router.allow_headers[0].split(", ")) == {"GET", "POST"}

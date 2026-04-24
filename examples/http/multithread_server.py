@@ -25,6 +25,7 @@ from localpost.http import (
     RequestCtx,
     Response,
     Router,
+    Routes,
     ServerConfig,
     http_server,
 )
@@ -47,11 +48,11 @@ def _slow(_: RequestCtx) -> Response:
 
 
 def build_router() -> Router:
-    router = Router()
-    router.get("/")(_root)
-    router.get("/hello/{name}")(_hello)
-    router.get("/slow")(_slow)
-    return router
+    routes = Routes()
+    routes.get("/")(_root)
+    routes.get("/hello/{name}")(_hello)
+    routes.get("/slow")(_slow)
+    return routes.build()
 
 
 def main() -> int:

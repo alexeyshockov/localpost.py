@@ -15,7 +15,7 @@ import pytest
 from anyio import from_thread, to_thread
 
 from localpost.hosting import serve
-from localpost.http import HTTPReqCtx, RequestCtx, Response, Router, ServerConfig, http_server
+from localpost.http import HTTPReqCtx, RequestCtx, Response, Routes, ServerConfig, http_server
 
 pytestmark = pytest.mark.anyio
 
@@ -197,13 +197,14 @@ class TestHttpServerService:
         assert handler_cancelled.is_set()
 
     async def test_router_dispatch_via_service(self, free_port):
-        router = Router()
+        routes = Routes()
 
-        @router.get("/books/{id}")
+        @routes.get("/books/{id}")
         def get_book(ctx: RequestCtx) -> Response:
             return Response(200, {"content-type": "text/plain"}, [f"book={ctx.path_args['id']}".encode()])
 
         assert get_book is not None
+        router = routes.build()
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         svc = http_server(cfg, router.as_handler(), max_concurrency=4)

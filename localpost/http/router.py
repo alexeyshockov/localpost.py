@@ -20,6 +20,7 @@ __all__ = [
     "RequestCtx",
     "Response",
     "RequestHandler",
+    "Routes",
     "Router",
 ]
 
@@ -102,27 +103,24 @@ class Response:
 RequestHandler = Callable[[RequestCtx], Response]
 
 
+@final
 @dataclass(eq=False, slots=True)
-class Router:
-    """Simple URI-template router.
+class Routes:
+    """Mutable route builder. Accumulate routes via decorators, then ``build()`` a Router.
 
     Usage::
 
-        router = Router()
+        routes = Routes()
 
-        @router.get("/hello/{name}")
+        @routes.get("/hello/{name}")
         def hello(ctx: RequestCtx) -> Response:
             return Response(200, {"content-type": "text/plain"}, [b"hi"])
 
-        # As native handler:
-        http_server(config, router.as_handler())
-        # As WSGI app:
-        gunicorn.run(router.wsgi)
+        router = routes.build()
+        # or equivalently: router = Router.from_routes(routes)
     """
 
     paths: dict[URITemplate, dict[HTTPMethod, RequestHandler]] = field(default_factory=dict)
-
-    # --- Registration -------------------------------------------------
 
     def add(self, method: HTTPMethod | str, template: str, handler: RequestHandler) -> None:
         m = method if isinstance(method, HTTPMethod) else HTTPMethod(method.upper())
@@ -151,43 +149,115 @@ class Router:
     def patch(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
         return self._decorator(HTTPMethod.PATCH, template)
 
+    def build(self) -> Router:
+        return Router.from_routes(self)
+
+
+@final
+@dataclass(frozen=True, eq=False, slots=True)
+class Router:
+    """Immutable, compiled URI-template dispatcher.
+
+    Build via :meth:`from_routes` or :meth:`Routes.build`. The constructor fields are
+    an implementation detail — treat the class as read-only outside of ``from_routes``.
+    """
+
+    templates: tuple[URITemplate, ...]
+    """Templates in dispatch order — longest literal prefix first, stable on ties."""
+
+    methods: tuple[Mapping[HTTPMethod, RequestHandler], ...]
+    """Per-template method → handler table; parallel to :attr:`templates`."""
+
+    allow_headers: tuple[str, ...]
+    """Pre-rendered ``Allow`` header value per template (e.g. ``"GET, POST"``)."""
+
+    _regex: re.Pattern[str]
+    _group_prefixes: tuple[str, ...]
+
+    @classmethod
+    def from_routes(cls, routes: Routes) -> Self:
+        # Deduplicate: Routes.add already merges by template string, but guard
+        # against anyone constructing the builder's paths dict by hand.
+        seen: set[str] = set()
+        for t in routes.paths:
+            if t.template in seen:
+                raise ValueError(f"duplicate template: {t.template!r}")
+            seen.add(t.template)
+
+        ordered = sorted(
+            routes.paths.items(),
+            key=lambda item: _literal_prefix_len(item[0]),
+            reverse=True,
+        )
+
+        templates: list[URITemplate] = []
+        methods_list: list[Mapping[HTTPMethod, RequestHandler]] = []
+        allow_headers: list[str] = []
+        group_prefixes: list[str] = []
+        alternatives: list[str] = []
+
+        for i, (tmpl, method_map) in enumerate(ordered):
+            prefix = f"r{i}"
+            templates.append(tmpl)
+            # Freeze the handler map at the type level (still a plain dict underneath,
+            # but exposed as Mapping — external mutation is a type error).
+            methods_list.append(dict(method_map))
+            allow_headers.append(", ".join(m.value for m in sorted(method_map, key=lambda hm: hm.value)))
+            group_prefixes.append(prefix)
+            alternatives.append(f"(?P<{prefix}>{_reprefixed_regex_source(tmpl, prefix)})")
+
+        combined = re.compile("^(?:" + "|".join(alternatives) + ")$") if alternatives else re.compile(r"^(?!)")
+
+        return cls(
+            templates=tuple(templates),
+            methods=tuple(methods_list),
+            allow_headers=tuple(allow_headers),
+            _regex=combined,
+            _group_prefixes=tuple(group_prefixes),
+        )
+
     # --- Dispatch -----------------------------------------------------
 
-    def _match(
-        self, path: str, method_str: str
-    ) -> _MatchResult:
-        matched_template: URITemplate | None = None
-        path_args: dict[str, str] = {}
-        matched_methods: Mapping[HTTPMethod, RequestHandler] | None = None
-
-        for template, methods in self.paths.items():
-            result = template.match(path)
-            if result is not None:
-                matched_template = template
-                path_args = result
-                matched_methods = methods
-                break
-
-        if matched_template is None or matched_methods is None:
+    def _match(self, path: str, method_str: str) -> _MatchResult:
+        m = self._regex.match(path)
+        if m is None:
             return _MatchResult(kind="not_found")
 
-        try:
-            method = HTTPMethod(method_str)
-        except ValueError:
-            return _MatchResult(kind="method_not_allowed", allowed=tuple(matched_methods))
+        for i, outer in enumerate(self._group_prefixes):
+            if m.group(outer) is None:
+                continue
+            tmpl = self.templates[i]
+            method_map = self.methods[i]
+            path_args = {v: m.group(f"{outer}_{v}") or "" for v in tmpl.variable_names}
 
-        handler = matched_methods.get(method)
-        if handler is None:
-            return _MatchResult(kind="method_not_allowed", allowed=tuple(matched_methods))
+            try:
+                method = HTTPMethod(method_str)
+            except ValueError:
+                return _MatchResult(
+                    kind="method_not_allowed",
+                    allowed=tuple(method_map),
+                    allow_header=self.allow_headers[i],
+                )
 
-        return _MatchResult(
-            kind="ok",
-            handler=handler,
-            method=method,
-            matched_template=matched_template,
-            path_args=path_args,
-            allowed=tuple(matched_methods),
-        )
+            handler = method_map.get(method)
+            if handler is None:
+                return _MatchResult(
+                    kind="method_not_allowed",
+                    allowed=tuple(method_map),
+                    allow_header=self.allow_headers[i],
+                )
+
+            return _MatchResult(
+                kind="ok",
+                handler=handler,
+                method=method,
+                matched_template=tmpl,
+                path_args=path_args,
+                allowed=tuple(method_map),
+                allow_header=self.allow_headers[i],
+            )
+
+        raise AssertionError("unreachable: regex matched but no outer group set")
 
     def wsgi(self, environ: dict, start_response) -> Iterable[bytes]:
         """WSGI app, to be used with any WSGI server, e.g. Gunicorn."""
@@ -199,10 +269,9 @@ class Router:
             start_response("404 Not Found", [("Content-Type", "text/plain")])
             return [b"Not Found"]
         if match.kind == "method_not_allowed":
-            allowed = ", ".join(m.value for m in match.allowed)
             start_response(
                 "405 Method Not Allowed",
-                [("Content-Type", "text/plain"), ("Allow", allowed)],
+                [("Content-Type", "text/plain"), ("Allow", match.allow_header)],
             )
             return [b"Method Not Allowed"]
 
@@ -255,12 +324,11 @@ class Router:
                 _send_plain(http_ctx, 404, b"Not Found")
                 return
             if match.kind == "method_not_allowed":
-                allowed = ", ".join(m.value for m in match.allowed)
                 _send_plain(
                     http_ctx,
                     405,
                     b"Method Not Allowed",
-                    extra_headers=[(b"Allow", allowed.encode("ascii"))],
+                    extra_headers=[(b"Allow", match.allow_header.encode("ascii"))],
                 )
                 return
 
@@ -309,6 +377,26 @@ class _MatchResult:
     matched_template: URITemplate | None = None
     path_args: Mapping[str, str] = field(default_factory=dict)
     allowed: tuple[HTTPMethod, ...] = ()
+    allow_header: str = ""
+
+
+def _literal_prefix_len(t: URITemplate) -> int:
+    """Length of the literal prefix up to the first ``{var}`` placeholder."""
+    m = _VAR_PATTERN.search(t.template)
+    return len(t.template) if m is None else m.start()
+
+
+def _reprefixed_regex_source(t: URITemplate, prefix: str) -> str:
+    """Rebuild ``t``'s regex source with ``{prefix}_`` prepended to every named group."""
+    parts: list[str] = []
+    last_end = 0
+    for m in _VAR_PATTERN.finditer(t.template):
+        parts.append(re.escape(t.template[last_end : m.start()]))
+        var_name = m.group(1)
+        parts.append(f"(?P<{prefix}_{var_name}>[^/]+)")
+        last_end = m.end()
+    parts.append(re.escape(t.template[last_end:]))
+    return "".join(parts)
 
 
 def _find_template(

@@ -31,7 +31,7 @@ _APP_SCRIPT = textwrap.dedent(
     import time
 
     from localpost.hosting import run_app
-    from localpost.http import RequestCtx, Response, Router, ServerConfig, http_server
+    from localpost.http import RequestCtx, Response, Routes, ServerConfig, http_server
 
 
     logging.basicConfig(level=logging.INFO)
@@ -55,10 +55,11 @@ _APP_SCRIPT = textwrap.dedent(
         )
 
 
-    router = Router()
-    router.get("/ping")(_root)
-    router.get("/slow")(_slow)
-    router.get("/hello/{name}")(_hello)
+    routes = Routes()
+    routes.get("/ping")(_root)
+    routes.get("/slow")(_slow)
+    routes.get("/hello/{name}")(_hello)
+    router = routes.build()
 
     port = int(os.environ["LP_TEST_PORT"])
     cfg = ServerConfig(host="127.0.0.1", port=port)
