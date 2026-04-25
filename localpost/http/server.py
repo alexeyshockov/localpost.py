@@ -45,6 +45,35 @@ _BAD_REQUEST_RESPONSE = h11.Response(
     ],
 )
 
+_PAYLOAD_TOO_LARGE_BODY = b"Payload Too Large"
+_PAYLOAD_TOO_LARGE_RESPONSE = h11.Response(
+    status_code=413,
+    headers=[
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(_PAYLOAD_TOO_LARGE_BODY)).encode("ascii")),
+        (b"connection", b"close"),
+    ],
+)
+
+
+class BodyTooLarge(Exception):
+    """Raised when an incoming request body would exceed ``ServerConfig.max_body_size``.
+
+    Surfaces both from ``HTTPReqCtx.receive`` (when the handler is reading the body)
+    and from ``HTTPConn``'s drain path (when the handler skipped reading it). The
+    connection loop converts it into a 413 Payload Too Large response.
+    """
+
+
+def _content_length(headers) -> int | None:
+    for name, value in headers:
+        if bytes(name).lower() == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
 
 def emit_handler_error(ctx: HTTPReqCtx) -> None:
     """Best-effort recovery when a request handler raises.
@@ -236,6 +265,10 @@ class HTTPConn:
     parser: h11.Connection = field(default_factory=lambda: h11.Connection(h11.SERVER))
     close_at: float | None = None  # Used only when tracked, to enforce keep-alive and read timeouts
     tracked: bool = False
+    body_bytes_received: int = 0
+    """Cumulative body bytes received for the current request — reset on
+    ``parser.start_next_cycle``. Compared against ``ServerConfig.max_body_size``
+    to enforce the upload cap."""
 
     def close(self) -> None:
         if self.tracked:
@@ -270,6 +303,12 @@ class HTTPConn:
             self.server.logger.exception("Local protocol error from %s", self.addr)
             self._try_send_status(_INTERNAL_ERROR_RESPONSE, _INTERNAL_ERROR_BODY)
             self.close()
+        except BodyTooLarge:
+            self.server.logger.warning(
+                "Request body from %s exceeds max_body_size=%d", self.addr, self.server.config.max_body_size
+            )
+            self._try_send_status(_PAYLOAD_TOO_LARGE_RESPONSE, _PAYLOAD_TOO_LARGE_BODY)
+            self.close()
 
     def _loop(self, h: RequestHandler) -> None:
         parser = self.parser
@@ -280,6 +319,7 @@ class HTTPConn:
                 return
             if parser.our_state is h11.DONE and parser.their_state is h11.DONE:
                 parser.start_next_cycle()
+                self.body_bytes_received = 0
                 self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
             event = parser.next_event()
@@ -293,12 +333,22 @@ class HTTPConn:
                 except BlockingIOError:
                     return  # Wait for it in the selector
                 self.close_at = time.monotonic() + self.server.config.rw_timeout
-            elif isinstance(event, h11.Data | h11.EndOfMessage):
+            elif isinstance(event, h11.Data):
+                self.body_bytes_received += len(event.data)
+                if self.body_bytes_received > self.server.config.max_body_size:
+                    raise BodyTooLarge(self.body_bytes_received)
                 continue  # Drain the request body
+            elif isinstance(event, h11.EndOfMessage):
+                continue
             elif isinstance(event, h11.Request):
+                cl = _content_length(event.headers)
+                if cl is not None and cl > self.server.config.max_body_size:
+                    raise BodyTooLarge(cl)
                 req_ctx = HTTPReqCtx(self.server, self, event)
                 try:
                     h(req_ctx)
+                except BodyTooLarge:
+                    raise  # outer handler emits 413
                 except Exception:
                     self.server.logger.exception("Handler raised for %s %r", event.method, event.target)
                     emit_handler_error(req_ctx)
@@ -375,8 +425,25 @@ class HTTPReqCtx:
         while True:
             event = parser.next_event()
             if event is h11.NEED_DATA:
-                self._conn.receive(size)
+                # Sync handlers can't tolerate BlockingIOError on a non-blocking
+                # socket: switch to a brief blocking read bounded by rw_timeout,
+                # then restore. Borrowed connections are already blocking, so
+                # the settimeout calls are no-ops on the rw_timeout value there.
+                sock = self._conn.sock
+                rw = self._server.config.rw_timeout
+                try:
+                    self._conn.receive(size)
+                except BlockingIOError:
+                    sock.settimeout(rw)
+                    try:
+                        self._conn.receive(size)
+                    finally:
+                        if self._conn.tracked:
+                            sock.settimeout(0)
             elif isinstance(event, h11.Data):
+                self._conn.body_bytes_received += len(event.data)
+                if self._conn.body_bytes_received > self._server.config.max_body_size:
+                    raise BodyTooLarge(self._conn.body_bytes_received)
                 return event.data
             elif isinstance(event, h11.EndOfMessage):
                 return b""

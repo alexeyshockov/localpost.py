@@ -426,6 +426,81 @@ class TestHeadAndPipelining:
         assert b"resp-for-/b" in data
 
 
+# --- Body limit ---------------------------------------------------------------
+
+
+class TestBodyLimit:
+    def test_oversized_content_length_returns_413(self):
+        """Server short-circuits on Content-Length > max_body_size."""
+        captured: dict = {"called": False}
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            captured["called"] = True
+            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        cfg = ServerConfig(host="127.0.0.1", port=0, max_body_size=10)
+        with start_http_server(cfg, handler) as server:
+            stop = threading.Event()
+            t = threading.Thread(
+                target=lambda: _run_until(server, stop),
+                daemon=True,
+            )
+            t.start()
+            try:
+                resp = httpx.post(
+                    f"http://127.0.0.1:{server.port}/",
+                    content=b"x" * 1000,
+                    timeout=2,
+                )
+            finally:
+                stop.set()
+                t.join(timeout=2)
+
+        assert resp.status_code == 413
+        assert resp.text == "Payload Too Large"
+        assert captured["called"] is False  # handler never invoked
+
+    def test_oversized_streaming_body_returns_413(self):
+        """A handler that reads the body sees BodyTooLarge once the cap is crossed."""
+        captured: dict = {"raised": False}
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            try:
+                while ctx.receive():
+                    pass
+            except Exception as e:
+                captured["raised"] = type(e).__name__
+                raise
+
+        cfg = ServerConfig(host="127.0.0.1", port=0, max_body_size=8)
+        with start_http_server(cfg, handler) as server:
+            stop = threading.Event()
+            t = threading.Thread(target=lambda: _run_until(server, stop), daemon=True)
+            t.start()
+            try:
+                # No Content-Length: send chunked to bypass the up-front check.
+                with socket.create_connection(("127.0.0.1", server.port), timeout=3) as sock:
+                    sock.sendall(
+                        b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        b"10\r\n" + (b"x" * 16) + b"\r\n0\r\n\r\n"
+                    )
+                    data = _drain(sock, deadline=2.0)
+            finally:
+                stop.set()
+                t.join(timeout=2)
+
+        assert b"HTTP/1.1 413" in data, f"expected 413, got: {data!r}"
+        assert captured["raised"] == "BodyTooLarge"
+
+
+def _run_until(server, stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            server.run(timeout=0.05)
+        except OSError:
+            return
+
+
 # --- Graceful shutdown -------------------------------------------------------
 
 
