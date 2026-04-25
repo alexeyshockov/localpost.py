@@ -34,7 +34,9 @@ class _ServerCM:
     """Returned by ``serve_in_thread(handler)``; use as a context manager.
 
     Yields the live port; on exit, signals the worker to stop, joins it,
-    and asserts no thread leak.
+    and asserts no thread leak. Uncaught exceptions from the server loop
+    are captured in ``loop_error`` and re-raised on exit unless the test
+    sets ``expect_loop_error = True`` (used to characterize crash paths).
     """
 
     def __init__(self, config: ServerConfig, handler: RequestHandler) -> None:
@@ -43,6 +45,8 @@ class _ServerCM:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._cm = start_http_server(config)
+        self.loop_error: BaseException | None = None
+        self.expect_loop_error: bool = False
 
     def __enter__(self) -> int:
         server = self._cm.__enter__()
@@ -55,6 +59,9 @@ class _ServerCM:
                     server.run(handler, timeout=0.05)
                 except OSError:
                     return  # listening socket closed
+                except BaseException as e:  # noqa: BLE001
+                    self.loop_error = e
+                    return
 
         self._thread = threading.Thread(target=loop, daemon=True)
         self._thread.start()
@@ -69,6 +76,14 @@ class _ServerCM:
             assert not t.is_alive(), "server thread did not stop within 5s"
         finally:
             self._cm.__exit__(exc_type, exc, tb)
+
+        # Surface unexpected loop errors only if the test body succeeded —
+        # otherwise the original failure is more informative.
+        if exc_type is None:
+            if self.loop_error is not None and not self.expect_loop_error:
+                raise self.loop_error
+            if self.loop_error is None and self.expect_loop_error:
+                raise AssertionError("expected a server-loop error but none was raised")
 
 
 @pytest.fixture
