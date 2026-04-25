@@ -6,6 +6,7 @@ from http import HTTPMethod
 from io import BytesIO
 
 import httpx
+import pytest
 
 from localpost.http import (
     RequestCtx,
@@ -388,3 +389,99 @@ class TestRouterBuild:
         # Methods are sorted for a stable header; both methods end up in the header.
         assert router.routes[0].allow_header in ("GET, POST", "POST, GET")
         assert set(router.routes[0].allow_header.split(", ")) == {"GET", "POST"}
+
+    def test_allow_header_sorted_across_many_methods(self):
+        routes = Routes()
+        for m in ("PATCH", "GET", "DELETE", "POST", "PUT"):
+            routes.add(m, "/r", lambda ctx: Response(200, {}, []))
+        router = routes.build()
+        # Allow header: methods sorted lexicographically by value.
+        assert router.routes[0].allow_header == "DELETE, GET, PATCH, POST, PUT"
+
+    def test_duplicate_template_raises(self):
+        """Router.from_routes guards against hand-built paths dicts with duplicate templates.
+
+        ``Routes.add`` dedupes by template string, and two ``URITemplate.parse`` results
+        compare equal (replacing the dict entry on insert), so the only way to hit this
+        branch is to construct two URITemplate instances directly that share a ``.template``
+        but differ in another field. This pins the guard.
+        """
+        import re
+
+        t1 = URITemplate(template="/dup", variable_names=(), _regex=re.compile("^/dup$"))
+        t2 = URITemplate(template="/dup", variable_names=(), _regex=re.compile("^/dup\\Z"))
+        routes = Routes()
+        routes.paths[t1] = {HTTPMethod.GET: lambda ctx: Response(200, {}, [])}
+        routes.paths[t2] = {HTTPMethod.POST: lambda ctx: Response(200, {}, [])}
+        assert len(routes.paths) == 2  # different regex objects → different hash → two keys
+
+        with pytest.raises(ValueError, match="duplicate template"):
+            routes.build()
+
+
+# --- Method dispatch quirks --------------------------------------------------
+
+
+class TestMethodDispatch:
+    def test_options_on_registered_route_is_405(self):
+        """No automatic OPTIONS handling — unregistered method falls through to 405."""
+        routes = Routes()
+        routes.add("GET", "/r", lambda ctx: Response(200, {}, []))
+        router = routes.build()
+
+        status, headers, body = _fake_wsgi(router, "OPTIONS", "/r")
+        assert status.startswith("405")
+        assert body == b"Method Not Allowed"
+        allow = {n.lower(): v for n, v in headers}["allow"]
+        assert allow == "GET"
+
+    def test_unknown_method_string_is_405(self):
+        """A method name outside http.HTTPMethod (e.g., 'FAKEVERB') routes to 405."""
+        routes = Routes()
+        routes.add("GET", "/r", lambda ctx: Response(200, {}, []))
+        router = routes.build()
+
+        status, _, body = _fake_wsgi(router, "FAKEVERB", "/r")
+        assert status.startswith("405")
+        assert body == b"Method Not Allowed"
+
+
+# --- Path-variable encoding ---------------------------------------------------
+
+
+class TestPathVariableEncoding:
+    def test_percent_encoded_value_is_not_decoded(self):
+        """URITemplate matches against the raw path; %20 stays literal in path_args."""
+        routes = Routes()
+        captured: dict = {}
+
+        @routes.get("/hello/{name}")
+        def hello(ctx: RequestCtx) -> Response:
+            captured["name"] = ctx.path_args["name"]
+            return Response(200, {}, [b"ok"])
+
+        assert hello
+        router = routes.build()
+
+        status, _, _ = _fake_wsgi(router, "GET", "/hello/Bob%20Smith")
+        assert status.startswith("200")
+        assert captured["name"] == "Bob%20Smith"
+
+    def test_value_with_dots_and_dashes_matches(self):
+        """Common id formats (uuid, dotted) match without escaping."""
+        routes = Routes()
+        captured: dict = {}
+
+        @routes.get("/files/{id}")
+        def get_file(ctx: RequestCtx) -> Response:
+            captured["id"] = ctx.path_args["id"]
+            return Response(200, {}, [b"ok"])
+
+        assert get_file
+        router = routes.build()
+
+        for raw_id in ("a-b-c", "1.2.3", "550e8400-e29b-41d4-a716-446655440000"):
+            captured.clear()
+            status, _, _ = _fake_wsgi(router, "GET", f"/files/{raw_id}")
+            assert status.startswith("200")
+            assert captured["id"] == raw_id
