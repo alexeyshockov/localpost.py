@@ -142,6 +142,7 @@ examples = [
 tests = [
     "pytest ~=9.0",
     "pytest-xdist",
+    "pytest-timeout ~=2.3",
     "setproctitle",  # For pytest-xdist, to have descriptive process names
 ]
 tests-unit = [
@@ -243,6 +244,7 @@ build-backend.module-name = "localpost"
 [tool.pytest.ini_options]
 anyio_mode = "auto"
 #addopts = "-q -m 'not integration'"
+timeout = 30
 testpaths = [
     "tests",
 ]
