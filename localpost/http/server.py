@@ -20,13 +20,9 @@ from typing import final
 
 import h11
 
-from localpost import threadtools
 from localpost.http.config import DEFAULT_BUFFER_SIZE, LOGGER_NAME, ServerConfig
 
 __all__ = ["start_http_server", "HTTPReqCtx", "RequestHandler"]
-
-
-RW_TIMEOUT = threadtools.CHECK_TIMEOUT
 
 
 @contextmanager
@@ -101,17 +97,23 @@ class Server:
         sock = conn.sock
         with self._lock:
             self.selector.unregister(sock)
-        sock.settimeout(RW_TIMEOUT)
+        sock.settimeout(self.config.rw_timeout)
         conn.tracked = False
 
-    def run(self, h: RequestHandler) -> None:
-        """One iteration of the server loop. Should be called repeatedly until the server is stopped."""
+    def run(self, h: RequestHandler, /, *, timeout: float | None = None) -> None:
+        """One iteration of the server loop. Should be called repeatedly until the server is stopped.
+
+        ``timeout`` bounds the underlying ``selector.select`` call — it caps how long this
+        method blocks before returning to the caller, giving the caller a chance to check
+        for shutdown / cancellation. Defaults to ``config.rw_timeout``.
+        """
+        if timeout is None:
+            timeout = self.config.rw_timeout
         server_sock = self.sock
-        threadtools.check_cancelled()
         self._cleanup_stale()
         # TODO Take iteration payload (pending connections) and set it empty, under the lock
         # TODO Add selector.select() to the current payload (chain)
-        for key, _ in self.selector.select(timeout=threadtools.CHECK_TIMEOUT):
+        for key, _ in self.selector.select(timeout=timeout):
             if key.fileobj is server_sock:
                 client_sock, client_addr = server_sock.accept()
                 conn = HTTPConn(self, client_sock, client_addr)
@@ -183,7 +185,7 @@ class HTTPConn:
                     self.receive()
                 except BlockingIOError:
                     return  # Wait for it in the selector
-                self.close_at = time.monotonic() + RW_TIMEOUT
+                self.close_at = time.monotonic() + self.server.config.rw_timeout
             elif isinstance(event, h11.Data | h11.EndOfMessage):
                 continue  # Drain the request body
             elif isinstance(event, h11.Request):

@@ -21,8 +21,9 @@ class ServerConfig:
     port: int = 8000
     backlog: int = 1024
     """Maximum number of queued (in the kernel) connections."""
-    # rw_timeout: float = threadtools.CHECK_TIMEOUT
-    # """Timeout (seconds) for receive/send operations on a client connection."""
+    rw_timeout: float = 1.0
+    """Timeout (seconds) for receive/send operations on a borrowed client connection,
+    and for the keep-alive read deadline extended after each chunk arrives."""
     keep_alive_timeout: float = 15.0  # TODO add it to the response
     """Timeout (seconds) for idle connections."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB

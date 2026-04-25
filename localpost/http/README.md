@@ -20,11 +20,8 @@ pip install localpost[http-server]
 
 ```python
 import h11
-from localpost import threadtools
 from localpost.http.config import ServerConfig
 from localpost.http.server import HTTPReqCtx, start_http_server
-
-threadtools.check_cancelled = lambda: None   # not running under hosting
 
 
 def simple_app(ctx: HTTPReqCtx):
