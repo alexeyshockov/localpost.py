@@ -5,76 +5,47 @@ from __future__ import annotations
 import threading
 
 import httpx
-import pytest
 
-from localpost import threadtools
-from localpost.http import ServerConfig, start_http_server, wrap_wsgi
-
-
-@pytest.fixture(autouse=True)
-def _disable_cancellation_check(monkeypatch):
-    monkeypatch.setattr(threadtools, "check_cancelled", lambda: None)
-
-
-@pytest.fixture
-def server_config():
-    return ServerConfig(host="127.0.0.1", port=0)
-
-
-def _run_iterations(server, handler, n=20):
-    for _ in range(n):
-        try:
-            server.run(handler)
-        except (OSError, ValueError, AttributeError):
-            return
+from localpost.http import wrap_wsgi
 
 
 class TestWrapWSGI:
-    def test_simple_200(self, server_config):
+    def test_simple_200(self, serve_in_thread):
         def app(environ, start_response):
             start_response("200 OK", [("Content-Type", "text/plain"), ("Content-Length", "5")])
             return [b"hello"]
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/")
-            t.join(timeout=5)
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
 
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "text/plain"
         assert resp.text == "hello"
 
-    def test_multi_chunk_response(self, server_config):
+    def test_multi_chunk_response(self, serve_in_thread):
         def app(environ, start_response):
             start_response("200 OK", [("Content-Type", "text/plain"), ("Transfer-Encoding", "chunked")])
             return [b"foo", b"bar", b"baz"]
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/")
-            t.join(timeout=5)
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
 
         assert resp.status_code == 200
         assert resp.content == b"foobarbaz"
 
-    def test_404(self, server_config):
+    def test_404(self, serve_in_thread):
         def app(environ, start_response):
             body = b"nope"
             start_response("404 Not Found", [("Content-Type", "text/plain"), ("Content-Length", str(len(body)))])
             return [body]
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/anything")
-            t.join(timeout=5)
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/anything", timeout=5)
 
         assert resp.status_code == 404
         assert resp.text == "nope"
 
-    def test_environ_path_and_query(self, server_config):
+    def test_environ_path_and_query(self, serve_in_thread):
         seen = {}
 
         def app(environ, start_response):
@@ -85,22 +56,20 @@ class TestWrapWSGI:
             start_response("200 OK", [("Content-Type", "text/plain"), ("Content-Length", "2")])
             return [b"ok"]
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
+        with serve_in_thread(wrap_wsgi(app)) as port:
             httpx.post(
-                f"http://127.0.0.1:{server.port}/api/items?q=1",
+                f"http://127.0.0.1:{port}/api/items?q=1",
                 content=b"",
                 headers={"Content-Type": "application/json"},
+                timeout=5,
             )
-            t.join(timeout=5)
 
         assert seen["method"] == "POST"
         assert seen["path"] == "/api/items"
         assert seen["query"] == "q=1"
         assert seen["content_type"] == "application/json"
 
-    def test_request_body_streaming(self, server_config):
+    def test_request_body_streaming(self, serve_in_thread):
         received = bytearray()
 
         def app(environ, start_response):
@@ -113,17 +82,14 @@ class TestWrapWSGI:
             start_response("200 OK", [("Content-Type", "text/plain"), ("Content-Length", str(len(received)))])
             return [bytes(received)]
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
-            resp = httpx.post(f"http://127.0.0.1:{server.port}/", content=b"hello wsgi body")
-            t.join(timeout=5)
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            resp = httpx.post(f"http://127.0.0.1:{port}/", content=b"hello wsgi body", timeout=5)
 
         assert resp.status_code == 200
         assert resp.content == b"hello wsgi body"
         assert bytes(received) == b"hello wsgi body"
 
-    def test_generator_close_called(self, server_config):
+    def test_generator_close_called(self, serve_in_thread):
         close_called = threading.Event()
 
         class Body:
@@ -146,11 +112,8 @@ class TestWrapWSGI:
             )
             return Body()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, wrap_wsgi(app)))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/")
-            t.join(timeout=5)
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
 
         assert resp.status_code == 200
         assert resp.content == b"onetwo"

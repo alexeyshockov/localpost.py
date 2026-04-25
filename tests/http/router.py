@@ -2,22 +2,17 @@
 
 from __future__ import annotations
 
-import threading
 from http import HTTPMethod
 from io import BytesIO
 
 import httpx
-import pytest
 
-from localpost import threadtools
 from localpost.http import (
     RequestCtx,
     Response,
     Router,
     Routes,
-    ServerConfig,
     URITemplate,
-    start_http_server,
 )
 
 # --- URITemplate ----------------------------------------------------------
@@ -186,26 +181,8 @@ class TestRouterWSGI:
 # --- Router.as_handler (native) -------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _disable_cancellation_check(monkeypatch):
-    monkeypatch.setattr(threadtools, "check_cancelled", lambda: None)
-
-
-@pytest.fixture
-def server_config():
-    return ServerConfig(host="127.0.0.1", port=0)
-
-
-def _run_iterations(server, handler, n=15):
-    for _ in range(n):
-        try:
-            server.run(handler)
-        except (OSError, ValueError, AttributeError):
-            return  # Server context manager exited; selector/socket closed
-
-
 class TestRouterAsHandler:
-    def test_dispatch_200(self, server_config):
+    def test_dispatch_200(self, serve_in_thread):
         routes = Routes()
 
         @routes.get("/ping")
@@ -215,16 +192,13 @@ class TestRouterAsHandler:
         assert ping
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/ping")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/ping", timeout=5)
 
         assert resp.status_code == 200
         assert resp.text == "pong"
 
-    def test_dispatch_path_params(self, server_config):
+    def test_dispatch_path_params(self, serve_in_thread):
         routes = Routes()
         captured: dict = {}
 
@@ -238,29 +212,23 @@ class TestRouterAsHandler:
         assert get_book
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            httpx.get(f"http://127.0.0.1:{server.port}/books/xyz-123")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            httpx.get(f"http://127.0.0.1:{port}/books/xyz-123", timeout=5)
 
         assert captured["book_id"] == "xyz-123"
         assert captured["method"] == HTTPMethod.GET
         assert captured["matched_template"] == "/books/{book_id}"
 
-    def test_404(self, server_config):
+    def test_404(self, serve_in_thread):
         router = Routes().build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/does-not-exist")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/does-not-exist", timeout=5)
 
         assert resp.status_code == 404
         assert resp.text == "Not Found"
 
-    def test_405_with_allow_header(self, server_config):
+    def test_405_with_allow_header(self, serve_in_thread):
         routes = Routes()
 
         @routes.post("/resource")
@@ -270,16 +238,13 @@ class TestRouterAsHandler:
         assert _post
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/resource")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/resource", timeout=5)
 
         assert resp.status_code == 405
         assert resp.headers.get("allow") == "POST"
 
-    def test_query_parsing(self, server_config):
+    def test_query_parsing(self, serve_in_thread):
         routes = Routes()
         captured: dict = {}
 
@@ -292,16 +257,13 @@ class TestRouterAsHandler:
         assert search
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            httpx.get(f"http://127.0.0.1:{server.port}/search?q=books")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            httpx.get(f"http://127.0.0.1:{port}/search?q=books", timeout=5)
 
         assert captured["q"] == "books"
         assert captured["raw"] == "q=books"
 
-    def test_streaming_response(self, server_config):
+    def test_streaming_response(self, serve_in_thread):
         routes = Routes()
 
         @routes.get("/stream")
@@ -315,16 +277,13 @@ class TestRouterAsHandler:
         assert stream
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            resp = httpx.get(f"http://127.0.0.1:{server.port}/stream")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/stream", timeout=5)
 
         assert resp.status_code == 200
         assert resp.content == b"firstsecondthird"
 
-    def test_handler_sees_request_headers(self, server_config):
+    def test_handler_sees_request_headers(self, serve_in_thread):
         routes = Routes()
         captured: dict = {}
 
@@ -336,15 +295,12 @@ class TestRouterAsHandler:
         assert hdr
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler()))
-            t.start()
-            httpx.get(f"http://127.0.0.1:{server.port}/hdr", headers={"X-Custom": "yo"})
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            httpx.get(f"http://127.0.0.1:{port}/hdr", headers={"X-Custom": "yo"}, timeout=5)
 
         assert captured["x_custom"] == "yo"
 
-    def test_ctx_can_read_body(self, server_config):
+    def test_ctx_can_read_body(self, serve_in_thread):
         routes = Routes()
         captured: dict = {}
 
@@ -356,11 +312,8 @@ class TestRouterAsHandler:
         assert echo
         router = routes.build()
 
-        with start_http_server(server_config) as server:
-            t = threading.Thread(target=_run_iterations, args=(server, router.as_handler(), 25))
-            t.start()
-            resp = httpx.post(f"http://127.0.0.1:{server.port}/echo", content=b"hello body")
-            t.join(timeout=5)
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.post(f"http://127.0.0.1:{port}/echo", content=b"hello body", timeout=5)
 
         assert resp.status_code == 200
         assert captured["body"] == b"hello body"

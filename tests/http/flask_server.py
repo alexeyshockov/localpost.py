@@ -5,46 +5,14 @@ from __future__ import annotations
 import threading
 
 import httpx
-import pytest
 from flask import Flask, Response, stream_with_context
 from flask import request as flask_request
 
-from localpost import threadtools
-from localpost.http import ServerConfig, start_http_server
 from localpost.http.flask import flask_handler
 
 
-@pytest.fixture(autouse=True)
-def _disable_cancellation_check(monkeypatch):
-    monkeypatch.setattr(threadtools, "check_cancelled", lambda: None)
-
-
-@pytest.fixture
-def server_config():
-    return ServerConfig(host="127.0.0.1", port=0)
-
-
-def _run_iterations(server, handler, n=20):
-    for _ in range(n):
-        try:
-            server.run(handler)
-        except (OSError, ValueError, AttributeError):
-            return
-
-
-def _serve(server_config, app: Flask, request_fn):
-    """Run the server in a thread, call request_fn(port), return whatever it returns."""
-    with start_http_server(server_config) as server:
-        t = threading.Thread(target=_run_iterations, args=(server, flask_handler(app)))
-        t.start()
-        try:
-            return request_fn(server.port)
-        finally:
-            t.join(timeout=5)
-
-
 class TestFlaskHandler:
-    def test_simple_200(self, server_config):
+    def test_simple_200(self, serve_in_thread):
         app = Flask(__name__)
 
         @app.route("/")
@@ -53,11 +21,13 @@ class TestFlaskHandler:
 
         assert index
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
+
         assert resp.status_code == 200
         assert resp.text == "hello flask"
 
-    def test_path_parameters(self, server_config):
+    def test_path_parameters(self, serve_in_thread):
         app = Flask(__name__)
 
         @app.route("/hello/<name>")
@@ -66,11 +36,13 @@ class TestFlaskHandler:
 
         assert hello
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/hello/alice"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/hello/alice", timeout=5)
+
         assert resp.status_code == 200
         assert resp.text == "hi alice"
 
-    def test_post_body(self, server_config):
+    def test_post_body(self, serve_in_thread):
         app = Flask(__name__)
         captured: dict = {}
 
@@ -81,22 +53,22 @@ class TestFlaskHandler:
 
         assert echo
 
-        resp = _serve(
-            server_config,
-            app,
-            lambda port: httpx.post(f"http://127.0.0.1:{port}/echo", content=b"payload"),
-        )
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.post(f"http://127.0.0.1:{port}/echo", content=b"payload", timeout=5)
+
         assert captured.get("body") == b"payload", f"status={resp.status_code}, body={resp.content!r}"
         assert resp.status_code == 200
         assert resp.content == b"payload"
 
-    def test_flask_404(self, server_config):
+    def test_flask_404(self, serve_in_thread):
         app = Flask(__name__)
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/missing"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/missing", timeout=5)
+
         assert resp.status_code == 404
 
-    def test_view_exception_returns_500(self, server_config):
+    def test_view_exception_returns_500(self, serve_in_thread):
         app = Flask(__name__)
 
         @app.route("/boom")
@@ -105,10 +77,12 @@ class TestFlaskHandler:
 
         assert boom
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/boom"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/boom", timeout=5)
+
         assert resp.status_code == 500
 
-    def test_streaming_without_stream_with_context(self, server_config):
+    def test_streaming_without_stream_with_context(self, serve_in_thread):
         """Key behavior test: generator uses flask.request without @stream_with_context."""
         app = Flask(__name__)
 
@@ -124,18 +98,17 @@ class TestFlaskHandler:
 
         assert stream
 
-        resp = _serve(
-            server_config,
-            app,
-            lambda port: httpx.get(
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(
                 f"http://127.0.0.1:{port}/stream",
                 headers={"User-Agent": "test-client"},
-            ),
-        )
+                timeout=5,
+            )
+
         assert resp.status_code == 200
         assert resp.text == "ua=test-client\n"
 
-    def test_streaming_with_stream_with_context_still_works(self, server_config):
+    def test_streaming_with_stream_with_context_still_works(self, serve_in_thread):
         """Backwards compat: @stream_with_context is a no-op but must not break."""
         app = Flask(__name__)
 
@@ -149,18 +122,17 @@ class TestFlaskHandler:
 
         assert stream_ctx
 
-        resp = _serve(
-            server_config,
-            app,
-            lambda port: httpx.get(
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(
                 f"http://127.0.0.1:{port}/stream-ctx",
                 headers={"User-Agent": "test-client"},
-            ),
-        )
+                timeout=5,
+            )
+
         assert resp.status_code == 200
         assert resp.text == "ua=test-client\n"
 
-    def test_teardown_runs_after_body_sent(self, server_config):
+    def test_teardown_runs_after_body_sent(self, serve_in_thread):
         """teardown_request fires AFTER response iteration completes, not before.
 
         This is the opposite of standard WSGI Flask behavior.
@@ -192,7 +164,9 @@ class TestFlaskHandler:
 
         assert ordering
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/ordering"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/ordering", timeout=5)
+
         assert resp.status_code == 200
         assert resp.content == b"onetwo"
 
@@ -201,7 +175,7 @@ class TestFlaskHandler:
             captured = list(events)
         assert captured == ["view-start", "chunk-1", "chunk-2", "chunk-end", "teardown"]
 
-    def test_response_headers_are_forwarded(self, server_config):
+    def test_response_headers_are_forwarded(self, serve_in_thread):
         app = Flask(__name__)
 
         @app.route("/with-header")
@@ -210,7 +184,9 @@ class TestFlaskHandler:
 
         assert with_header
 
-        resp = _serve(server_config, app, lambda port: httpx.get(f"http://127.0.0.1:{port}/with-header"))
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/with-header", timeout=5)
+
         assert resp.status_code == 200
         assert resp.headers.get("x-custom") == "yes"
         assert resp.headers.get("content-type", "").startswith("text/plain")
