@@ -31,9 +31,9 @@ def simple_app(ctx: HTTPReqCtx):
     )
 
 
-with start_http_server(ServerConfig()) as server:
+with start_http_server(ServerConfig(), simple_app) as server:
     while True:
-        server.run(simple_app)
+        server.run()
 ```
 
 See [`examples/http/simple_server.py`](../../examples/http/simple_server.py),
@@ -51,14 +51,16 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 
 ## Key concepts
 
-- **`ServerConfig`** — host, port, backlog, `keep_alive_timeout`, `max_body_size`.
-- **`start_http_server(config)`** — context manager; yields a `Server` bound to
-  a non-blocking listening socket with a `selectors` poller.
+- **`ServerConfig`** — host, port, backlog, `select_timeout`, `rw_timeout`,
+  `keep_alive_timeout`, `max_body_size`.
+- **`start_http_server(config, handler)`** — context manager; yields a `Server`
+  bound to a non-blocking listening socket with a `selectors` poller. The
+  handler is fixed for the server's lifetime.
 - **`HTTPReqCtx`** — per-request context carrying the parsed h11 request, the
   raw socket, headers, and `complete(response, body)`. Request bodies are
   streamed via `receive(n_bytes)`.
 - **`RequestHandler = Callable[[HTTPReqCtx], None]`** — the handler
-  interface. The server calls `server.run(handler)` once per accepted request.
+  interface. `Server.run()` dispatches each accepted request to it.
 - **`URITemplate`** — RFC 6570 Level 1 only (`/books/{id}` style variables,
   matched with a generated regex). `match(uri) → dict | None`.
 - **`Routes`** — mutable builder. Accumulate routes via decorators
@@ -76,7 +78,7 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
-| `start_http_server(cfg)`  | Context manager yielding a `Server`        |
+| `start_http_server(cfg, handler)` | Context manager yielding a `Server` bound to ``handler`` |
 | `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
 

@@ -26,7 +26,12 @@ __all__ = ["start_http_server", "HTTPReqCtx", "RequestHandler"]
 
 
 @contextmanager
-def start_http_server(config: ServerConfig) -> Iterator[Server]:
+def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Iterator[Server]:
+    """Open a listening socket and yield a ``Server`` bound to ``handler``.
+
+    The handler is fixed for the lifetime of the server — every accepted request
+    is dispatched to it. Per-iteration overrides are not supported.
+    """
     logger = logging.getLogger(LOGGER_NAME)
     server_sock = socket.create_server(
         (config.host, config.port),
@@ -40,7 +45,7 @@ def start_http_server(config: ServerConfig) -> Iterator[Server]:
 
     # server_sock.close()  # Safe to call it from another thread, will cause accept() to raise OSError
     with closing(server_sock), closing(selector):
-        server = Server(config, logger, server_sock, selector)
+        server = Server(config, handler, logger, server_sock, selector)
         # logger.info(f"Serving on {config.host}:{server.port}")
         logger.info("Serving on %s:%d", config.host, server.port)
         yield server
@@ -57,6 +62,7 @@ class Server:
     def __init__(
         self,
         config: ServerConfig,
+        handler: RequestHandler,
         logger: logging.Logger,
         server_sock: socket.socket,
         selector: selectors.BaseSelector,
@@ -70,6 +76,7 @@ class Server:
         """
         self.selector = selector
         self.config = config
+        self.handler = handler
         self.logger = logger
         self._lock = threading.Lock()
 
@@ -100,16 +107,17 @@ class Server:
         sock.settimeout(self.config.rw_timeout)
         conn.tracked = False
 
-    def run(self, h: RequestHandler, /, *, timeout: float | None = None) -> None:
+    def run(self, *, timeout: float | None = None) -> None:
         """One iteration of the server loop. Should be called repeatedly until the server is stopped.
 
         ``timeout`` bounds the underlying ``selector.select`` call — it caps how long this
         method blocks before returning to the caller, giving the caller a chance to check
-        for shutdown / cancellation. Defaults to ``config.rw_timeout``.
+        for shutdown / cancellation. Defaults to ``config.select_timeout``.
         """
         if timeout is None:
-            timeout = self.config.rw_timeout
+            timeout = self.config.select_timeout
         server_sock = self.sock
+        h = self.handler
         self._cleanup_stale()
         # TODO Take iteration payload (pending connections) and set it empty, under the lock
         # TODO Add selector.select() to the current payload (chain)

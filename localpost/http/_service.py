@@ -60,11 +60,11 @@ def http_server(
                 raise
 
         def run_server() -> None:
-            with start_http_server(config) as server:
+            with start_http_server(config, dispatch) as server:
                 lt.set_started()
                 while not lt.shutting_down.is_set():
                     from_thread.check_cancelled()
-                    server.run(dispatch)
+                    server.run()
 
         return to_thread.run_sync(run_server, limiter=CapacityLimiter(1))
 

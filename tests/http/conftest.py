@@ -44,19 +44,18 @@ class _ServerCM:
         self._handler = handler
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._cm = start_http_server(config)
+        self._cm = start_http_server(config, handler)
         self.loop_error: BaseException | None = None
         self.expect_loop_error: bool = False
 
     def __enter__(self) -> int:
         server = self._cm.__enter__()
-        handler = self._handler
         stop = self._stop
 
         def loop() -> None:
             while not stop.is_set():
                 try:
-                    server.run(handler, timeout=0.05)
+                    server.run(timeout=0.05)
                 except OSError:
                     return  # listening socket closed
                 except BaseException as e:  # noqa: BLE001

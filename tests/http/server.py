@@ -31,22 +31,30 @@ def _drain(sock: socket.socket, deadline: float = 2.0) -> bytes:
 # --- Listening-socket lifecycle (no requests) ---------------------------------
 
 
+def _noop_handler(ctx: HTTPReqCtx) -> None:
+    pass
+
+
 class TestStartHttpServer:
     def test_creates_server_with_auto_port(self):
-        with start_http_server(ServerConfig(host="127.0.0.1", port=0)) as server:
+        with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
             assert server.port > 0
             assert server.port != 8000  # auto-assigned, should differ from the default
 
     def test_server_socket_is_listening(self):
-        with start_http_server(ServerConfig(host="127.0.0.1", port=0)) as server:
+        with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
             with socket.create_connection(("127.0.0.1", server.port), timeout=2):
                 pass
 
     def test_server_socket_closed_after_context(self):
-        with start_http_server(ServerConfig(host="127.0.0.1", port=0)) as server:
+        with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
             port = server.port
         with pytest.raises(ConnectionRefusedError):
             socket.create_connection(("127.0.0.1", port), timeout=1)
+
+    def test_handler_stored_on_server(self):
+        with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
+            assert server.handler is _noop_handler
 
 
 # --- Request / response basics -----------------------------------------------

@@ -10,9 +10,9 @@ def _main():
     def simple_app(ctx: HTTPReqCtx):
         ctx.complete(h11.Response(status_code=200, headers=[(b"Content-Type", b"text/plain")]), b"Hello, World!\n")
 
-    with start_http_server(ServerConfig()) as server:
+    with start_http_server(ServerConfig(), simple_app) as server:
         while True:
-            server.run(simple_app)
+            server.run()
 
 
 if __name__ == "__main__":
