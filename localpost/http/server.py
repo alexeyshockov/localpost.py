@@ -55,6 +55,16 @@ _PAYLOAD_TOO_LARGE_RESPONSE = h11.Response(
     ],
 )
 
+_REQUEST_TIMEOUT_BODY = b"Request Timeout"
+_REQUEST_TIMEOUT_RESPONSE = h11.Response(
+    status_code=408,
+    headers=[
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(_REQUEST_TIMEOUT_BODY)).encode("ascii")),
+        (b"connection", b"close"),
+    ],
+)
+
 
 class BodyTooLarge(Exception):
     """Raised when an incoming request body would exceed ``ServerConfig.max_body_size``.
@@ -163,9 +173,37 @@ class Server:
 
     def _cleanup_stale(self):
         with self._lock:
-            for conn in list(self._find_stale()):
-                self.selector.unregister(conn.sock)
-                conn.close()  # TODO Send 408 Request Timeout with Connection: close, then close the socket
+            stale = list(self._find_stale())
+            for conn in stale:
+                try:
+                    self.selector.unregister(conn.sock)
+                except (KeyError, ValueError):
+                    pass
+                conn.tracked = False
+        # Drop the lock for any I/O — closing a socket can block, and we don't
+        # want to hold the selector lock while talking to the kernel.
+        for conn in stale:
+            # Stalled mid-request (some bytes received but no complete request
+            # yet, and no response started) gets a 408; idle keep-alive gets
+            # silently dropped.
+            if not conn.idle and conn.parser.our_state is h11.IDLE:
+                conn.sock.settimeout(self.config.rw_timeout)
+                try:
+                    payload = conn.parser.send(_REQUEST_TIMEOUT_RESPONSE)
+                    if payload:
+                        conn.sock.sendall(payload)
+                    payload = conn.parser.send(h11.Data(data=_REQUEST_TIMEOUT_BODY))
+                    if payload:
+                        conn.sock.sendall(payload)
+                    payload = conn.parser.send(h11.EndOfMessage())
+                    if payload:
+                        conn.sock.sendall(payload)
+                except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
+                    pass
+            try:
+                conn.sock.close()
+            except OSError:
+                pass
 
     # TODO Add self-pipe wakeup trick and a queue
     def track(self, conn: HTTPConn) -> None:
@@ -269,6 +307,11 @@ class HTTPConn:
     """Cumulative body bytes received for the current request — reset on
     ``parser.start_next_cycle``. Compared against ``ServerConfig.max_body_size``
     to enforce the upload cap."""
+    idle: bool = True
+    """``True`` between requests (after ``start_next_cycle``) or before the
+    first byte arrives. Flips to ``False`` once any byte has been received
+    for the current request. Distinguishes idle keep-alive (close silently)
+    from a stalled mid-request (emit 408 Request Timeout)."""
 
     def close(self) -> None:
         if self.tracked:
@@ -280,6 +323,8 @@ class HTTPConn:
         self.parser.receive_data(data)
         if not data:
             self.recv_closed = True
+        else:
+            self.idle = False
 
     # Helper method when a req (conn) is borrowed
     def send(self, event: h11.InformationalResponse | h11.Response | h11.Data | h11.EndOfMessage) -> None:
@@ -316,10 +361,11 @@ class HTTPConn:
         while self.tracked:
             if parser.our_state is h11.MUST_CLOSE:
                 self.close()  # TODO Proper half close, later
-                return
+                return  # close() already unregisters from the selector
             if parser.our_state is h11.DONE and parser.their_state is h11.DONE:
                 parser.start_next_cycle()
                 self.body_bytes_received = 0
+                self.idle = True
                 self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
             event = parser.next_event()

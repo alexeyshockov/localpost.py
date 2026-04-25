@@ -426,6 +426,63 @@ class TestHeadAndPipelining:
         assert b"resp-for-/b" in data
 
 
+# --- Stale-connection cleanup ------------------------------------------------
+
+
+class TestStaleCleanup:
+    def test_idle_keep_alive_silently_closed_after_timeout(self):
+        """An idle keep-alive client sees an EOF (no 408) once keep_alive_timeout elapses."""
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            ctx.complete(
+                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
+                b"ok",
+            )
+
+        cfg = ServerConfig(host="127.0.0.1", port=0, keep_alive_timeout=0.1)
+        with start_http_server(cfg, handler) as server:
+            stop = threading.Event()
+            t = threading.Thread(target=lambda: _run_until(server, stop), daemon=True)
+            t.start()
+            try:
+                with socket.create_connection(("127.0.0.1", server.port), timeout=2) as sock:
+                    # First request — server then keeps the connection alive.
+                    sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                    _drain(sock, deadline=0.3)
+                    # Now sit idle. After keep_alive_timeout (0.1s) + a few iterations,
+                    # _cleanup_stale should silently close the conn.
+                    sock.settimeout(2.0)
+                    data = sock.recv(64)
+            finally:
+                stop.set()
+                t.join(timeout=2)
+
+        assert data == b"", f"expected EOF on idle close, got: {data!r}"
+
+    def test_mid_request_stale_returns_408(self):
+        """Client starts sending headers and stops; server emits 408 once stale."""
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        cfg = ServerConfig(host="127.0.0.1", port=0, keep_alive_timeout=0.1, rw_timeout=0.1)
+        with start_http_server(cfg, handler) as server:
+            stop = threading.Event()
+            t = threading.Thread(target=lambda: _run_until(server, stop), daemon=True)
+            t.start()
+            try:
+                with socket.create_connection(("127.0.0.1", server.port), timeout=2) as sock:
+                    # Send only part of a request and then sit idle.
+                    sock.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n")
+                    sock.settimeout(2.0)
+                    data = _drain(sock, deadline=1.5)
+            finally:
+                stop.set()
+                t.join(timeout=2)
+
+        assert b"HTTP/1.1 408" in data, f"expected 408 in response, got: {data!r}"
+
+
 # --- Body limit ---------------------------------------------------------------
 
 
