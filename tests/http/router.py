@@ -419,13 +419,13 @@ class TestRouterBuild:
         assert body == b"Not Found"
 
     def test_build_is_idempotent_snapshot(self):
-        """Building twice produces equivalent routers with the same templates tuple."""
+        """Building twice produces equivalent routers with the same routes order."""
         routes = Routes()
         routes.add("GET", "/a", lambda ctx: Response(200, {}, []))
         routes.add("GET", "/b", lambda ctx: Response(200, {}, []))
         r1 = routes.build()
         r2 = routes.build()
-        assert [t.template for t in r1.templates] == [t.template for t in r2.templates]
+        assert [r.template.template for r in r1.routes] == [r.template.template for r in r2.routes]
 
     def test_allow_header_precomputed(self):
         routes = Routes()
@@ -433,5 +433,5 @@ class TestRouterBuild:
         routes.add("POST", "/x", lambda ctx: Response(200, {}, []))
         router = routes.build()
         # Methods are sorted for a stable header; both methods end up in the header.
-        assert router.allow_headers[0] in ("GET, POST", "POST, GET")
-        assert set(router.allow_headers[0].split(", ")) == {"GET", "POST"}
+        assert router.routes[0].allow_header in ("GET, POST", "POST, GET")
+        assert set(router.routes[0].allow_header.split(", ")) == {"GET", "POST"}

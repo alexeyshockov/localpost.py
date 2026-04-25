@@ -3,6 +3,7 @@ from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
     RequestCtx,
     Response,
+    Route,
     Router,
     Routes,
     URITemplate,
@@ -24,6 +25,7 @@ __all__ = [
     # router
     "Router",
     "Routes",
+    "Route",
     "URITemplate",
     "RequestCtx",
     "Response",

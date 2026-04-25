@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from http import HTTPMethod
+from http.client import responses as _http_phrases
 from typing import Self, final
 from urllib.parse import parse_qs
 
@@ -20,6 +21,7 @@ __all__ = [
     "RequestCtx",
     "Response",
     "RequestHandler",
+    "Route",
     "Routes",
     "Router",
 ]
@@ -104,6 +106,22 @@ RequestHandler = Callable[[RequestCtx], Response]
 
 
 @final
+@dataclass(frozen=True, eq=False, slots=True)
+class Route:
+    """One compiled route inside a :class:`Router`."""
+
+    template: URITemplate
+    methods: Mapping[HTTPMethod, RequestHandler]
+    """Method → handler table for this template."""
+
+    allow_header: str
+    """Pre-rendered ``Allow`` header value (e.g. ``"GET, POST"``)."""
+
+    _group_prefix: str
+    """Internal: the named-group prefix this route uses inside the combined regex."""
+
+
+@final
 @dataclass(eq=False, slots=True)
 class Routes:
     """Mutable route builder. Accumulate routes via decorators, then ``build()`` a Router.
@@ -162,17 +180,10 @@ class Router:
     an implementation detail — treat the class as read-only outside of ``from_routes``.
     """
 
-    templates: tuple[URITemplate, ...]
-    """Templates in dispatch order — longest literal prefix first, stable on ties."""
-
-    methods: tuple[Mapping[HTTPMethod, RequestHandler], ...]
-    """Per-template method → handler table; parallel to :attr:`templates`."""
-
-    allow_headers: tuple[str, ...]
-    """Pre-rendered ``Allow`` header value per template (e.g. ``"GET, POST"``)."""
+    routes: tuple[Route, ...]
+    """Routes in dispatch order — longest literal prefix first, stable on ties."""
 
     _regex: re.Pattern[str]
-    _group_prefixes: tuple[str, ...]
 
     @classmethod
     def from_routes(cls, routes: Routes) -> Self:
@@ -190,30 +201,29 @@ class Router:
             reverse=True,
         )
 
-        templates: list[URITemplate] = []
-        methods_list: list[Mapping[HTTPMethod, RequestHandler]] = []
-        allow_headers: list[str] = []
-        group_prefixes: list[str] = []
+        compiled_routes: list[Route] = []
         alternatives: list[str] = []
 
         for i, (tmpl, method_map) in enumerate(ordered):
             prefix = f"r{i}"
-            templates.append(tmpl)
-            # Freeze the handler map at the type level (still a plain dict underneath,
-            # but exposed as Mapping — external mutation is a type error).
-            methods_list.append(dict(method_map))
-            allow_headers.append(", ".join(m.value for m in sorted(method_map, key=lambda hm: hm.value)))
-            group_prefixes.append(prefix)
+            allow_header = ", ".join(m.value for m in sorted(method_map, key=lambda hm: hm.value))
+            compiled_routes.append(
+                Route(
+                    template=tmpl,
+                    # Freeze the handler map at the type level (still a plain dict
+                    # underneath, but exposed as Mapping — external mutation is a type error).
+                    methods=dict(method_map),
+                    allow_header=allow_header,
+                    _group_prefix=prefix,
+                )
+            )
             alternatives.append(f"(?P<{prefix}>{_reprefixed_regex_source(tmpl, prefix)})")
 
         combined = re.compile("^(?:" + "|".join(alternatives) + ")$") if alternatives else re.compile(r"^(?!)")
 
         return cls(
-            templates=tuple(templates),
-            methods=tuple(methods_list),
-            allow_headers=tuple(allow_headers),
+            routes=tuple(compiled_routes),
             _regex=combined,
-            _group_prefixes=tuple(group_prefixes),
         )
 
     # --- Dispatch -----------------------------------------------------
@@ -223,12 +233,12 @@ class Router:
         if m is None:
             return _MatchResult(kind="not_found")
 
-        for i, outer in enumerate(self._group_prefixes):
-            if m.group(outer) is None:
+        for route in self.routes:
+            if m.group(route._group_prefix) is None:
                 continue
-            tmpl = self.templates[i]
-            method_map = self.methods[i]
-            path_args = {v: m.group(f"{outer}_{v}") or "" for v in tmpl.variable_names}
+            tmpl = route.template
+            method_map = route.methods
+            path_args = {v: m.group(f"{route._group_prefix}_{v}") or "" for v in tmpl.variable_names}
 
             try:
                 method = HTTPMethod(method_str)
@@ -236,7 +246,7 @@ class Router:
                 return _MatchResult(
                     kind="method_not_allowed",
                     allowed=tuple(method_map),
-                    allow_header=self.allow_headers[i],
+                    allow_header=route.allow_header,
                 )
 
             handler = method_map.get(method)
@@ -244,7 +254,7 @@ class Router:
                 return _MatchResult(
                     kind="method_not_allowed",
                     allowed=tuple(method_map),
-                    allow_header=self.allow_headers[i],
+                    allow_header=route.allow_header,
                 )
 
             return _MatchResult(
@@ -254,7 +264,7 @@ class Router:
                 matched_template=tmpl,
                 path_args=path_args,
                 allowed=tuple(method_map),
-                allow_header=self.allow_headers[i],
+                allow_header=route.allow_header,
             )
 
         raise AssertionError("unreachable: regex matched but no outer group set")
@@ -302,7 +312,7 @@ class Router:
             )
             response = match.handler(ctx)
 
-        status_line = f"{response.status_code} {_status_phrase(response.status_code)}"
+        status_line = f"{response.status_code} {_http_phrases.get(response.status_code, 'Unknown')}"
         start_response(status_line, [(k, v) for k, v in response.headers.items()])
         return response.body
 
@@ -357,7 +367,7 @@ class Router:
                 h11.Response(
                     status_code=response.status_code,
                     headers=h11_headers,
-                    reason=_status_phrase(response.status_code).encode("iso-8859-1"),
+                    reason=_http_phrases.get(response.status_code, "Unknown").encode("iso-8859-1"),
                 )
             )
             for chunk in response.body:
@@ -438,23 +448,7 @@ def _send_plain(
         h11.Response(
             status_code=status_code,
             headers=headers,
-            reason=_status_phrase(status_code).encode("iso-8859-1"),
+            reason=_http_phrases.get(status_code, "Unknown").encode("iso-8859-1"),
         ),
         body,
     )
-
-
-def _status_phrase(code: int) -> str:
-    phrases = {
-        200: "OK",
-        201: "Created",
-        204: "No Content",
-        301: "Moved Permanently",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        500: "Internal Server Error",
-    }
-    return phrases.get(code, "Unknown")
