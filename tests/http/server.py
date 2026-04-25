@@ -231,25 +231,19 @@ def _ok_handler(ctx: HTTPReqCtx) -> None:
 
 
 class TestProtocolErrors:
-    """Server's reaction to malformed input / handler crashes.
+    """Server's reaction to malformed input / handler crashes."""
 
-    These pin *current* behavior — the server has no try/except around
-    handler invocation or h11 parsing (see TODOs in server.py:__call__),
-    so both paths kill the loop. When the server is hardened the assertions
-    here will need to flip from ``expect_loop_error=True`` to a 4xx/5xx check.
-    """
-
-    def test_malformed_request_kills_loop_today(self, serve_in_thread):
-        """A garbage request line propagates h11.RemoteProtocolError out of the loop."""
-        cm = serve_in_thread(_ok_handler)
-        cm.expect_loop_error = True
-
-        with cm as port:
+    def test_malformed_request_returns_400_and_keeps_loop_alive(self, serve_in_thread):
+        """A garbage request line is caught; the server replies 400 and stays up."""
+        with serve_in_thread(_ok_handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
                 sock.sendall(b"NOT_A_VALID_HTTP_REQUEST\r\n\r\n")
-                _drain(sock, deadline=1.0)
+                data = _drain(sock, deadline=1.0)
+            assert b"HTTP/1.1 400" in data, f"expected 400 in response, got: {data!r}"
 
-        assert isinstance(cm.loop_error, h11.RemoteProtocolError)
+            # Sanity: a follow-up valid request is still served.
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+            assert resp.status_code == 200
 
     def test_handler_exception_returns_500(self, serve_in_thread):
         """An unhandled handler exception is caught and returned as 500."""
@@ -298,17 +292,14 @@ class TestClientDisconnects:
             resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
             assert resp.status_code == 200
 
-    def test_client_half_close_after_partial_body_kills_loop_today(self, serve_in_thread):
-        """Headers say Content-Length: 100, client sends 5 bytes then half-closes.
+    def test_client_half_close_after_partial_body_keeps_loop_alive(self, serve_in_thread):
+        """Headers say Content-Length: 100; client sends 5 bytes then half-closes.
 
-        h11 raises on incomplete body and the loop has no try/except around
-        the parser, so the server thread dies. Pin as expected behavior until
-        ``HTTPConn.__call__`` gains protocol-error handling (TODO at server.py).
+        h11 raises RemoteProtocolError on the incomplete body. The server logs,
+        closes the conn, and the accept loop survives — verified by a follow-up
+        request.
         """
-        cm = serve_in_thread(_ok_handler)
-        cm.expect_loop_error = True
-
-        with cm as port:
+        with serve_in_thread(_ok_handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
                 sock.sendall(
                     b"POST / HTTP/1.1\r\n"
@@ -320,7 +311,9 @@ class TestClientDisconnects:
                 sock.shutdown(socket.SHUT_WR)
                 _drain(sock, deadline=1.0)
 
-        assert isinstance(cm.loop_error, h11.RemoteProtocolError)
+            # Server still serves a follow-up valid request.
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+            assert resp.status_code == 200
 
 
 class TestExpect100Continue:

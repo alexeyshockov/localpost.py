@@ -35,6 +35,16 @@ _INTERNAL_ERROR_RESPONSE = h11.Response(
     ],
 )
 
+_BAD_REQUEST_BODY = b"Bad Request"
+_BAD_REQUEST_RESPONSE = h11.Response(
+    status_code=400,
+    headers=[
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(_BAD_REQUEST_BODY)).encode("ascii")),
+        (b"connection", b"close"),
+    ],
+)
+
 
 def emit_handler_error(ctx: HTTPReqCtx) -> None:
     """Best-effort recovery when a request handler raises.
@@ -48,9 +58,10 @@ def emit_handler_error(ctx: HTTPReqCtx) -> None:
     if ctx.response_status is None:
         try:
             ctx.complete(_INTERNAL_ERROR_RESPONSE, _INTERNAL_ERROR_BODY)
-            return
         except Exception:
             logger.exception("Failed to send 500 after handler error; closing")
+        else:
+            return
     ctx._conn.close()
 
 
@@ -156,7 +167,14 @@ class Server:
                 conn = HTTPConn(self, client_sock, client_addr)
                 self.track(conn)
             elif (conn := key.data) and isinstance(conn, HTTPConn):
-                conn(h)  # TODO Handle exceptions...
+                try:
+                    conn(h)
+                except Exception:
+                    self.logger.exception("Unhandled exception from connection %s", conn.addr)
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001, S110
+                        pass
             else:
                 raise RuntimeError(f"Unexpected selector key: {key!r}")
 
@@ -195,14 +213,23 @@ class HTTPConn:
             total_sent = total_sent + sent
 
     def __call__(self, h: RequestHandler) -> None:
-        parser = self.parser
+        try:
+            self._loop(h)
+        except h11.RemoteProtocolError as e:
+            self.server.logger.warning("Bad client input from %s: %s", self.addr, e)
+            self._try_send_status(_BAD_REQUEST_RESPONSE, _BAD_REQUEST_BODY)
+            self.close()
+        except h11.LocalProtocolError:
+            self.server.logger.exception("Local protocol error from %s", self.addr)
+            self._try_send_status(_INTERNAL_ERROR_RESPONSE, _INTERNAL_ERROR_BODY)
+            self.close()
 
-        # TODO Handler LocalProtocolError, it will send respo automatically
+    def _loop(self, h: RequestHandler) -> None:
+        parser = self.parser
 
         while self.tracked:
             if parser.our_state is h11.MUST_CLOSE:
                 self.close()  # TODO Proper half close, later
-                # FIXME Remove the socket from the selector
                 return
             if parser.our_state is h11.DONE and parser.their_state is h11.DONE:
                 parser.start_next_cycle()
@@ -214,7 +241,6 @@ class HTTPConn:
                 if parser.they_are_waiting_for_100_continue:  # Drain the request body
                     self.send(h11.Response(status_code=417, headers=[], reason="Expectation Failed"))
                     continue
-                # TODO h11.RemoteProtocolError: peer closed connection without sending complete message body
                 try:
                     self.receive()
                 except BlockingIOError:
@@ -239,6 +265,22 @@ class HTTPConn:
                 return
             else:
                 raise RuntimeError(f"Unexpected {event!r} in the connection loop")
+
+    def _try_send_status(self, response: h11.Response, body: bytes) -> None:
+        """Best-effort: try to send a response if the parser is still in a writable state.
+
+        Used as a recovery path when the connection is about to be closed due to a
+        protocol error. Failures are silently swallowed.
+        """
+        if self.parser.our_state is not h11.IDLE and self.parser.our_state is not h11.SEND_RESPONSE:
+            return
+        try:
+            self.send(response)
+            if body:
+                self.send(h11.Data(data=body))
+            self.send(h11.EndOfMessage())
+        except Exception:  # noqa: BLE001, S110 — connection is being closed anyway
+            pass
 
 
 @dataclass(eq=False, frozen=True, slots=True)
