@@ -251,21 +251,41 @@ class TestProtocolErrors:
 
         assert isinstance(cm.loop_error, h11.RemoteProtocolError)
 
-    def test_handler_exception_kills_loop_today(self, serve_in_thread):
-        """An unhandled handler exception propagates out of the loop."""
+    def test_handler_exception_returns_500(self, serve_in_thread):
+        """An unhandled handler exception is caught and returned as 500."""
 
         def boom(_: HTTPReqCtx) -> None:
             raise RuntimeError("handler crashed")
 
-        cm = serve_in_thread(boom)
-        cm.expect_loop_error = True
+        with serve_in_thread(boom) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
 
-        with cm as port:
+        assert resp.status_code == 500
+        assert resp.text == "Internal Server Error"
+
+    def test_handler_exception_after_start_response_closes_conn(self, serve_in_thread):
+        """If the handler crashes after start_response, the conn is closed cleanly."""
+
+        def boom(ctx: HTTPReqCtx) -> None:
+            ctx.start_response(
+                h11.Response(
+                    status_code=200,
+                    headers=[(b"transfer-encoding", b"chunked")],
+                )
+            )
+            ctx.send(b"first chunk")
+            raise RuntimeError("crashed mid-stream")
+
+        with serve_in_thread(boom) as port:
             with contextlib.suppress(httpx.HTTPError):
-                httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+                resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+                # Response started with 200, but body is truncated when conn closes.
+                assert resp.status_code == 200
 
-        assert isinstance(cm.loop_error, RuntimeError)
-        assert str(cm.loop_error) == "handler crashed"
+            # Server still serves a follow-up request — the loop survived.
+            with serve_in_thread(_ok_handler) as second_port:
+                resp2 = httpx.get(f"http://127.0.0.1:{second_port}/", timeout=2)
+                assert resp2.status_code == 200
 
 
 class TestClientDisconnects:

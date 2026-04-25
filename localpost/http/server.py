@@ -25,6 +25,35 @@ from localpost.http.config import DEFAULT_BUFFER_SIZE, LOGGER_NAME, ServerConfig
 __all__ = ["start_http_server", "HTTPReqCtx", "RequestHandler"]
 
 
+_INTERNAL_ERROR_BODY = b"Internal Server Error"
+_INTERNAL_ERROR_RESPONSE = h11.Response(
+    status_code=500,
+    headers=[
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(_INTERNAL_ERROR_BODY)).encode("ascii")),
+        (b"connection", b"close"),
+    ],
+)
+
+
+def emit_handler_error(ctx: HTTPReqCtx) -> None:
+    """Best-effort recovery when a request handler raises.
+
+    Emits a 500 response if no headers have been sent yet; otherwise closes
+    the connection (we can't go back and prepend a status line to bytes
+    already on the wire). All I/O failures are swallowed — the goal is to
+    avoid amplifying one error into another.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    if ctx.response_status is None:
+        try:
+            ctx.complete(_INTERNAL_ERROR_RESPONSE, _INTERNAL_ERROR_BODY)
+            return
+        except Exception:
+            logger.exception("Failed to send 500 after handler error; closing")
+    ctx._conn.close()
+
+
 @contextmanager
 def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Iterator[Server]:
     """Open a listening socket and yield a ``Server`` bound to ``handler``.
@@ -170,9 +199,6 @@ class HTTPConn:
 
         # TODO Handler LocalProtocolError, it will send respo automatically
 
-        # TODO Check state: if our_state is not h11.DONE, then send 500 Internal Server Error and give back
-        # (a handler should always finish with a response)
-
         while self.tracked:
             if parser.our_state is h11.MUST_CLOSE:
                 self.close()  # TODO Proper half close, later
@@ -198,9 +224,15 @@ class HTTPConn:
                 continue  # Drain the request body
             elif isinstance(event, h11.Request):
                 req_ctx = HTTPReqCtx(self.server, self, event)
-                h(req_ctx)
+                try:
+                    h(req_ctx)
+                except Exception:
+                    self.server.logger.exception("Handler raised for %s %r", event.method, event.target)
+                    emit_handler_error(req_ctx)
                 if req_ctx.borrowed:
                     return
+                if not self.tracked:
+                    return  # connection was closed during error recovery
             elif isinstance(event, h11.ConnectionClosed):
                 self.server.logger.debug("Client closed connection")
                 self.close()

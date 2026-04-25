@@ -273,13 +273,10 @@ class TestServiceRobustness:
             lt.shutdown()
             await lt.stopped
 
-    async def test_handler_exception_crashes_service_today(self, free_port):
-        """Pin: a handler exception escapes ``handle_request`` and bubbles to the task group.
+    async def test_handler_exception_returns_500_and_service_stays_up(self, free_port):
+        """A handler exception is caught at the connection level and returned as 500.
 
-        The TODO at server.py's ``HTTPConn.__call__`` (no try/except around
-        ``h(req_ctx)``) means a single bad handler tears down the whole service.
-        Test pins the failure mode — exit_code != 0. When the server gains
-        per-request error handling, this test should flip to assert a 500.
+        The service must remain healthy and serve subsequent requests.
         """
 
         def boom(_: HTTPReqCtx) -> None:
@@ -291,12 +288,15 @@ class TestServiceRobustness:
             await lt.started
             await _wait_server_ready(free_port)
 
-            with contextlib.suppress(Exception):
-                await _get(f"http://127.0.0.1:{free_port}/", timeout=2.0)
+            r1 = await _get(f"http://127.0.0.1:{free_port}/", timeout=2.0)
+            assert r1.status_code == 500
+            r2 = await _get(f"http://127.0.0.1:{free_port}/", timeout=2.0)
+            assert r2.status_code == 500  # service still serving
 
+            lt.shutdown()
             await lt.stopped
 
-        assert lt.exit_code != 0
+        assert lt.exit_code == 0
 
     async def test_slot_released_after_normal_request(self, free_port):
         """Repeatedly hitting a max_concurrency=1 service must keep working.

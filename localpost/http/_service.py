@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable
 from contextlib import ExitStack
 from wsgiref.types import WSGIApplication
@@ -8,8 +9,8 @@ from anyio import CapacityLimiter, from_thread, to_thread
 
 from localpost import hosting, threadtools
 from localpost.hosting import ServiceLifetime
-from localpost.http.config import ServerConfig
-from localpost.http.server import HTTPReqCtx, RequestHandler, start_http_server
+from localpost.http.config import LOGGER_NAME, ServerConfig
+from localpost.http.server import HTTPReqCtx, RequestHandler, emit_handler_error, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = ["http_server", "wsgi_server"]
@@ -37,13 +38,19 @@ def http_server(
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be >= 1")
 
+    logger = logging.getLogger(LOGGER_NAME)
+
     def run(lt: ServiceLifetime) -> Awaitable[None]:
         req_slots = threadtools.cancellable_semaphore(max_concurrency)
         handler_limiter = CapacityLimiter(max_concurrency)
 
         async def handle_request(ctx: HTTPReqCtx, borrow_stack: ExitStack) -> None:
             try:
-                await to_thread.run_sync(handler, ctx, limiter=handler_limiter)
+                try:
+                    await to_thread.run_sync(handler, ctx, limiter=handler_limiter)
+                except Exception:
+                    logger.exception("Handler raised for %s %r", ctx.request.method, ctx.request.target)
+                    await to_thread.run_sync(emit_handler_error, ctx, limiter=handler_limiter)
             finally:
                 borrow_stack.close()
                 req_slots.release()
