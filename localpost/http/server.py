@@ -71,6 +71,12 @@ def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Itera
 
     The handler is fixed for the lifetime of the server — every accepted request
     is dispatched to it. Per-iteration overrides are not supported.
+
+    On context exit the server signals shutdown, closes any active client
+    connections still registered in the selector (idle keep-alive or
+    mid-request), and tears down the listening socket. Borrowed connections
+    held by handler threads are closed when the handler returns and tries to
+    re-register them on the (now shutting-down) server.
     """
     logger = logging.getLogger(LOGGER_NAME)
     server_sock = socket.create_server(
@@ -86,15 +92,11 @@ def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Itera
     # server_sock.close()  # Safe to call it from another thread, will cause accept() to raise OSError
     with closing(server_sock), closing(selector):
         server = Server(config, handler, logger, server_sock, selector)
-        # logger.info(f"Serving on {config.host}:{server.port}")
         logger.info("Serving on %s:%d", config.host, server.port)
-        yield server
-        # TODO Close all the client connections that are currently registered in the selector
-        # They can be in either:
-        # - Idle state (keep-alive) — just close the socket, no need to send anything
-        # - Request being sent by the client, but not fully received yet — send 503 Service Unavailable and close the socket
-        #       or simply close the socket for now
-        # - Draining request body, but not fully received yet — response already sent, just close the socket
+        try:
+            yield server
+        finally:
+            server._shutdown_active_connections()
 
 
 @final
@@ -119,6 +121,10 @@ class Server:
         self.handler = handler
         self.logger = logger
         self._lock = threading.Lock()
+        self.shutting_down: bool = False
+        """Set to True on context-manager exit. Once set, ``track`` rejects
+        new registrations and ``_maybe_give_back`` closes connections
+        instead of returning them to the selector."""
 
     def _find_stale(self):
         now = time.monotonic()
@@ -135,8 +141,23 @@ class Server:
     # TODO Add self-pipe wakeup trick and a queue
     def track(self, conn: HTTPConn) -> None:
         sock = conn.sock
-        sock.settimeout(0)
+        try:
+            sock.settimeout(0)
+        except OSError:
+            # The socket was already closed (e.g., by a previous error-recovery
+            # path). Mark the conn as no longer borrowed so a second
+            # _maybe_give_back call doesn't try again.
+            conn.tracked = True
+            return
         with self._lock:
+            if self.shutting_down:
+                # Server is going down — don't re-register, just close.
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                conn.tracked = True
+                return
             self.selector.register(sock, selectors.EVENT_READ, data=conn)
         conn.tracked = True
 
@@ -146,6 +167,32 @@ class Server:
             self.selector.unregister(sock)
         sock.settimeout(self.config.rw_timeout)
         conn.tracked = False
+
+    def _shutdown_active_connections(self) -> None:
+        """Set the shutdown flag and close any connections still in the selector.
+
+        Called from ``start_http_server.__exit__``. Borrowed connections (held
+        by handler threads) are not in the selector — they are closed by their
+        handlers on the next ``_maybe_give_back`` after we set the flag.
+        """
+        with self._lock:
+            self.shutting_down = True
+            keys = list(self.selector.get_map().values())
+            for key in keys:
+                if key.fileobj is self.sock:
+                    continue  # listening socket — closed by the outer CM
+                conn = key.data
+                if not isinstance(conn, HTTPConn):
+                    continue
+                try:
+                    self.selector.unregister(conn.sock)
+                except (KeyError, ValueError):
+                    pass
+                try:
+                    conn.sock.close()
+                except OSError:
+                    pass
+                conn.tracked = False
 
     def run(self, *, timeout: float | None = None) -> None:
         """One iteration of the server loop. Should be called repeatedly until the server is stopped.

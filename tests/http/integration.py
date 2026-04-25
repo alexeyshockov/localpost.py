@@ -142,13 +142,13 @@ def test_clean_shutdown_via_signal(sig):
             proc.wait()
 
 
-def test_inflight_request_during_shutdown_today():
-    """SIGTERM while the slow handler is sleeping.
+def test_inflight_request_during_shutdown_completes_cleanly():
+    """SIGTERM while the slow handler is sleeping → service exits cleanly.
 
-    Pin: today the worker thread is still in ``time.sleep`` when shutdown
-    cancels the task group, and the eventual write/close races with the
-    closed listener. The service exits non-zero. When in-flight handling
-    is hardened (graceful drain), this test should flip to ``rc == 0``.
+    The handler's ``time.sleep`` is not cancellation-aware, so shutdown waits
+    for it to finish. When the handler eventually writes its response and
+    tries to re-register the connection, the server (in shutting-down state)
+    closes the connection instead. Exit code must be 0.
     """
     port = _pick_free_port()
     proc = _spawn(port, LP_TEST_SLOW_S="1.0")
@@ -173,9 +173,7 @@ def test_inflight_request_during_shutdown_today():
             except (httpx.HTTPError, OSError):
                 pass
 
-        # Process must terminate within the deadline (no hangs). Exit code
-        # is currently non-zero — see docstring.
-        assert rc != 0, f"unexpected clean exit, stderr={stderr.decode()!r}"
+        assert rc == 0, f"unexpected non-zero exit; stderr={stderr.decode()!r}"
     finally:
         if proc.poll() is None:
             proc.kill()

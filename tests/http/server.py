@@ -424,3 +424,45 @@ class TestHeadAndPipelining:
         assert served == [b"/a", b"/b"]
         assert b"resp-for-/a" in data
         assert b"resp-for-/b" in data
+
+
+# --- Graceful shutdown -------------------------------------------------------
+
+
+class TestGracefulShutdown:
+    def test_shutting_down_flag_set_on_exit(self):
+        """``Server.shutting_down`` flips to True on context-manager exit."""
+        captured: dict = {}
+        with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
+            captured["server"] = server
+            assert server.shutting_down is False
+        assert captured["server"].shutting_down is True
+
+    def test_idle_keep_alive_connection_closed_on_exit(self, serve_in_thread):
+        """A keep-alive socket sees an EOF (recv → b"") once the server exits."""
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            ctx.complete(
+                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
+                b"ok",
+            )
+
+        with serve_in_thread(handler) as port:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            try:
+                # Send a request and read its response — connection is kept alive.
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                _drain(sock, deadline=0.5)
+            finally:
+                # Pull socket reference outside the with block so we can recv after server exit.
+                pass
+
+        # Outside `serve_in_thread`: server has exited and closed the keep-alive conn.
+        sock.settimeout(2.0)
+        try:
+            data = sock.recv(64)
+        except (ConnectionResetError, OSError):
+            data = b""
+        finally:
+            sock.close()
+        assert data == b"", f"expected EOF after shutdown, got: {data!r}"
