@@ -149,6 +149,7 @@ tests-unit = [
     "pytest-mock ~=3.14",
     "pytest-cov ~=7.0",
     "coverage[toml] ~=7.6",
+    "hypothesis ~=6.100",
 ]
 tests-integration = [
     "boto3 ~=1.38",

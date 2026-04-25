@@ -952,6 +952,18 @@ wheels = [
 ]
 
 [[package]]
+name = "hypothesis"
+version = "6.152.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/7f/67a06c5f19368e0fa04612bbc446c535bf45b0b51bc6aa56055b112f7604/hypothesis-6.152.2.tar.gz", hash = "sha256:11fd5725958fe75597d1b831f703fdf7e636b7cf1f249117f381ad5cee4d888f", size = 466358, upload-time = "2026-04-24T04:26:18.917Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/ed/77eed094bceae845a994f936721293afae40a346c0005d85208407fd40e8/hypothesis-6.152.2-py3-none-any.whl", hash = "sha256:1ad5b87f0e6c0ab7a9a35b1378cc4963d23eaf0cb1e47e94f1d574b41155907a", size = 532034, upload-time = "2026-04-24T04:26:16.394Z" },
+]
+
+[[package]]
 name = "icecream"
 version = "2.1.10"
 source = { registry = "https://pypi.org/simple" }
@@ -1151,6 +1163,7 @@ tests-integration = [
 ]
 tests-unit = [
     { name = "coverage" },
+    { name = "hypothesis" },
     { name = "pytest-cov" },
     { name = "pytest-mock" },
 ]
@@ -1229,6 +1242,7 @@ tests-integration = [
 ]
 tests-unit = [
     { name = "coverage", extras = ["toml"], specifier = "~=7.6" },
+    { name = "hypothesis", specifier = "~=6.100" },
     { name = "pytest-cov", specifier = "~=7.0" },
     { name = "pytest-mock", specifier = "~=3.14" },
 ]
