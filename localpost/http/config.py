@@ -28,7 +28,9 @@ class ServerConfig:
     """Default upper bound (seconds) on ``selector.select`` per ``Server.run`` iteration.
     Caps how long the loop blocks before returning to the caller for a cancellation /
     shutdown check. Callers may override per-iteration via ``Server.run(timeout=…)``."""
-    keep_alive_timeout: float = 15.0  # TODO add it to the response
-    """Timeout (seconds) for idle connections."""
+    keep_alive_timeout: float = 15.0
+    """Timeout (seconds) for idle connections. Advertised to HTTP/1.1 clients
+    via the ``Keep-Alive: timeout=N`` response header so they can size their
+    keep-alive pool to match."""
     max_body_size: int = 10 * 1024 * 1024  # 10 MiB
     """Maximum request body size (bytes)."""

@@ -13,7 +13,7 @@ import selectors
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from typing import final
@@ -499,11 +499,36 @@ class HTTPReqCtx:
     def start_response(self, response: h11.Response | h11.InformationalResponse, /) -> None:
         if isinstance(response, h11.Response):
             object.__setattr__(self, "response_status", response.status_code)
+            response = self._maybe_inject_keep_alive(response)
         self._conn.send(response)
 
-    # TODO Accept any Buffer, later
-    def send(self, chunk: bytes, /) -> None:
-        self._conn.send(h11.Data(chunk))
+    def _maybe_inject_keep_alive(self, response: h11.Response) -> h11.Response:
+        """Append ``Keep-Alive: timeout=N`` to the response on persistent HTTP/1.1
+        connections so clients can size their keep-alive pool to our deadline."""
+        timeout = int(self._server.config.keep_alive_timeout)
+        if timeout < 1:
+            return response
+        if self.request.http_version != b"1.1":
+            return response
+        for name, value in self.request.headers:
+            if bytes(name).lower() == b"connection" and b"close" in bytes(value).lower():
+                return response
+        for name, value in response.headers:
+            nl = bytes(name).lower()
+            if nl == b"connection" and b"close" in bytes(value).lower():
+                return response
+            if nl == b"keep-alive":
+                return response  # caller already set it
+        return h11.Response(
+            status_code=response.status_code,
+            headers=[*response.headers, (b"keep-alive", f"timeout={timeout}".encode("ascii"))],
+            reason=response.reason,
+        )
+
+    def send(self, chunk: Buffer, /) -> None:
+        # h11 wants bytes; widen the public API to any Buffer (memoryview,
+        # bytearray, …) so callers can avoid an explicit copy.
+        self._conn.send(h11.Data(bytes(chunk) if not isinstance(chunk, bytes) else chunk))
 
     def finish_response(self) -> None:
         self._conn.send(h11.EndOfMessage())
