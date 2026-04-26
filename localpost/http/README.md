@@ -179,6 +179,42 @@ on the documented public Flask API.
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
 is driven by `sl.shutting_down` via `threadtools.check_cancelled()`.
 
+## Roadmap
+
+Items that are not currently bugs but where there's a known better
+implementation worth tackling later.
+
+### Self-pipe wakeup + per-iteration op queue
+
+Today `Server.track` / `Server.stop_tracking` mutate the selector under
+`Server._lock` from any thread, and the accept-loop thread reads it via
+`selector.select(timeout=config.select_timeout)`. The shipped selectors on
+macOS (`kqueue`) and Linux (`epoll`) observe set modifications during a wait,
+so newly tracked fds are picked up immediately and correctness is fine. On
+selectors that don't (`SelectSelector`), the loop only sees the new fd once
+the current `select()` returns — up to `select_timeout` of latency on a
+keep-alive return.
+
+The fix is the standard **self-pipe trick** plus a single-writer model:
+
+1. Allocate an internal `os.pipe()` registered for `EVENT_READ` alongside the
+   listening socket.
+2. Worker threads stop touching the selector. `track` / `stop_tracking`
+   enqueue an op (e.g. `("track", conn)`) onto a thread-safe deque, then
+   write one byte to the pipe to wake the loop.
+3. `Server.run`, at the start of each iteration, drains the pipe, drains the
+   op queue (under the lock), applies the ops, and only then calls
+   `select()`.
+
+Benefits: portable across all selectors, sub-millisecond wakeup on
+track / untrack regardless of `select_timeout`, and a cleaner threading
+model where the selector has exactly one writer.
+
+Cost: ~80–120 LoC of careful threading, an extra fd pair per server, and a
+new stress test for rapid track / untrack churn. Deferred for now since the
+default selector on supported platforms doesn't suffer from the latency in
+practice.
+
 ## How is it different from…
 
 - **Flask** — Flask is web-first (templates, Jinja, sessions) with no built-in

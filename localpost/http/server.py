@@ -205,7 +205,6 @@ class Server:
             except OSError:
                 pass
 
-    # TODO Add self-pipe wakeup trick and a queue
     def track(self, conn: HTTPConn) -> None:
         sock = conn.sock
         try:
@@ -273,8 +272,6 @@ class Server:
         server_sock = self.sock
         h = self.handler
         self._cleanup_stale()
-        # TODO Take iteration payload (pending connections) and set it empty, under the lock
-        # TODO Add selector.select() to the current payload (chain)
         for key, _ in self.selector.select(timeout=timeout):
             if key.fileobj is server_sock:
                 client_sock, client_addr = server_sock.accept()
