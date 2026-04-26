@@ -24,7 +24,7 @@ from flask import Flask
 from localpost.http._service import http_server
 from localpost.http.config import ServerConfig
 from localpost.http.server import HTTPReqCtx, RequestHandler
-from localpost.http.wsgi import _build_environ  # intra-package helper
+from localpost.http.wsgi import _build_environ
 
 __all__ = ["flask_handler", "flask_server"]
 
@@ -33,7 +33,7 @@ def flask_handler(app: Flask) -> RequestHandler:
     """Wrap a Flask app as a native :class:`RequestHandler`.
 
     See the module docstring for the behavior differences vs. WSGI — notably,
-    the request context stays active during response-body streaming.
+    the request context stays active during response body streaming.
     """
 
     def handle(http_ctx: HTTPReqCtx) -> None:
@@ -49,22 +49,20 @@ def flask_handler(app: Flask) -> RequestHandler:
             try:
                 _write_response(http_ctx, response)
             finally:
-                response.close()  # fire werkzeug's call_on_close callbacks
+                response.close()  # Fire werkzeug's call_on_close callbacks
 
     return handle
 
 
 def _write_response(http_ctx: HTTPReqCtx, response) -> None:
-    # response is a werkzeug.Response (Flask's Response subclasses it).
-    reason = response.status.split(" ", 1)[1] if " " in response.status else ""
-    h11_headers = [
-        (name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in response.headers.items()
-    ]
+    # response is a werkzeug.Response (Flask's Response subclasses it)
+    reason = (response.status.split(" ", 1)[1] if " " in response.status else "").encode("iso-8859-1")
+    h11_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in response.headers.items()]
     http_ctx.start_response(
         h11.Response(
             status_code=response.status_code,
             headers=h11_headers,
-            reason=reason.encode("iso-8859-1") if reason else b"",
+            reason=reason,
         )
     )
     for chunk in response.iter_encoded():
