@@ -316,6 +316,13 @@ class HTTPConn:
     def close(self) -> None:
         if self.tracked:
             self.server.selector.unregister(self.sock)
+        # Send a FIN before close() so the client sees a clean half-close
+        # rather than a possible RST when there's unread data in the kernel
+        # receive buffer. Errors are expected on already-broken sockets.
+        try:
+            self.sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
         self.sock.close()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> None:
@@ -360,8 +367,8 @@ class HTTPConn:
 
         while self.tracked:
             if parser.our_state is h11.MUST_CLOSE:
-                self.close()  # TODO Proper half close, later
-                return  # close() already unregisters from the selector
+                self.close()  # close() shuts down WR + unregisters
+                return
             if parser.our_state is h11.DONE and parser.their_state is h11.DONE:
                 parser.start_next_cycle()
                 self.body_bytes_received = 0

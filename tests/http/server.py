@@ -202,19 +202,37 @@ class TestKeepAlive:
         assert call_count == 2
 
     def test_connection_close_header(self, serve_in_thread):
-        """When client sends Connection: close, server should close after one request."""
+        """When client sends Connection: close, server should close after one request.
+
+        Also pins the half-close behavior: the next ``recv`` must return a
+        clean EOF (b""), not raise ConnectionResetError, since the server
+        sends a FIN via shutdown(SHUT_WR) before closing.
+        """
         call_count = 0
 
         def handler(ctx: HTTPReqCtx):
             nonlocal call_count
             call_count += 1
             ctx.complete(
-                h11.Response(status_code=200, headers=[(b"Content-Length", b"2")]),
+                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 
         with serve_in_thread(handler) as port:
-            httpx.get(f"http://127.0.0.1:{port}/", headers={"Connection": "close"}, timeout=5)
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+                sock.sendall(
+                    b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+                )
+                # Read response.
+                data = _drain(sock, deadline=1.0)
+                assert b"HTTP/1.1 200" in data
+                # Now expect a clean EOF (FIN), not a reset.
+                sock.settimeout(2.0)
+                try:
+                    eof = sock.recv(64)
+                except ConnectionResetError as e:
+                    pytest.fail(f"server sent RST instead of FIN: {e}")
+                assert eof == b""
 
         assert call_count == 1
 
