@@ -70,9 +70,12 @@ class Stopped:
 ServiceState = Starting | Running | ShuttingDown | Stopped
 
 
-# FIXME Set
 _app_lt: ContextVar[ServiceLifetime] = ContextVar("localpost.current_app")
+"""The root service lifetime — set by ``_serve_root`` / ``run`` (when no parent
+is given) and read by ``current_app``."""
 _svc_lt: ContextVar[ServiceLifetime] = ContextVar("localpost.current_service")
+"""The innermost service lifetime — set by ``_run`` and read by
+``current_service``."""
 
 
 def current_app() -> ServiceLifetimeView:
@@ -307,7 +310,6 @@ def service[**P]() -> Callable[[Callable[P, Any]], Callable[P, _ResolvedService]
 
 
 def service(target: Callable[..., Any] | None = None):
-    # FIXME Wrap sync functions, wrap context managers
     def decorator(func: Callable[..., Any]) -> Callable[..., _ResolvedService]:
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -386,20 +388,27 @@ async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
 
     async with BlockingPortal() as portal:
         child_lt = ServiceLifetime(portal)
-        tg = portal._task_group
-        tg.start_soon(_run, svc, child_lt)
-        # Wait for either started or stopped (service may fail before starting)
-        async with create_task_group() as wait_tg:
-            wait_tg.start_soon(wait_started)
-            wait_tg.start_soon(wait_stopped)
-        yield child_lt.view
-        child_lt.view.shutdown()
-        await child_lt.stopped
+        app_token = _app_lt.set(child_lt)
+        try:
+            tg = portal._task_group
+            tg.start_soon(_run, svc, child_lt)
+            # Wait for either started or stopped (service may fail before starting)
+            async with create_task_group() as wait_tg:
+                wait_tg.start_soon(wait_started)
+                wait_tg.start_soon(wait_stopped)
+            yield child_lt.view
+            child_lt.view.shutdown()
+            await child_lt.stopped
+        finally:
+            _app_lt.reset(app_token)
 
 
 @asynccontextmanager
 async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[ServiceLifetimeView]:
-    # TODO Just throw an exception if the service stops with an error?.. Instead of binding the parent lifetime
+    # Open question: when a child service crashes, we currently only shut down
+    # the parent. An alternative is to re-raise the child's exception so the
+    # parent's task group sees it. Both have callers; revisit when there's a
+    # concrete need.
     async def bind_parent_to(csl: ServiceLifetimeView):
         await csl.stopped
         parent.view.shutdown()
@@ -430,14 +439,25 @@ async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[Ser
 async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
     async with nullcontext(parent.portal) if parent else BlockingPortal() as portal:
         lt = ServiceLifetime(portal)
-        await _run(svc_f, lt)
-        return lt.exit_code
+        app_token = _app_lt.set(lt) if parent is None else None
+        try:
+            await _run(svc_f, lt)
+            return lt.exit_code
+        finally:
+            if app_token is not None:
+                _app_lt.reset(app_token)
 
 
 def _run_many(*svcs: ServiceF) -> ServiceF:
+    """Compose multiple services into one. Children run concurrently in the
+    parent's task group; the parent waits for all of them to stop.
+
+    Known limitation: when one child crashes, sibling services keep running.
+    Tracked at the test level — see ``tests/hosting/multi_service.py``.
+    """
+
     async def _run(lt: ServiceLifetime) -> None:
         children = [lt.start(svc) for svc in svcs]
-        # TODO Shutdown everything in case of an exception in any child
         await wait_all(c.stopped for c in children)
 
     return _run

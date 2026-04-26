@@ -3,8 +3,8 @@
 > **Status:** stable — public API is not expected to break in patch/minor releases.
 
 A small synchronous HTTP/1.1 server built on [h11](https://h11.readthedocs.io/),
-plus a router for URI-template-based request dispatch, and a WSGI bridge. About
-400 lines of focused, sync code — easy to read, easy to embed.
+plus a router for URI-template-based request dispatch, and a WSGI bridge. The
+server core is ~540 lines of focused, sync code — easy to read, easy to embed.
 
 Pair it with `localpost.hosting` for lifecycle management, or run it standalone.
 For OpenAPI / content negotiation / validation, see
@@ -42,10 +42,12 @@ See [`examples/http/simple_server.py`](../../examples/http/simple_server.py),
 Running under hosting:
 
 ```python
-from localpost.hosting import run_app
-from localpost.http._service import http_server
-from localpost.http.config import ServerConfig
+import sys
 
+from localpost.hosting import run_app
+from localpost.http import http_server, ServerConfig
+
+# `simple_app` from the Quick start above
 sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 ```
 
@@ -166,18 +168,18 @@ on the documented public Flask API.
 | `ServerConfig` | Frozen dataclass of server tuning parameters      |
 | `LOGGER_NAME` | `"localpost.http"`                                 |
 
-### Hosting integration — `localpost.http._service`
+### Hosting integration
 
 `@hosting.service` wrappers for running the server inside a hosted app:
 
-| Service                                      | Notes                                       |
-| -------------------------------------------- | ------------------------------------------- |
-| `http_server(config, handler)`               | Runs the server loop with your handler      |
-| `wsgi_server(config, app)`                   | Same, for a generic WSGI app                |
-| `flask_server(config, app)`                  | Native Flask — see `localpost.http.flask`   |
+| Service                                      | Module                       | Notes                                       |
+| -------------------------------------------- | ---------------------------- | ------------------------------------------- |
+| `http_server(config, handler)`               | `localpost.http._service`    | Runs the server loop with your handler      |
+| `wsgi_server(config, app)`                   | `localpost.http._service`    | Same, for a generic WSGI app                |
+| `flask_server(config, app)`                  | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`   |
 
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
-is driven by `sl.shutting_down` via `threadtools.check_cancelled()`.
+is driven by `lt.shutting_down` via `threadtools.check_cancelled()`.
 
 ## Roadmap
 

@@ -276,9 +276,16 @@ class TestProtocolErrors:
         assert resp.text == "Internal Server Error"
 
     def test_handler_exception_after_start_response_closes_conn(self, serve_in_thread):
-        """If the handler crashes after start_response, the conn is closed cleanly."""
+        """If the handler crashes after start_response, the conn is closed cleanly
+        AND the accept loop keeps serving subsequent connections to the same server.
+        """
+        crash_count = 0
+        crash_lock = threading.Lock()
 
         def boom(ctx: HTTPReqCtx) -> None:
+            nonlocal crash_count
+            with crash_lock:
+                crash_count += 1
             ctx.start_response(
                 h11.Response(
                     status_code=200,
@@ -289,15 +296,17 @@ class TestProtocolErrors:
             raise RuntimeError("crashed mid-stream")
 
         with serve_in_thread(boom) as port:
-            with contextlib.suppress(httpx.HTTPError):
-                resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
-                # Response started with 200, but body is truncated when conn closes.
-                assert resp.status_code == 200
+            # Two separate TCP connections to the SAME server — the second one
+            # only succeeds in reaching the handler if the accept loop is
+            # still alive after the first crash.
+            for _ in range(2):
+                with contextlib.suppress(httpx.HTTPError):
+                    resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+                    # The response started with 200; httpx may still surface it
+                    # despite the truncated body.
+                    assert resp.status_code == 200
 
-            # Server still serves a follow-up request — the loop survived.
-            with serve_in_thread(_ok_handler) as second_port:
-                resp2 = httpx.get(f"http://127.0.0.1:{second_port}/", timeout=2)
-                assert resp2.status_code == 200
+        assert crash_count == 2, f"expected 2 handler invocations, got {crash_count}"
 
 
 class TestClientDisconnects:

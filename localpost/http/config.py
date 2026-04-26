@@ -11,7 +11,6 @@ __all__ = [
 DEFAULT_BUFFER_SIZE: Final = 64 * 1024  # 64 KiB
 
 LOGGER_NAME: Final = "localpost.http"
-# TODO Access logger?..
 
 
 @final
