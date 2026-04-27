@@ -116,6 +116,7 @@ dev-http = [
 #    "defspec ~=0.5",  # Replaced by our own implementation
     "pydantic ~=2.11",
     "a2wsgi",
+    "httpx",
 ]
 dev-sentry = [
     "sentry-sdk ~=2.51",

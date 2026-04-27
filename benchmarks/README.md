@@ -14,7 +14,7 @@ Both are kept out of the default test run (`just tests`).
 ## Quick start
 
 ```bash
-# macro (HTTP load) — 8 stacks × 3 scenarios at 20s each = ~8 minutes
+# macro (HTTP load) — 8 stacks × 4 scenarios at 20s each = ~11 minutes
 brew install oha   # one-time prereq
 just bench-http
 
@@ -27,7 +27,7 @@ just bench-micro
 
 ## What's compared (macro)
 
-Three "app types", each implementing the same three scenarios:
+Three "app types", each implementing the same four scenarios:
 
 | App type   | Stacks                                                                                    |
 |------------|-------------------------------------------------------------------------------------------|
@@ -37,11 +37,16 @@ Three "app types", each implementing the same three scenarios:
 
 Scenarios — defined in [`http/scenarios.py`](http/scenarios.py):
 
-| Scenario     | Method | Path             | Concurrency |
-|--------------|--------|------------------|-------------|
-| `plaintext`  | GET    | `/ping`          | 64          |
-| `path_param` | GET    | `/hello/{name}`  | 64          |
-| `json_post`  | POST   | `/echo`          | 32          |
+| Scenario         | Method | Path                        | Concurrency |
+|------------------|--------|-----------------------------|-------------|
+| `plaintext`      | GET    | `/ping`                     | 64          |
+| `path_param`     | GET    | `/hello/{name}`             | 64          |
+| `json_post`      | POST   | `/echo`                     | 32          |
+| `profile_update` | POST   | `/users/{user_id}/profile`  | 32          |
+
+`profile_update` is the more application-shaped case: route parameter, JSON
+request parsing, deterministic profile normalization, three short simulated I/O
+waits, and JSON response serialization.
 
 All servers are configured to be roughly comparable — single process, sized
 worker pool (`max_concurrency=32` for LocalPost, `--threads 32` for
