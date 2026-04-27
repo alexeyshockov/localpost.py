@@ -47,6 +47,18 @@ unit-tests:
 integration-tests:
     pytest -m "integration" -n auto -v
 
+[doc("Run macro HTTP benchmarks (oha-driven, requires `brew install oha`)")]
+bench-http *args:
+    uv run --group bench --group dev-http --group dev-hosting-services \
+        python -m benchmarks.http.runner {{ args }}
+
+[doc("Run micro-benchmarks (router, URI template) via pytest-benchmark")]
+bench-micro *args:
+    uv run --group bench pytest benchmarks/micro/ \
+        --benchmark-only \
+        -o python_functions='bench_*' \
+        {{ args }}
+
 [doc("Inverse dependency tree for a package, to understand why it is installed")]
 why package:
     uv tree --invert --package {{ package }}
