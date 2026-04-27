@@ -357,9 +357,13 @@ async def observe_services(*lifetimes: ServiceLifetimeView):
 async def _run(svc_f: ServiceF, lt: ServiceLifetime) -> None:
     parent_svc_lt = _svc_lt.set(lt)
     try:
-        async with lt.tg as tg:
-            await svc_f(lt)
-            tg.cancel_scope.cancel()  # Cancel any remaining tasks
+        # ``lt.scope`` is the outer context: deferred cleanups run AFTER
+        # the task group has finished, so handlers can still use deferred
+        # resources during their cancellation window.
+        async with lt.scope:
+            async with lt.tg as tg:
+                await svc_f(lt)
+                tg.cancel_scope.cancel()  # Cancel any remaining tasks
     except get_cancelled_exc_class() as exc:  # BaseException
         lt.exception = exc
         raise  # Always reraise cancellations
