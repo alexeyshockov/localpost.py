@@ -215,14 +215,6 @@ class Server:
         """Cached on the first ``run()`` call. Used to route ``track`` /
         ``close`` calls inline when invoked from the selector thread itself
         (e.g. from the accept branch of ``run``)."""
-        # Pre-baked ``Keep-Alive: timeout=N`` header tuple, or ``None`` if
-        # keep-alive is disabled (``keep_alive_timeout < 1``). Computed once
-        # so :meth:`HTTPReqCtx._maybe_inject_keep_alive` doesn't pay the
-        # f-string + ``.encode`` cost per request.
-        ka_timeout = int(config.keep_alive_timeout)
-        self.keep_alive_header: tuple[bytes, bytes] | None = (
-            (b"keep-alive", f"timeout={ka_timeout}".encode("ascii")) if ka_timeout >= 1 else None
-        )
         # Stale-connection cleanup runs lazily — at most once per
         # ``_cleanup_interval``. Avoids walking ``selector.get_map()`` on
         # every iteration when nothing's actually stale (which is the
@@ -364,7 +356,7 @@ class Server:
             try:
                 if isinstance(op, _OpTrack):
                     self._apply_track(op.conn)
-                elif isinstance(op, _OpClose):
+                elif isinstance(op, _OpClose) and op.fd in self.selector.get_map():
                     try:
                         self.selector.unregister(op.fd)
                     except (KeyError, ValueError):
@@ -375,17 +367,19 @@ class Server:
     def _apply_track(self, conn: HTTPConn) -> None:
         """Selector-thread handler for ``_OpTrack``.
 
-        Probes the selector (modify-then-fall-back-to-register) instead of
-        relying on a captured prev-mode snapshot — between the worker's
-        ``track()`` and our drain, the conn could have been unregistered
-        elsewhere (or already registered by a previous op).
+        Probes ``selector.get_map()`` (an O(1) dict-``in`` check) to choose
+        ``modify`` vs ``register``, instead of catching ``KeyError`` from
+        ``modify``. The error path inside ``selectors.modify`` builds the
+        exception message as ``f"{fileobj!r}"`` — and ``socket.__repr__``
+        is surprisingly expensive (~25 µs/call). Per-request overhead.
         """
         sock = conn.sock
+        sel = self.selector
         try:
-            try:
-                self.selector.modify(sock, selectors.EVENT_READ, data=conn)
-            except KeyError:
-                self.selector.register(sock, selectors.EVENT_READ, data=conn)
+            if conn.fd in sel.get_map():
+                sel.modify(sock, selectors.EVENT_READ, data=conn)
+            else:
+                sel.register(sock, selectors.EVENT_READ, data=conn)
         except Exception:  # noqa: BLE001
             conn.tracked = False
             try:
@@ -537,10 +531,12 @@ class HTTPConn:
             return
         # Selector still has _fd_to_key[fd]. Clean up.
         if threading.get_ident() == self.server._selector_thread_id:
-            try:
-                self.server.selector.unregister(self.fd)
-            except (KeyError, ValueError):
-                pass
+            sel = self.server.selector
+            if self.fd in sel.get_map():
+                try:
+                    sel.unregister(self.fd)
+                except (KeyError, ValueError):
+                    pass
         else:
             self.server._ops.append(_OpClose(self.fd))
             self.server._wake()
@@ -726,36 +722,7 @@ class HTTPReqCtx:
     def start_response(self, response: h11.Response | h11.InformationalResponse, /) -> None:
         if isinstance(response, h11.Response):
             object.__setattr__(self, "response_status", response.status_code)
-            response = self._maybe_inject_keep_alive(response)
         self._conn.send(response)
-
-    def _maybe_inject_keep_alive(self, response: h11.Response) -> h11.Response:
-        """Append ``Keep-Alive: timeout=N`` to the response on persistent HTTP/1.1
-        connections so clients can size their keep-alive pool to our deadline.
-
-        Header names are compared directly because h11 normalizes them to
-        lowercase bytes on both the request side (parser output) and the
-        response side (``h11.Response`` constructor). The keep-alive tuple
-        itself is pre-baked on the server.
-        """
-        ka_header = self._server.keep_alive_header
-        if ka_header is None:
-            return response
-        if self.request.http_version != b"1.1":
-            return response
-        for name, value in self.request.headers:
-            if name == b"connection" and b"close" in value.lower():
-                return response
-        for name, value in response.headers:
-            if name == b"connection" and b"close" in value.lower():
-                return response
-            if name == b"keep-alive":
-                return response  # caller already set it
-        return h11.Response(
-            status_code=response.status_code,
-            headers=[*response.headers, ka_header],
-            reason=response.reason,
-        )
 
     def send(self, chunk: Buffer, /) -> None:
         # h11 wants bytes; widen the public API to any Buffer (memoryview,

@@ -316,6 +316,55 @@ The selector ceiling is real. Options to revisit:
 - **Replace pure-Python h11 parsing with a C parser** (e.g. `httptools`).
   Likely the easiest win at this point.
 
+## Phase 5 (shipped): profile-guided micro-opts
+
+Profiled the server under bench load with `yappi` (CPU clock, multi-threaded).
+The profile confirmed h11 dominates the per-request hot path (`next_event`,
+`send`, `normalize_and_validate`, `_extract_next_receive_event` together
+account for ~60-70% of selector CPU). But it surfaced two avoidable wastes
+*outside* h11:
+
+### Surprise #1: `socket.__repr__` per request
+
+`Server._apply_track` was using `try selector.modify; except KeyError:
+selector.register`. After a worker re-tracks a freshly-unregistered conn,
+`modify` always misses — and `selectors.modify` builds the `KeyError`
+message as ``f"{fileobj!r}"`` *before* throwing. `socket.__repr__` is
+~25 µs/call. At 9 k req/sec that's ~225 ms/sec of CPU spent on an error
+message we immediately discard.
+
+Fix: probe ``selector.get_map()`` (an O(1) ``fd in dict`` check) and
+choose ``modify`` vs ``register`` directly — never enter the exception
+path. Same fix applied to ``HTTPConn.close`` and the ``_OpClose`` handler
+in ``_drain_ops``.
+
+### Surprise #2: `_maybe_inject_keep_alive` rebuilds the response
+
+Every response went through ``_maybe_inject_keep_alive``, which
+constructed a *new* ``h11.Response`` to append the ``Keep-Alive: timeout=N``
+header. ``h11.Response.__init__`` runs ``normalize_and_validate`` over the
+full headers list — heavy h11 work, every response.
+
+Fix: drop the explicit ``Keep-Alive: timeout=N`` header. HTTP/1.1
+defaults to keep-alive; the timeout header is informational and most
+clients (httpx, requests, browsers) maintain their own pool timeout.
+The 3 tests that asserted on the explicit header are removed.
+
+### Bench
+
+| Stack             | Phase 4 RPS / p50 | Phase 5 RPS / p50 | Δ |
+| ----------------- | ----------------: | ----------------: | -----: |
+| `localpost_native` plaintext  | 8,824 / 7.16 | **9,617 / 6.59** | +9.0%  |
+| `localpost_native` path_param | 8,805 / 7.20 | **9,461 / 6.71** | +7.4%  |
+| `localpost_native` json_post  | 7,676 / 3.93 | **8,589 / 3.63** | +11.9% |
+| `localpost_flask`  plaintext  | 7,909 / 8.01 | **8,385 / 7.56** | +6.0%  |
+
+10/10 stress at 800/800. All remaining 126 tests pass.
+
+This is the realistic ceiling for the current architecture without
+replacing h11 or going multi-process. The remaining selector-thread
+CPU is now overwhelmingly inside h11 — verified by the same profile.
+
 ## Phase 4 (shipped): lazy `_cleanup_stale`
 
 Targeted audit of the selector hot path identified one piece of clearly

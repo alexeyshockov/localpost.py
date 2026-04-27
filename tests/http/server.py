@@ -453,7 +453,7 @@ class TestHeadAndPipelining:
         assert b"resp-for-/b" in data
 
 
-# --- Buffer-protocol body / Keep-Alive header --------------------------------
+# --- Buffer-protocol body ---------------------------------------------------
 
 
 class TestSendBuffer:
@@ -473,58 +473,6 @@ class TestSendBuffer:
 
         assert resp.status_code == 200
         assert resp.content == b"hello"
-
-
-class TestKeepAliveHeader:
-    def test_keep_alive_header_added_on_http11(self, serve_in_thread):
-        """HTTP/1.1 responses get a Keep-Alive: timeout=N header by default."""
-
-        def handler(ctx: HTTPReqCtx) -> None:
-            ctx.complete(
-                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
-                b"ok",
-            )
-
-        with serve_in_thread(handler) as port:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
-
-        ka = resp.headers.get("keep-alive")
-        assert ka is not None and ka.startswith("timeout="), f"unexpected Keep-Alive: {ka!r}"
-
-    def test_keep_alive_header_skipped_when_request_says_close(self, serve_in_thread):
-        """Don't advertise keep-alive when the client opted out via Connection: close."""
-
-        def handler(ctx: HTTPReqCtx) -> None:
-            ctx.complete(
-                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
-                b"ok",
-            )
-
-        with serve_in_thread(handler) as port:
-            resp = httpx.get(
-                f"http://127.0.0.1:{port}/",
-                headers={"Connection": "close"},
-                timeout=5,
-            )
-
-        assert "keep-alive" not in resp.headers
-
-    def test_keep_alive_header_skipped_when_response_says_close(self, serve_in_thread):
-        """Don't advertise keep-alive when the handler set Connection: close itself."""
-
-        def handler(ctx: HTTPReqCtx) -> None:
-            ctx.complete(
-                h11.Response(
-                    status_code=200,
-                    headers=[(b"content-length", b"2"), (b"connection", b"close")],
-                ),
-                b"ok",
-            )
-
-        with serve_in_thread(handler) as port:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
-
-        assert "keep-alive" not in resp.headers
 
 
 # --- Stale-connection cleanup ------------------------------------------------
