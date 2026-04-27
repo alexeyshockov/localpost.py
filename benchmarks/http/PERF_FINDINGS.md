@@ -316,6 +316,43 @@ The selector ceiling is real. Options to revisit:
 - **Replace pure-Python h11 parsing with a C parser** (e.g. `httptools`).
   Likely the easiest win at this point.
 
+## Phase 4 (shipped): lazy `_cleanup_stale`
+
+Targeted audit of the selector hot path identified one piece of clearly
+wasted CPU: ``Server._cleanup_stale`` walking ``selector.get_map().values()``
+on every iteration to discover "nothing to clean" — the common case under
+load (default ``rw_timeout=1.0 s``, ``keep_alive_timeout=15 s``).
+
+Fix: cache ``_last_cleanup_at``, skip the O(N) walk when ``now -
+_last_cleanup_at < _cleanup_interval``. ``_cleanup_interval`` defaults
+to ``min(rw_timeout, keep_alive_timeout) / 2`` (=0.5 s with defaults),
+floored at 100 ms.
+
+Trade-off: stale-detection latency goes from ~``select_timeout`` (1 s) to
+~``timeout + 0.5 s`` (1.5 s for ``rw_timeout``, ~15.5 s for
+``keep_alive_timeout``). Both are detection latencies for non-fatal
+conditions (slow clients, dead keep-alive connections), well outside
+any user-visible budget.
+
+### Bench (5 s/cell, ``max_concurrency=32``, 64 clients)
+
+| Stack             | Phase 3-B RPS / p50 | Phase 4 RPS / p50 |
+| ----------------- | ------------------: | ----------------: |
+| `localpost_native`|       8,843 / 7.15  |     8,824 / 7.16  |
+| `localpost_flask` |       7,884 / 7.92  |     7,909 / 8.01  |
+| `localpost_wsgi`  |       7,505 / 8.45  |     ~7,500 / ~8 ms |
+
+Within run-to-run noise — as predicted. At 64 keep-alive conns, the
+O(N) walk savings are ~64 ops per iter × ~9k iter/sec = ~580 k ops/sec
+saved. A few percent of selector CPU, swallowed by bench noise. The
+optimization scales with conn count: real-world deployments with
+hundreds–thousands of idle keep-alive conns would see proportionally
+larger gains. 10/10 stress at 800/800.
+
+The bench needle is now firmly stuck at the h11 parsing ceiling.
+Future RPS gains require either a C parser (`httptools`) or
+multi-selector / SO_REUSEPORT — both meaningful architectural changes.
+
 ## Phase 3-B (shipped): lock-free op queue + self-pipe wakeup
 
 With the conn model down to two states, the original Phase 3 design fits

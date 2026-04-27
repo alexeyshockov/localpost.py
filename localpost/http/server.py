@@ -223,6 +223,17 @@ class Server:
         self.keep_alive_header: tuple[bytes, bytes] | None = (
             (b"keep-alive", f"timeout={ka_timeout}".encode("ascii")) if ka_timeout >= 1 else None
         )
+        # Stale-connection cleanup runs lazily — at most once per
+        # ``_cleanup_interval``. Avoids walking ``selector.get_map()`` on
+        # every iteration when nothing's actually stale (which is the
+        # common case under load: keep_alive_timeout=15s, rw_timeout=1s).
+        # Floor at 100 ms so users with degenerate tiny timeouts don't
+        # pathologically over-cleanup.
+        self._cleanup_interval: float = max(
+            min(config.rw_timeout, config.keep_alive_timeout) / 2,
+            0.1,
+        )
+        self._last_cleanup_at: float = 0.0
 
     def _find_stale(self):
         now = time.monotonic()
@@ -233,6 +244,16 @@ class Server:
     def _cleanup_stale(self):
         # Selector-thread only. Lock-free: ``self.selector`` and
         # ``conn.tracked`` are owned by the selector thread.
+        #
+        # Lazy: skip the O(N) walk over registered conns when not enough
+        # time has passed since the last sweep. Worst-case extra detection
+        # latency is ``_cleanup_interval`` (default 0.5 s) on top of the
+        # configured ``rw_timeout`` / ``keep_alive_timeout`` — both already
+        # measure non-fatal conditions.
+        now = time.monotonic()
+        if now - self._last_cleanup_at < self._cleanup_interval:
+            return
+        self._last_cleanup_at = now
         stale = list(self._find_stale())
         for conn in stale:
             try:
