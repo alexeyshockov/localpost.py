@@ -104,8 +104,9 @@ class BodyTooLarge(Exception):
 
 
 def _content_length(headers) -> int | None:
+    # h11 normalizes header names to lowercase bytes — direct equality is enough.
     for name, value in headers:
-        if bytes(name).lower() == b"content-length":
+        if name == b"content-length":
             try:
                 return int(value)
             except ValueError:
@@ -192,6 +193,14 @@ class Server:
         """Set to True on context-manager exit. Once set, ``track`` rejects
         new registrations and ``_maybe_give_back`` closes connections
         instead of returning them to the selector."""
+        # Pre-baked ``Keep-Alive: timeout=N`` header tuple, or ``None`` if
+        # keep-alive is disabled (``keep_alive_timeout < 1``). Computed once
+        # so :meth:`HTTPReqCtx._maybe_inject_keep_alive` doesn't pay the
+        # f-string + ``.encode`` cost per request.
+        ka_timeout = int(config.keep_alive_timeout)
+        self.keep_alive_header: tuple[bytes, bytes] | None = (
+            (b"keep-alive", f"timeout={ka_timeout}".encode("ascii")) if ka_timeout >= 1 else None
+        )
 
     def _find_stale(self):
         now = time.monotonic()
@@ -649,24 +658,29 @@ class HTTPReqCtx:
 
     def _maybe_inject_keep_alive(self, response: h11.Response) -> h11.Response:
         """Append ``Keep-Alive: timeout=N`` to the response on persistent HTTP/1.1
-        connections so clients can size their keep-alive pool to our deadline."""
-        timeout = int(self._server.config.keep_alive_timeout)
-        if timeout < 1:
+        connections so clients can size their keep-alive pool to our deadline.
+
+        Header names are compared directly because h11 normalizes them to
+        lowercase bytes on both the request side (parser output) and the
+        response side (``h11.Response`` constructor). The keep-alive tuple
+        itself is pre-baked on the server.
+        """
+        ka_header = self._server.keep_alive_header
+        if ka_header is None:
             return response
         if self.request.http_version != b"1.1":
             return response
         for name, value in self.request.headers:
-            if bytes(name).lower() == b"connection" and b"close" in bytes(value).lower():
+            if name == b"connection" and b"close" in value.lower():
                 return response
         for name, value in response.headers:
-            nl = bytes(name).lower()
-            if nl == b"connection" and b"close" in bytes(value).lower():
+            if name == b"connection" and b"close" in value.lower():
                 return response
-            if nl == b"keep-alive":
+            if name == b"keep-alive":
                 return response  # caller already set it
         return h11.Response(
             status_code=response.status_code,
-            headers=[*response.headers, (b"keep-alive", f"timeout={timeout}".encode("ascii"))],
+            headers=[*response.headers, ka_header],
             reason=response.reason,
         )
 

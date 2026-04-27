@@ -209,3 +209,41 @@ hit a spurious `BlockingIOError`. The dispatcher now relies entirely on
 `finish_response`'s `_maybe_give_back` to re-track; the outer block only
 closes the conn when the inner path didn't (cancel / disconnect / handler
 returned without completing).
+
+## Phase 2 results (2026-04-27)
+
+Three micro-optimisations on the worker hot path:
+
+- Pre-bake the `Keep-Alive: timeout=N` header tuple on `Server`; drop the
+  per-request f-string + encode in `_maybe_inject_keep_alive`.
+- Drop `bytes(name).lower()` allocations in `_content_length` and
+  `_maybe_inject_keep_alive` — h11 normalizes header names to lowercase
+  bytes on both request and response sides.
+- Fold the two header walks in `wsgi._build_environ` into one; cache
+  `bytes(name)` and avoid double-decoding.
+
+**Bench (5 s/cell, `max_concurrency=32`):** numbers are within
+run-to-run noise (~±3 %) compared to Phase 1. All 100 % success.
+
+**Why no measurable RPS gain:** at the bench's load (64 clients,
+`max_concurrency=32`), we are **selector-bound**, not worker-CPU-bound.
+The selector thread does accept + h11 parse + dispatch serially; that
+sets the ceiling regardless of how cheap each request is on the workers.
+Bumping `max_concurrency` to 128 (verified with a one-shot run) yields
+the same ~8.5 k RPS — confirming it's selector-thread CPU, not queueing.
+
+The Phase 2 changes are still net positive (less per-request CPU on
+workers, smaller GC pressure) and they make the WSGI environ build
+~2× cheaper, which matters under different workload mixes — but they
+don't move the bench needle until Phase 3 unblocks the selector.
+
+## Phase 3 next
+
+`Self-pipe wakeup + per-iteration op queue` (already on the http README
+roadmap) is now the right next step. Today every dispatch path acquires
+`Server._lock` for a `selector.modify` call (twice per request:
+`to_watchdog` + `track`). Replace with a thread-safe op queue + self-pipe
+wakeup so workers fire-and-forget mode transitions to the selector — the
+selector drains the op queue once per `select()` cycle. Lower lock
+contention, fewer syscalls per request, and a cleaner threading model
+where the selector has exactly one writer.

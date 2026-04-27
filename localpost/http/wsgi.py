@@ -140,17 +140,13 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
     else:
         path, query_string = target, ""
 
-    headers_dict: dict[str, str] = {}
-    for name, value in request.headers:
-        headers_dict[name.decode("iso-8859-1").lower()] = value.decode("iso-8859-1")
-
     environ: dict[str, Any] = {
         "REQUEST_METHOD": request.method.decode("ascii"),
         "SCRIPT_NAME": "",
         "PATH_INFO": path,
         "QUERY_STRING": query_string,
-        "CONTENT_TYPE": headers_dict.get("content-type", ""),
-        "CONTENT_LENGTH": headers_dict.get("content-length", ""),
+        "CONTENT_TYPE": "",
+        "CONTENT_LENGTH": "",
         "SERVER_NAME": ctx._server.config.host,
         "SERVER_PORT": str(ctx._server.port),
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
@@ -163,10 +159,17 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
         "wsgi.run_once": False,
     }
 
+    # Single header pass: h11 normalizes names to lowercase bytes, so we can
+    # work with bytes directly and decode each name/value exactly once.
     for name, value in request.headers:
-        name_str = name.decode("iso-8859-1").upper().replace("-", "_")
-        if name_str in ("CONTENT_TYPE", "CONTENT_LENGTH"):
-            continue
-        environ[f"HTTP_{name_str}"] = value.decode("iso-8859-1")
+        value_str = value.decode("iso-8859-1") if isinstance(value, bytes) else bytes(value).decode("iso-8859-1")
+        if name == b"content-type":
+            environ["CONTENT_TYPE"] = value_str
+        elif name == b"content-length":
+            environ["CONTENT_LENGTH"] = value_str
+        else:
+            # bytes-level upper + replace, then single decode (ASCII for HTTP_* keys).
+            key = b"HTTP_" + name.upper().replace(b"-", b"_")
+            environ[key.decode("ascii")] = value_str
 
     return environ
