@@ -234,33 +234,14 @@ pull-based variant collapses to two states and one syscall per
 Items that are not currently bugs but where there's a known better
 implementation worth tackling later.
 
-### Lock-free op queue + self-pipe wakeup
+### Faster HTTP/1.1 parsing
 
-Today `Server.track` is the only cross-thread selector mutation: workers
-call it from `_maybe_give_back` after a response completes. It acquires
-`Server._lock` to serialise the `selector.modify` / `selector.register`
-call against the selector thread. Cheap in absolute terms (~µs), but
-under heavy keep-alive contention this is per-request lock traffic.
-
-Goal: make the selector the single writer to its own state.
-
-1. Allocate an internal `os.pipe()` registered for `EVENT_READ` alongside
-   the listening socket.
-2. Workers stop touching the selector. `Server.track` from a worker thread
-   enqueues an op (e.g. `("track", conn)`) onto a thread-safe `deque` and
-   writes one byte to the pipe to wake the selector.
-3. `Server.run`, at the start of each iteration, drains the pipe, drains
-   the op queue, applies the ops, and only then calls `select()`.
-
-Cost: ~80–120 LoC of careful threading, an extra fd pair per server, and
-a new stress test for rapid track / untrack churn.
-
-Status: previously attempted with a 3-state conn model — the optimistic
-mode-flip semantics raced. Now that the model has been simplified to two
-states and one shared field, the op queue should fit cleanly. Deferred:
-the selector thread is CPU-bound on h11 parsing well before the lock
-becomes a bottleneck on this hardware (verified at `max_concurrency=128`).
-See [`benchmarks/http/PERF_FINDINGS.md`](../../benchmarks/http/PERF_FINDINGS.md).
+The selector thread is CPU-bound on `h11` (pure Python). Switching to a C
+parser (`httptools` or similar) is the largest realistic single-step
+perf win — a 30-50% RPS uplift would be plausible. Trade-off: adds a C
+dependency and weakens the "minimal, readable, in-Python" pitch. See
+[`benchmarks/http/PERF_FINDINGS.md`](../../benchmarks/http/PERF_FINDINGS.md)
+for the analysis behind the current bench numbers.
 
 ## How is it different from…
 

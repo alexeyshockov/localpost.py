@@ -313,9 +313,41 @@ The selector ceiling is real. Options to revisit:
 
 - **Move accept + parse + dispatch to multiple selector threads.** Multiple
   selectors each owning a slice of conns. More CPU, more lock-free.
-- **Lock-free op queue (the reverted Phase 3).** Now feasible on the
-  simpler base — only two ops to consider, no 3-way mode races. The whole
-  argument for op-queue was contention on `Server._lock`; the simpler
-  model would let it work.
 - **Replace pure-Python h11 parsing with a C parser** (e.g. `httptools`).
   Likely the easiest win at this point.
+
+## Phase 3-B (shipped): lock-free op queue + self-pipe wakeup
+
+With the conn model down to two states, the original Phase 3 design fits
+cleanly. Workers no longer touch the selector directly:
+
+- ``Server._lock`` deleted.
+- ``Server._ops: collections.deque`` — atomic ``append`` / ``popleft``.
+- ``os.pipe()`` registered in the selector for wakeup.
+- ``Server.track`` from a worker thread enqueues ``_OpTrack(conn)`` and
+  writes a wakeup byte. ``HTTPConn.close`` from a worker enqueues
+  ``_OpClose(fd)`` after closing the kernel socket synchronously (the
+  ``_OpClose`` handler just cleans ``selector._fd_to_key``).
+- Selector drains ``_ops`` at the top of every iteration and on
+  wakeup-sentinel events; ``stop_tracking`` and ``_cleanup_stale`` run
+  inline (already on selector thread).
+- ``HTTPConn.fd`` captured at construction so cleanup can use the integer
+  fd via ``selector.unregister(fd_int)`` even after ``sock.close()`` (where
+  ``sock.fileno()`` returns -1).
+
+### Bench (5 s/cell, ``max_concurrency=32``, 64 clients)
+
+| Stack             | Phase 3-A (lock) RPS / p50 | Phase 3-B (op queue) RPS / p50 |
+| ----------------- | -------------------------: | -----------------------------: |
+| `localpost_native`|             8,961 / 7.09   |                  8,843 / 7.15  |
+| `localpost_flask` |             8,053 / 7.88   |                  7,884 / 7.92  |
+| `localpost_wsgi`  |             7,630 / 8.29   |                  7,505 / 8.45  |
+
+Within run-to-run noise — confirming the prediction that we're selector
+CPU-bound (h11 parsing), not lock-bound. 10/10 stress at 800/800.
+
+The win isn't in the bench: it's in **the threading model is now strictly
+single-writer to the selector**, and the lock is gone. Future work that
+needs to add cross-thread selector mutations (e.g. scheduled FD timers)
+just enqueues an op — no lock to contend with, no consistency invariants
+to re-prove.
