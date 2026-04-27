@@ -6,7 +6,6 @@ from collections.abc import Awaitable
 from contextlib import suppress
 from wsgiref.types import WSGIApplication
 
-import h11
 from anyio import (
     BrokenResourceError,
     CapacityLimiter,
@@ -20,26 +19,10 @@ from localpost import hosting, threadtools
 from localpost.hosting import ServiceLifetime
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
 from localpost.http.config import LOGGER_NAME, ServerConfig
-from localpost.http.server import ConnMode, HTTPReqCtx, RequestHandler, emit_handler_error, start_http_server
+from localpost.http.server import HTTPReqCtx, RequestHandler, emit_handler_error, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = ["http_server", "wsgi_server"]
-
-
-def _request_has_body(request: h11.Request) -> bool:
-    """``True`` iff the request advertises a non-empty body (``Content-Length > 0`` or chunked)."""
-    for name, value in request.headers:
-        n = bytes(name).lower()
-        if n == b"content-length":
-            try:
-                return int(value) > 0
-            except ValueError:
-                return True
-        if n == b"transfer-encoding":
-            return True
-    return False
-
-
 
 
 @hosting.service
@@ -60,8 +43,10 @@ def http_server(
 
     Per-request cancellation is HTTP-native and lives behind
     :func:`localpost.http.check_cancelled`. Triggers:
-      * Client disconnected mid-request (selector watchdog detected EOF).
-      * Service is shutting down.
+      * Client disconnected mid-request (pull-based ``MSG_PEEK`` on the
+        request socket from inside ``check_cancelled``).
+      * Service is shutting down (a single shared ``threading.Event`` is OR-ed
+        into every in-flight token's ``is_cancelled`` check).
 
     Worker / service cancellation (a separate concern) flows through the
     AnyIO machinery as elsewhere in :mod:`localpost`.
@@ -74,26 +59,25 @@ def http_server(
     def run(lt: ServiceLifetime) -> Awaitable[None]:
         tx, rx = threadtools.Channel[tuple[HTTPReqCtx, RequestCancel]].create(capacity=max_concurrency)
 
-        # Tokens for in-flight requests, so service shutdown can flip them all at once.
-        in_flight: set[RequestCancel] = set()
-        in_flight_lock = threading.Lock()
+        # Single shutdown signal shared by every in-flight cancel token. No
+        # per-request registry needed — workers see shutdown via their token's
+        # ``is_cancelled`` check.
+        shutdown_event = threading.Event()
         # Dedicated thread limiter so workers + selector don't consume slots from
         # AnyIO's default global limiter.
         threads_limiter = CapacityLimiter(max_concurrency + 1)
 
         def dispatch(ctx: HTTPReqCtx) -> None:
-            """Selector-thread callback: parse done, hand off to a worker."""
-            cancel = RequestCancel()
-            if _request_has_body(ctx.request):
-                # The worker will do blocking I/O to read the body. We can't
-                # arm the watchdog here — buffered body bytes would make the
-                # selector spin on a level-triggered ``EVENT_READ``.
-                ctx._server.stop_tracking(ctx._conn)
-            else:
-                # No body to read — arm the watchdog. EOF on the socket = client
-                # walked away while the handler was running. ``MSG_PEEK`` is safe
-                # alongside the worker's ``send`` (different ops at the kernel level).
-                ctx._server.to_watchdog(ctx._conn, cancel.cancel)
+            """Selector-thread callback: parse done, hand off to a worker.
+
+            Always uses ``stop_tracking`` (the original borrow flow): the conn
+            leaves the selector entirely while the worker owns it. Client
+            disconnect detection while the worker is running happens inside
+            :func:`localpost.http.check_cancelled` via a non-blocking
+            ``MSG_PEEK``.
+            """
+            ctx._server.stop_tracking(ctx._conn)
+            cancel = RequestCancel(_sock=ctx._conn.sock, _shutdown_event=shutdown_event)
             try:
                 tx.put((ctx, cancel))
             except (ClosedResourceError, BrokenResourceError):
@@ -109,8 +93,6 @@ def http_server(
                     except (EndOfStream, ClosedResourceError):
                         return
 
-                    with in_flight_lock:
-                        in_flight.add(cancel)
                     try:
                         with _enter_request(cancel):
                             try:
@@ -125,34 +107,27 @@ def http_server(
                                 )
                                 emit_handler_error(ctx)
                     finally:
-                        with in_flight_lock:
-                            in_flight.discard(cancel)
                         # Conn-release policy:
                         #
-                        # On the success path, ``finish_response`` already drained h11 events and
-                        # re-tracked the conn (mode → NORMAL). We MUST NOT call ``track`` here
-                        # because ``track`` flips the socket back to non-blocking via
-                        # ``settimeout(0)`` — which would race with the next request's worker
-                        # already using the shared socket in blocking mode (response-body
-                        # writes), causing spurious ``BlockingIOError`` and dropped requests.
+                        # On the success path, ``finish_response`` already re-tracked the conn
+                        # via ``_maybe_give_back`` — we MUST NOT touch it here. Specifically,
+                        # we cannot read ``ctx._conn.tracked``: that field is shared with the
+                        # next request's dispatcher, which clears it via ``stop_tracking``
+                        # before this finally runs.
                         #
-                        # The only thing left to do is close the conn for the unhappy paths:
-                        # client disconnected, watchdog fired, or the handler returned without
-                        # completing the response (mode != NORMAL).
-                        if (
-                            cancel.is_cancelled
-                            or ctx._conn.recv_closed
-                            or ctx._conn.mode is not ConnMode.NORMAL
-                        ):
+                        # The only case left to handle is per-request cancellation: the
+                        # handler caught the signal and returned, but the conn is in an
+                        # uncertain state. ``cancel.fired`` is the cheap (no-syscall)
+                        # check — ``is_cancelled`` would actively re-probe the socket
+                        # which is wasteful here.
+                        # ``emit_handler_error`` already closes on the exception path.
+                        if cancel.fired:
                             with suppress(Exception):
                                 ctx._conn.close()
 
         async def shutdown_watcher() -> None:
             await lt.shutting_down.wait()
-            with in_flight_lock:
-                tokens = list(in_flight)
-            for token in tokens:
-                token.cancel()
+            shutdown_event.set()
             tx.close()
 
         def run_server() -> None:

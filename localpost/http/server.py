@@ -8,7 +8,6 @@ Notes:
 
 from __future__ import annotations
 
-import enum
 import logging
 import selectors
 import socket
@@ -24,33 +23,6 @@ import h11
 from localpost.http.config import DEFAULT_BUFFER_SIZE, LOGGER_NAME, ServerConfig
 
 __all__ = ["start_http_server", "HTTPReqCtx", "RequestHandler"]
-
-
-class ConnMode(enum.Enum):
-    """Selector-tracking state of an :class:`HTTPConn`.
-
-    UNTRACKED — not registered in the selector at all (worker holds the conn).
-    NORMAL    — registered for HTTP processing; selector reads bytes and drives the parser.
-    WATCHDOG  — registered for client-disconnect detection only; selector does
-                ``recv(MSG_PEEK)`` on wake-up to detect EOF, never consumes bytes.
-    """
-
-    UNTRACKED = "untracked"
-    NORMAL = "normal"
-    WATCHDOG = "watchdog"
-
-
-@final
-@dataclass(eq=False, slots=True)
-class _WatchdogToken:
-    """Selector data-tag for a conn in WATCHDOG mode.
-
-    ``on_disconnect`` is invoked once when the selector detects EOF on the
-    socket. The token is then unregistered.
-    """
-
-    conn: HTTPConn
-    on_disconnect: Callable[[], None]
 
 
 _INTERNAL_ERROR_BODY = b"Internal Server Error"
@@ -216,7 +188,7 @@ class Server:
                     self.selector.unregister(conn.sock)
                 except (KeyError, ValueError):
                     pass
-                conn.mode = ConnMode.UNTRACKED
+                conn.tracked = False
         # Drop the lock for any I/O — closing a socket can block, and we don't
         # want to hold the selector lock while talking to the kernel.
         for conn in stale:
@@ -243,21 +215,15 @@ class Server:
                 pass
 
     def track(self, conn: HTTPConn) -> None:
-        """Register or restore ``conn`` to NORMAL mode (selector reads bytes).
+        """Register ``conn`` in the selector for normal HTTP processing.
 
-        Handles all incoming transitions:
-          * UNTRACKED → NORMAL: register fresh.
-          * WATCHDOG  → NORMAL: swap selector data-tag, no re-register.
-          * NORMAL    → NORMAL: no-op.
-
-        ``conn.mode`` is updated *under* ``_lock``: any ``_handle_watchdog_event``
-        racing the same fd must observe a consistent ``(selector data-tag, mode)`` pair.
+        Idempotent — a no-op if ``conn`` is already tracked.
         """
         sock = conn.sock
         try:
             sock.settimeout(0)
         except OSError:
-            conn.mode = ConnMode.UNTRACKED
+            conn.tracked = False
             return
         with self._lock:
             if self.shutting_down:
@@ -265,57 +231,28 @@ class Server:
                     sock.close()
                 except OSError:
                     pass
-                conn.mode = ConnMode.UNTRACKED
+                conn.tracked = False
                 return
-            if conn.mode is ConnMode.WATCHDOG:
-                self.selector.modify(sock, selectors.EVENT_READ, data=conn)
-            elif conn.mode is ConnMode.UNTRACKED:
+            if not conn.tracked:
                 self.selector.register(sock, selectors.EVENT_READ, data=conn)
-            # else NORMAL: nothing to do
-            conn.mode = ConnMode.NORMAL
+                conn.tracked = True
 
     def stop_tracking(self, conn: HTTPConn) -> None:
-        """Unregister ``conn`` from the selector and switch the socket to blocking I/O."""
+        """Unregister ``conn`` from the selector; the worker becomes the sole I/O owner.
+
+        Switches the socket to blocking-with-timeout (``rw_timeout``) so the
+        worker can do synchronous send/recv. Client-disconnect detection
+        while the conn is borrowed lives in
+        :func:`localpost.http.check_cancelled` (pull-based ``MSG_PEEK``).
+        """
         sock = conn.sock
         with self._lock:
             try:
                 self.selector.unregister(sock)
             except (KeyError, ValueError):
                 pass
-            conn.mode = ConnMode.UNTRACKED
+            conn.tracked = False
         sock.settimeout(self.config.rw_timeout)
-
-    def to_watchdog(self, conn: HTTPConn, on_disconnect: Callable[[], None]) -> None:
-        """Place ``conn`` in WATCHDOG mode for client-disconnect detection.
-
-        The socket is switched to blocking-with-timeout for the worker thread
-        (which now owns it for I/O). The selector keeps the fd registered but
-        only does ``recv(MSG_PEEK)`` on wake-up, never consuming bytes —
-        ``MSG_PEEK`` does not conflict with a concurrent ``send`` from the
-        worker.
-
-        ``on_disconnect`` is fired at most once when EOF (peer FIN) is detected.
-        """
-        sock = conn.sock
-        try:
-            sock.settimeout(self.config.rw_timeout)
-        except OSError:
-            conn.mode = ConnMode.UNTRACKED
-            return
-        token = _WatchdogToken(conn, on_disconnect)
-        with self._lock:
-            if self.shutting_down:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                conn.mode = ConnMode.UNTRACKED
-                return
-            if conn.mode is ConnMode.UNTRACKED:
-                self.selector.register(sock, selectors.EVENT_READ, data=token)
-            else:  # NORMAL or WATCHDOG — swap the data-tag in place
-                self.selector.modify(sock, selectors.EVENT_READ, data=token)
-            conn.mode = ConnMode.WATCHDOG
 
     def _shutdown_active_connections(self) -> None:
         """Set the shutdown flag and close any connections still in the selector.
@@ -330,13 +267,9 @@ class Server:
             for key in keys:
                 if key.fileobj is self.sock:
                     continue  # listening socket — closed by the outer CM
-                conn: HTTPConn | None
-                if isinstance(key.data, HTTPConn):
-                    conn = key.data
-                elif isinstance(key.data, _WatchdogToken):
-                    conn = key.data.conn
-                else:
+                if not isinstance(key.data, HTTPConn):
                     continue
+                conn = key.data
                 try:
                     self.selector.unregister(conn.sock)
                 except (KeyError, ValueError):
@@ -345,7 +278,7 @@ class Server:
                     conn.sock.close()
                 except OSError:
                     pass
-                conn.mode = ConnMode.UNTRACKED
+                conn.tracked = False
 
     def run(self, *, timeout: float | None = None) -> None:
         """One iteration of the server loop. Should be called repeatedly until the server is stopped.
@@ -360,14 +293,11 @@ class Server:
         h = self.handler
         self._cleanup_stale()
         for key, _ in self.selector.select(timeout=timeout):
-            data = key.data
             if key.fileobj is server_sock:
                 client_sock, client_addr = server_sock.accept()
                 conn = HTTPConn(self, client_sock, client_addr)
                 self.track(conn)
-            elif isinstance(data, _WatchdogToken):
-                self._handle_watchdog_event(data)
-            elif isinstance(data, HTTPConn):
+            elif (data := key.data) and isinstance(data, HTTPConn):
                 try:
                     data(h)
                 except Exception:
@@ -379,52 +309,6 @@ class Server:
             else:
                 raise RuntimeError(f"Unexpected selector key: {key!r}")
 
-    def _handle_watchdog_event(self, wd: _WatchdogToken) -> None:
-        """Selector wake-up on a WATCHDOG-mode conn.
-
-        Peek for EOF without consuming bytes — ``recv(1, MSG_PEEK | MSG_DONTWAIT)``
-        returns ``b""`` on a clean half-close (peer FIN), data if buffered, or
-        raises ``BlockingIOError`` if the wake-up was spurious.
-
-        Once the watchdog has fired (or seen buffered data) we unregister; the
-        worker's :meth:`track` will re-attach the conn after the response
-        finishes. Avoids busy-looping on level-triggered selectors.
-
-        **Race-guard:** the ``key.data`` reference reported by ``selector.select``
-        is captured before we acquire ``_lock``. By the time we run, the worker
-        thread may have swapped the conn back to NORMAL mode via :meth:`track`.
-        We re-check ``conn.mode`` under the lock and bail if so — otherwise we'd
-        unregister an fd the worker just re-tracked and selector wakes for
-        subsequent requests on this conn would never arrive.
-        """
-        if wd.conn.mode is not ConnMode.WATCHDOG:
-            return
-        sock = wd.conn.sock
-        eof = False
-        try:
-            peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-        except BlockingIOError:
-            return  # spurious wake-up; leave the watchdog armed
-        except OSError:
-            eof = True
-        else:
-            if not peeked:
-                eof = True
-        with self._lock:
-            if wd.conn.mode is not ConnMode.WATCHDOG:
-                return  # raced with track() — leave the worker's NORMAL state alone
-            try:
-                self.selector.unregister(sock)
-            except (KeyError, ValueError):
-                pass
-            wd.conn.mode = ConnMode.UNTRACKED
-        if eof:
-            wd.conn.recv_closed = True
-            try:
-                wd.on_disconnect()
-            except Exception:
-                self.logger.exception("Watchdog on_disconnect callback failed")
-
 
 @final
 @dataclass(eq=False, slots=True)
@@ -435,8 +319,9 @@ class HTTPConn:
     recv_closed: bool = False
     parser: h11.Connection = field(default_factory=lambda: h11.Connection(h11.SERVER))
     close_at: float | None = None  # Used only when tracked, to enforce keep-alive and read timeouts
-    mode: ConnMode = ConnMode.UNTRACKED
-    """Current selector-tracking state. See :class:`ConnMode`."""
+    tracked: bool = False
+    """``True`` iff this conn is registered in the selector. ``False`` while a
+    worker has borrowed it (between ``stop_tracking`` and the next ``track``)."""
     body_bytes_received: int = 0
     """Cumulative body bytes received for the current request — reset on
     ``parser.start_next_cycle``. Compared against ``ServerConfig.max_body_size``
@@ -447,22 +332,14 @@ class HTTPConn:
     for the current request. Distinguishes idle keep-alive (close silently)
     from a stalled mid-request (emit 408 Request Timeout)."""
 
-    @property
-    def tracked(self) -> bool:
-        """Backward-compat: ``True`` iff in NORMAL selector-tracking mode.
-
-        New code should branch on :attr:`mode` directly.
-        """
-        return self.mode is ConnMode.NORMAL
-
     def close(self) -> None:
-        if self.mode is not ConnMode.UNTRACKED:
+        if self.tracked:
             with self.server._lock:
                 try:
                     self.server.selector.unregister(self.sock)
                 except (KeyError, ValueError):
                     pass
-            self.mode = ConnMode.UNTRACKED
+                self.tracked = False
         # Send a FIN before close() so the client sees a clean half-close
         # rather than a possible RST when there's unread data in the kernel
         # receive buffer. Errors are expected on already-broken sockets.

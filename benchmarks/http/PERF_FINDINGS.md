@@ -237,13 +237,85 @@ workers, smaller GC pressure) and they make the WSGI environ build
 ~2× cheaper, which matters under different workload mixes — but they
 don't move the bench needle until Phase 3 unblocks the selector.
 
-## Phase 3 next
+## Phase 3 attempt: lock-free op queue (reverted)
 
-`Self-pipe wakeup + per-iteration op queue` (already on the http README
-roadmap) is now the right next step. Today every dispatch path acquires
-`Server._lock` for a `selector.modify` call (twice per request:
-`to_watchdog` + `track`). Replace with a thread-safe op queue + self-pipe
-wakeup so workers fire-and-forget mode transitions to the selector — the
-selector drains the op queue once per `select()` cycle. Lower lock
-contention, fewer syscalls per request, and a cleaner threading model
-where the selector has exactly one writer.
+We prototyped the self-pipe + op-queue design: `Server._lock` removed, workers
+enqueue typed `_OpTrack` / `_OpClose` ops on a `collections.deque`, write a
+wakeup byte to `os.pipe()` registered in the selector, selector drains at the
+top of each iteration. Single-writer-to-selector invariant held, but the
+optimistic mode-flip semantics across three threads (selector, watchdog event
+handler, worker) created races on the `ConnMode` field that I couldn't fully
+close — stress dropped to 50-75% with EBADF mid-`send`. Reverted.
+
+## Phase 3 (shipped): simplify the conn model, pull-based disconnect detection
+
+The core insight from the reverted attempt: **the `WATCHDOG` mode is the
+source of most of the complexity** (third state, separate selector data tag,
+mode-recheck races, level-triggered busy-loop avoidance). Replacing it with a
+much simpler design:
+
+- **Two states only:** `HTTPConn.tracked: bool`. The conn is either in the
+  selector for normal HTTP processing or borrowed by a worker. No third
+  WATCHDOG state, no `_WatchdogToken`, no `Server.to_watchdog`, no
+  `Server._handle_watchdog_event`.
+- **Pull-based disconnect detection.** `RequestCancel.is_cancelled` does a
+  non-blocking `recv(1, MSG_PEEK | MSG_DONTWAIT)` on the request socket.
+  `b""` means peer FIN; `BlockingIOError` means no signal; any other
+  `OSError` treats the connection as broken. The result is cached on
+  `_event` so subsequent calls don't re-issue the syscall.
+- **Single shared shutdown event.** Replaces the per-request `in_flight`
+  registry — every cancel token OR-s in a single `threading.Event` set by
+  the shutdown watcher.
+- **Worker outer-finally simplified.** Only closes when `cancel.fired`
+  (cheap event-only check) — never reads `ctx._conn.tracked`, which is
+  shared with the next request's dispatcher and would race.
+
+### Code delta
+
+- `localpost/http/server.py`: dropped `ConnMode` enum, `_WatchdogToken`
+  dataclass, `Server.to_watchdog`, `Server._handle_watchdog_event`. Replaced
+  `HTTPConn.mode: ConnMode` with `tracked: bool`. Simplified `Server.run`'s
+  for-event branch.
+- `localpost/http/_cancel.py`: `RequestCancel` gains `_sock` + `_shutdown_event`.
+  `is_cancelled` does the PEEK; `fired` is the event-only check.
+- `localpost/http/_service.py`: dropped `_request_has_body`, the in-flight
+  registry, and the watchdog branch in `dispatch`. Always `stop_tracking`.
+
+Net: ~150 lines deleted, ~30 simplified. The selector loop has only two
+event types (accept / HTTPConn) and one state field (`tracked: bool`).
+
+### Trade-offs
+
+- **Detection is cooperative now.** Disconnect surfaces only when the
+  handler calls `check_cancelled()` — same contract as service-shutdown
+  cancellation. A pure-compute handler that ignores cancellation won't
+  notice mid-flight disconnects (just like it doesn't notice service
+  shutdown). Most real handlers either poll cancellation or perform I/O,
+  which surfaces disconnects via `EPIPE`/`ECONNRESET` naturally.
+- **One extra syscall per `check_cancelled()` call** (the PEEK). Negligible
+  vs the rest of the request path.
+
+### Bench (5 s/cell, `max_concurrency=32`, 64 clients)
+
+| Stack             | Phase 2 RPS / p50 | Phase 3-simplified RPS / p50 |
+| ----------------- | ----------------: | ---------------------------: |
+| `localpost_native`|     9,381 / 6.29  |              8,961 / 7.09 ms |
+| `localpost_flask` |     8,157 / 7.44  |              8,053 / 7.88 ms |
+| `localpost_wsgi`  |     7,743 / 7.87  |              7,630 / 8.29 ms |
+
+Within run-to-run noise. We're still selector-thread CPU bound at ~9 k RPS
+— this refactor was about **maintainability and correctness**, not raising
+the ceiling. 10/10 stress runs at 800/800.
+
+### What's left for future perf work
+
+The selector ceiling is real. Options to revisit:
+
+- **Move accept + parse + dispatch to multiple selector threads.** Multiple
+  selectors each owning a slice of conns. More CPU, more lock-free.
+- **Lock-free op queue (the reverted Phase 3).** Now feasible on the
+  simpler base — only two ops to consider, no 3-way mode races. The whole
+  argument for op-queue was contention on `Server._lock`; the simpler
+  model would let it work.
+- **Replace pure-Python h11 parsing with a C parser** (e.g. `httptools`).
+  Likely the easiest win at this point.
