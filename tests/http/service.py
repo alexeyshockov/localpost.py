@@ -12,10 +12,19 @@ import anyio
 import h11
 import httpx
 import pytest
-from anyio import from_thread, to_thread
+from anyio import to_thread
 
 from localpost.hosting import serve
-from localpost.http import HTTPReqCtx, RequestCtx, Response, Routes, ServerConfig, http_server
+from localpost.http import (
+    HTTPReqCtx,
+    RequestCancelled,
+    RequestCtx,
+    Response,
+    Routes,
+    ServerConfig,
+    check_cancelled,
+    http_server,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -156,18 +165,18 @@ class TestHttpServerService:
             await lt.stopped
 
     async def test_shutdown_cancels_inflight(self, free_port):
-        """Triggering shutdown while a handler is running cancels it via the task-group cancel scope."""
+        """Triggering shutdown while a handler is running cancels it via the HTTP cancellation token."""
         handler_started = threading.Event()
         handler_cancelled = threading.Event()
 
         def handler(ctx: HTTPReqCtx):
             handler_started.set()
-            # Run a loop that cooperates with cancellation via from_thread.check_cancelled
+            # Cooperate with cancellation via localpost.http.check_cancelled
             try:
                 for _ in range(100):
-                    from_thread.check_cancelled()
+                    check_cancelled()
                     time.sleep(0.05)
-            except BaseException:
+            except RequestCancelled:
                 handler_cancelled.set()
                 raise
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
@@ -352,6 +361,58 @@ class TestDispatchLoad:
             counts = Counter(results)
             assert sum(counts.values()) == 10
             assert len(counts) >= 2
+
+
+class TestRequestCancellation:
+    async def test_check_cancelled_outside_handler_raises_lookup_error(self):
+        with pytest.raises(LookupError, match="outside a request handler"):
+            check_cancelled()
+
+    async def test_client_disconnect_cancels_handler(self, free_port):
+        """A handler doing slow work sees ``RequestCancelled`` when the client closes the socket.
+
+        The watchdog only arms for requests without a body, which is the case for the
+        bare ``GET /`` we open here. We close the socket before reading the response so
+        the server detects EOF mid-handler.
+        """
+        handler_started = threading.Event()
+        handler_cancelled = threading.Event()
+
+        def handler(ctx: HTTPReqCtx):
+            handler_started.set()
+            try:
+                for _ in range(200):
+                    check_cancelled()
+                    time.sleep(0.02)
+            except RequestCancelled:
+                handler_cancelled.set()
+                raise
+            # Should not be reached
+            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        svc = http_server(cfg, handler, max_concurrency=2)
+        async with serve(svc) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            def hit_and_drop():
+                # Open a raw socket, send a minimal GET, then close mid-handler.
+                s = socket.create_connection(("127.0.0.1", free_port), timeout=2.0)
+                s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                handler_started.wait(2.0)
+                s.close()  # peer FIN — selector watchdog should fire
+
+            await to_thread.run_sync(hit_and_drop)
+
+            # Wait for cancellation to propagate (selector poll interval + check_cancelled poll interval).
+            def wait_for_cancel():
+                return handler_cancelled.wait(5.0)
+
+            assert await to_thread.run_sync(wait_for_cancel)
+
+            lt.shutdown()
+            await lt.stopped
 
             lt.shutdown()
             await lt.stopped

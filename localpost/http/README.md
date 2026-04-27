@@ -181,6 +181,25 @@ on the documented public Flask API.
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
 is driven by `lt.shutting_down` via `threadtools.check_cancelled()`.
 
+## Design
+
+### Sync handlers only — no async
+
+`RequestHandler` is `Callable[[HTTPReqCtx], None]`, sync-only. **This is
+intentional and not a planned extension.**
+
+The whole package is built around blocking sockets and a thread pool: the
+selector accepts connections, parses HTTP/1.1 with h11, and dispatches each
+request to a worker thread that does its I/O synchronously. Per-request
+cancellation is HTTP-native (`localpost.http.check_cancelled`), driven by
+the selector's client-disconnect watchdog and by service-shutdown signals —
+not by AnyIO.
+
+If you need an async server, use one of the ASGI servers that already exist
+(uvicorn, hypercorn, granian, …) — the `localpost.hosting` adapters in
+`localpost.hosting.services/` plug them in cleanly. There is no need for
+this package to grow a second, parallel async path.
+
 ## Roadmap
 
 Items that are not currently bugs but where there's a known better
