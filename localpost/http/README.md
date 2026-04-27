@@ -84,6 +84,13 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 | `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
 
+### Cancellation
+
+| Symbol                | Notes                                                          |
+| --------------------- | -------------------------------------------------------------- |
+| `check_cancelled()`   | Cooperative cancel check for sync handlers. Raises `RequestCancelled` if the client disconnected (detected via non-blocking ``MSG_PEEK``) or the hosted service is shutting down. Call periodically in long-running handlers. |
+| `RequestCancelled`    | Exception raised by `check_cancelled()`. Inherits from `Exception` (not `BaseException`) — catchable with `except Exception:`. |
+
 ### `localpost.http.router`
 
 | Symbol                    | Notes                                      |
@@ -190,51 +197,70 @@ intentional and not a planned extension.**
 
 The whole package is built around blocking sockets and a thread pool: the
 selector accepts connections, parses HTTP/1.1 with h11, and dispatches each
-request to a worker thread that does its I/O synchronously. Per-request
-cancellation is HTTP-native (`localpost.http.check_cancelled`), driven by
-the selector's client-disconnect watchdog and by service-shutdown signals —
-not by AnyIO.
+request to a worker thread that does its I/O synchronously.
 
 If you need an async server, use one of the ASGI servers that already exist
 (uvicorn, hypercorn, granian, …) — the `localpost.hosting` adapters in
 `localpost.hosting.services/` plug them in cleanly. There is no need for
 this package to grow a second, parallel async path.
 
+### Two-state connection model
+
+A connection is either **tracked** (registered in the selector for normal
+HTTP processing) or **borrowed** (a worker thread holds it for the duration
+of one request). The dispatcher unregisters before handing off to a worker
+(`stop_tracking`); `finish_response` re-registers via `_maybe_give_back`.
+Two states, no third "watchdog" mode, no shared mode field for threads to
+race on.
+
+### Pull-based client-disconnect detection
+
+While the worker holds a borrowed connection, client disconnects are
+detected on demand: `check_cancelled()` does a non-blocking
+`recv(1, MSG_PEEK | MSG_DONTWAIT)` on the request socket. `b""` means peer
+FIN — `RequestCancelled` is raised. Handlers that do regular I/O surface
+disconnects via `EPIPE` / `ECONNRESET` naturally; handlers that compute
+without I/O should call `check_cancelled()` periodically (same contract as
+service-shutdown cancellation).
+
+This replaces an earlier push-based design where the selector kept the
+socket registered in a third "watchdog" mode and fired EOF events. That
+worked but introduced a 3-way state machine with cross-thread races. The
+pull-based variant collapses to two states and one syscall per
+`check_cancelled()` call.
+
 ## Roadmap
 
 Items that are not currently bugs but where there's a known better
 implementation worth tackling later.
 
-### Self-pipe wakeup + per-iteration op queue
+### Lock-free op queue + self-pipe wakeup
 
-Today `Server.track` / `Server.stop_tracking` mutate the selector under
-`Server._lock` from any thread, and the accept-loop thread reads it via
-`selector.select(timeout=config.select_timeout)`. The shipped selectors on
-macOS (`kqueue`) and Linux (`epoll`) observe set modifications during a wait,
-so newly tracked fds are picked up immediately and correctness is fine. On
-selectors that don't (`SelectSelector`), the loop only sees the new fd once
-the current `select()` returns — up to `select_timeout` of latency on a
-keep-alive return.
+Today `Server.track` is the only cross-thread selector mutation: workers
+call it from `_maybe_give_back` after a response completes. It acquires
+`Server._lock` to serialise the `selector.modify` / `selector.register`
+call against the selector thread. Cheap in absolute terms (~µs), but
+under heavy keep-alive contention this is per-request lock traffic.
 
-The fix is the standard **self-pipe trick** plus a single-writer model:
+Goal: make the selector the single writer to its own state.
 
-1. Allocate an internal `os.pipe()` registered for `EVENT_READ` alongside the
-   listening socket.
-2. Worker threads stop touching the selector. `track` / `stop_tracking`
-   enqueue an op (e.g. `("track", conn)`) onto a thread-safe deque, then
-   write one byte to the pipe to wake the loop.
-3. `Server.run`, at the start of each iteration, drains the pipe, drains the
-   op queue (under the lock), applies the ops, and only then calls
-   `select()`.
+1. Allocate an internal `os.pipe()` registered for `EVENT_READ` alongside
+   the listening socket.
+2. Workers stop touching the selector. `Server.track` from a worker thread
+   enqueues an op (e.g. `("track", conn)`) onto a thread-safe `deque` and
+   writes one byte to the pipe to wake the selector.
+3. `Server.run`, at the start of each iteration, drains the pipe, drains
+   the op queue, applies the ops, and only then calls `select()`.
 
-Benefits: portable across all selectors, sub-millisecond wakeup on
-track / untrack regardless of `select_timeout`, and a cleaner threading
-model where the selector has exactly one writer.
+Cost: ~80–120 LoC of careful threading, an extra fd pair per server, and
+a new stress test for rapid track / untrack churn.
 
-Cost: ~80–120 LoC of careful threading, an extra fd pair per server, and a
-new stress test for rapid track / untrack churn. Deferred for now since the
-default selector on supported platforms doesn't suffer from the latency in
-practice.
+Status: previously attempted with a 3-state conn model — the optimistic
+mode-flip semantics raced. Now that the model has been simplified to two
+states and one shared field, the op queue should fit cleanly. Deferred:
+the selector thread is CPU-bound on h11 parsing well before the lock
+becomes a bottleneck on this hardware (verified at `max_concurrency=128`).
+See [`benchmarks/http/PERF_FINDINGS.md`](../../benchmarks/http/PERF_FINDINGS.md).
 
 ## How is it different from…
 
