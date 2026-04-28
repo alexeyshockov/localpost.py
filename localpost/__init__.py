@@ -2,8 +2,6 @@ import logging
 from importlib.metadata import version
 
 from ._debug import debug
-
-# from ._run import arun, run
 from ._utils import Result
 
 try:
@@ -12,7 +10,7 @@ except Exception:
     __version__ = "dev"
 
 
-# __all__ = ["Result", "__version__", "arun", "debug", "run"]
+__all__ = ["Result", "__version__", "debug"]
 
 
 # Set up logging according to the best practices:
