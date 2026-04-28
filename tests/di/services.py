@@ -265,7 +265,7 @@ class TestScope:
             inner_registry.register_instance(inner_config)
 
             inner_ctx = AppContext()
-            inner_provider = DefaultServiceProvider(outer_provider, inner_registry, inner_ctx)
+            inner_provider = DefaultServiceProvider(outer_provider, inner_registry, inner_ctx, AppContext)
             with inner_ctx.ctx, set_cvar(current_provider, inner_provider):
                 assert inner_provider.resolve(Config).host == "inner"
                 assert current_provider.get().resolve(Config).host == "inner"

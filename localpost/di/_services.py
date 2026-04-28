@@ -56,7 +56,10 @@ class DefaultServiceProvider(ServiceProvider):
     scope_type: type[ResolutionContext]
     services: Mapping[type, object] = field(default_factory=dict, init=False)
     """Resolved services."""
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
+    """Reentrant: factories resolve their own dependencies via this same provider,
+    which re-enters the lock on the same thread. A non-reentrant ``Lock`` would
+    deadlock as soon as a service has any auto-wired dependency."""
 
     def create[T](self, target_type: type[T], /, **kwargs: Any) -> T:
         """Create an instance of the given type, resolving constructor deps not provided in kwargs."""
