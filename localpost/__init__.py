@@ -1,12 +1,12 @@
 import logging
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from ._debug import debug
 from ._utils import Result
 
 try:
     __version__ = version("localpost")
-except Exception:
+except PackageNotFoundError:
     __version__ = "dev"
 
 

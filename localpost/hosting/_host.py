@@ -15,7 +15,7 @@ from contextlib import (
 from dataclasses import dataclass, field
 from dataclasses import dataclass as define
 from functools import cached_property, wraps
-from typing import Any, ClassVar, Literal, TypeVar, final, overload
+from typing import Any, ClassVar, Literal, final, overload
 
 from anyio import CancelScope, CapacityLimiter, create_task_group, get_cancelled_exc_class, to_thread
 from anyio.abc import TaskGroup
@@ -32,8 +32,6 @@ from localpost._utils import (
     unwrap_exc,
     wait_all,
 )
-
-F = TypeVar("F", bound=Callable[..., Any])
 
 logger = logging.getLogger("localpost.hosting")
 
@@ -130,22 +128,22 @@ class ServiceLifetimeView:
         return self._state.portal.start_task_soon(self.shutting_down.wait).result()
 
     @overload
-    def cancel_on_shutdown(self) -> Callable[[F], F]: ...
+    def cancel_on_shutdown[F: Callable[..., Any]](self) -> Callable[[F], F]: ...
 
     @overload
-    def cancel_on_shutdown(self, target: F | None = None, /) -> F: ...
+    def cancel_on_shutdown[F: Callable[..., Any]](self, target: F, /) -> F: ...
 
-    def cancel_on_shutdown(self, target: F | None = None, /) -> Any:
+    def cancel_on_shutdown(self, target: Callable[..., Any] | None = None, /) -> Any:
         dec = cancellable_from(self.shutting_down)
         return dec(target) if target is not None else dec
 
     @overload
-    def cancel_on_stop(self) -> Callable[[F], F]: ...
+    def cancel_on_stop[F: Callable[..., Any]](self) -> Callable[[F], F]: ...
 
     @overload
-    def cancel_on_stop(self, target: F | None = None, /) -> F: ...
+    def cancel_on_stop[F: Callable[..., Any]](self, target: F, /) -> F: ...
 
-    def cancel_on_stop(self, target: F | None = None, /) -> Any:
+    def cancel_on_stop(self, target: Callable[..., Any] | None = None, /) -> Any:
         dec = cancellable_from(self.stopped)
         return dec(target) if target is not None else dec
 
@@ -291,12 +289,6 @@ class _ResolvedService(AbstractAsyncContextManager[ServiceLifetimeView]):
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
         assert self._run is not None
         return await self._run.__aexit__(exc_type, exc_val, exc_tb)
-
-
-@asynccontextmanager
-async def _serve_and_observe(svc_f: ServiceF, /):
-    async with serve(svc_f, parent=_svc_lt.get(None)) as lt, lt.observe():
-        yield lt
 
 
 @overload

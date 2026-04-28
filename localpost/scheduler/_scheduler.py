@@ -21,10 +21,16 @@ from localpost._utils import (
     start_task_soon,
 )
 
+# We keep module-level TypeVars (and ``Generic[...]``) for the entire module
+# rather than mixing PEP 695 ``class Foo[T]:`` with these TypeVars. ty's
+# checker treats them as distinct identifiers — a class declared with
+# ``Foo[T]`` does NOT see the module-level ``T`` and ends up with
+# ``T@Foo`` vs ``T@module``, which breaks variance inside nested
+# generic functions like ``scheduled_task → _decorator``. Once ty supports
+# better outer-scope capture, the whole module can move to PEP 695.
 T = TypeVar("T")
 T2 = TypeVar("T2")
 R = TypeVar("R")
-DecF = TypeVar("DecF", bound=Callable[..., Any])
 
 type TaskHandler[T, R] = Callable[[T], Awaitable[R]] | Callable[[], Awaitable[R]] | Callable[[T], R] | Callable[[], R]
 type HandlerDecorator = Callable[[Any], Any]
@@ -35,8 +41,8 @@ logger = logging.getLogger("localpost.scheduler")
 @final
 @dc.dataclass()
 class Task(
-    Generic[T, R],  # noqa: UP046 — kept for compat with the parameterised AbstractAsyncContextManager base
-    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],  # AsyncHandlerManager[T]
+    Generic[T, R],  # noqa: UP046 — see TypeVar comment above
+    AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],
 ):
     name: str
     event_aware: bool
@@ -206,7 +212,7 @@ type TriggerFactoryDecorator[T, T2] = Callable[
 ]
 
 
-def scheduled_task[T](
+def scheduled_task(  # noqa: UP047 — see TypeVar comment above
     tf: TriggerFactory[T], /, *, name: str | None = None
 ) -> Callable[[TaskHandler[T, R] | Task[T, R]], _ScheduledTask[T, R]]:
     """

@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Generic, TypeVar, final
+from typing import Any, final
 
 from anyio import (
     BrokenResourceError,
@@ -30,9 +30,6 @@ from localpost._utils import (
 )
 
 from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Task, Trigger
-
-T = TypeVar("T")
-ResT = TypeVar("ResT")
 
 logger = logging.getLogger("localpost.scheduler.cond")
 
@@ -96,7 +93,7 @@ def every(period: timedelta | str, /) -> ScheduledTaskTemplate[None]:
 
 @final
 @dc.dataclass(frozen=True, slots=True)
-class After(Generic[ResT]):  # noqa: UP046
+class After[ResT]:
     target: Task[Any, ResT]
 
     def __repr__(self):
@@ -121,7 +118,7 @@ class After(Generic[ResT]):  # noqa: UP046
         return maybe_closing(run())
 
 
-def after(target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[T]:  # noqa: UP047
+def after[T](target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[T]:
     """
     Trigger an event every time the target task completes successfully.
     """
@@ -130,7 +127,7 @@ def after(target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTempl
 
 @final
 @dc.dataclass(frozen=True, slots=True)
-class AfterAll(Generic[ResT]):  # noqa: UP046
+class AfterAll[ResT]:
     target: Task[Any, ResT]
 
     def __repr__(self):
@@ -151,7 +148,7 @@ class AfterAll(Generic[ResT]):  # noqa: UP046
         return maybe_closing(run())
 
 
-def after_all(target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[Result[T]]:  # noqa: UP047
+def after_all[T](target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[Result[T]]:
     """
     Trigger an event every time the target task completes (successfully or not).
     """

@@ -32,8 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `localpost.experimental.openapi`. The `experimental` segment in every
   import path is the new stability marker — README notes alone were too
   easy to miss. APIs themselves are unchanged.
+- Modernised typing throughout `localpost/_utils.py`,
+  `localpost/scheduler/`, and `localpost/hosting/_host.py` to PEP 695
+  (`class Foo[T]`, `type Foo = ...`, inline function type parameters).
+  No public-API change — the existing module-level `TypeVar` declarations
+  in `localpost/scheduler/_scheduler.py` are kept until ty learns to
+  reconcile PEP 695 class type parameters with same-named TypeVars
+  inside nested generic functions.
+- Dropped the `Programming Language :: Python :: 3.11` classifier
+  (the project's `requires-python = ">=3.12"` since 0.6).
+- Cleaner ruff/ty footprint across stable packages and shared infra
+  (`localpost/__init__.py`, `_utils.py`, `threadtools.py`): 0 errors
+  from either tool. Remaining warnings live entirely in
+  `localpost/experimental/`.
 
 ### Removed
+
+- Internal helpers that were unused everywhere: `localpost._utils.NO_OP_TS`,
+  `AsyncContextManagerAdapter`, `Switch`, the `send_or_drop_from_thread` /
+  `send_or_drop` methods on the now-trivial `MemorySendStream` (so
+  ``MemoryStream.create()`` simply returns the bare anyio
+  ``MemoryObjectSendStream`` / ``MemoryObjectReceiveStream`` pair), and
+  `localpost.hosting._host._serve_and_observe`.
 
 ## [0.6.0] - 2026-02-22
 

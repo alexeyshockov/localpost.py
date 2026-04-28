@@ -36,24 +36,30 @@ current_time = time.monotonic
 
 @final
 class CancellableLock:
-    """Same interface as threading.Lock, but acquire() is cancellation aware."""
+    """Same interface as threading.Lock, but acquire() is cancellation aware.
+
+    The class deliberately mirrors a few CPython-private attributes from
+    ``threading.RLock`` (``_release_save``, ``_acquire_restore``, ``_is_owned``)
+    so that ``threading.Condition(lock=CancellableLock(...))`` accepts it
+    transparently — the stdlib's ``Condition`` does its own duck-typing on
+    these names. This is intentional, not a leaky abstraction.
+    """
 
     __slots__ = ("__exit__", "_acquire_restore", "_is_owned", "_release_save", "locked", "release", "source")
 
-    # noinspection PyProtectedMember
     def __init__(self, lock: threading.Lock | threading.RLock | None = None) -> None:
         lock = lock or threading.Lock()
         self.source = lock
         self.release = lock.release
         self.__exit__ = lock.__exit__
         if hasattr(self.source, "locked"):
-            self.locked = lock.locked  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            self.locked = lock.locked  # type: ignore
         if hasattr(lock, "_release_save"):
-            self._release_save = lock._release_save  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            self._release_save = lock._release_save  # type: ignore
         if hasattr(lock, "_acquire_restore"):
-            self._acquire_restore = lock._acquire_restore  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            self._acquire_restore = lock._acquire_restore  # type: ignore
         if hasattr(lock, "_is_owned"):
-            self._is_owned = lock._is_owned  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+            self._is_owned = lock._is_owned  # type: ignore
 
     def acquire(self, blocking: bool = True, timeout: float | None = None) -> bool:
         if not blocking:
@@ -75,7 +81,9 @@ class CancellableLock:
 
 
 def cancellable_condition(lock: CancellableLock | None = None) -> threading.Condition:
-    cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # pyright: ignore[reportArgumentType]
+    # ``Condition`` accepts any duck-typed lock with the right private attrs;
+    # ``CancellableLock`` mirrors them (see its docstring).
+    cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
     orig_wait = cond.wait
 
     def cancellable_wait(timeout: float | None = None) -> bool:
@@ -100,8 +108,11 @@ def cancellable_condition(lock: CancellableLock | None = None) -> threading.Cond
 
 
 def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
+    # ``Semaphore`` / ``BoundedSemaphore`` use a private ``_cond`` for blocking
+    # waits; swap it for our cancellable variant so the semaphore's blocking
+    # ``acquire`` becomes cancellation-aware.
     source = threading.BoundedSemaphore(value)
-    source._cond = cancellable_condition()  # pyright: ignore[reportAttributeAccessIssue]
+    source._cond = cancellable_condition()  # type: ignore
     return source
 
 
@@ -151,10 +162,10 @@ class BaseReceiveChannel[T](Protocol):
     def clone(self) -> ReceiveChannel[T]: ...
 
     # Raises:
-    #   EndOfStream – if the sender has been closed cleanly, and no more objects are coming. This is not an error
+    #   EndOfStream - if the sender has been closed cleanly, and no more objects are coming. This is not an error
     #       condition.
-    #   ClosedResourceError – if you previously closed this ReceiveChannel object.
-    #   BrokenResourceError – if something has gone wrong, and the channel is broken.
+    #   ClosedResourceError - if you previously closed this ReceiveChannel object.
+    #   BrokenResourceError - if something has gone wrong, and the channel is broken.
     def get(self) -> T: ...
 
     def close(self): ...
@@ -176,9 +187,9 @@ class BaseSendChannel[T](Protocol):
     def clone(self) -> SendChannel[T]: ...
 
     # Raises:
-    #   BrokenResourceError – if something has gone wrong, and the channel is broken. For example, you may get this if
+    #   BrokenResourceError - if something has gone wrong, and the channel is broken. For example, you may get this if
     #       the receiver has already been closed.
-    #   ClosedResourceError – if you previously closed this SendChannel object, or if another task closes it while
+    #   ClosedResourceError - if you previously closed this SendChannel object, or if another task closes it while
     #       put() is running.
     def put(self, item: T, /) -> None: ...
 

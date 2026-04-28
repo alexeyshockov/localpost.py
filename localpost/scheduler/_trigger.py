@@ -3,26 +3,25 @@ from __future__ import annotations
 import logging
 from contextlib import AbstractAsyncContextManager
 from functools import wraps
-from typing import TypeVar, cast
+from typing import cast
 
 from localpost._utils import DelayFactory, cancellable_from, ensure_delay_factory, maybe_closing, sleep, td_str
 
 from ._scheduler import ScheduledTask, Trigger, TriggerFactory, TriggerFactoryDecorator, TriggerFactoryMiddleware
 
-T = TypeVar("T")
-T2 = TypeVar("T2")
-
 logger = logging.getLogger("localpost.scheduler.cond")
 
 
-def trigger_factory_middleware(middleware: TriggerFactoryMiddleware[T, T2]) -> TriggerFactoryDecorator[T, T2]:  # noqa: UP047
+def trigger_factory_middleware[T, T2](
+    middleware: TriggerFactoryMiddleware[T, T2],
+) -> TriggerFactoryDecorator[T, T2]:
     def _decorator(source: TriggerFactory[T]) -> TriggerFactory[T2]:
         @wraps(source)
         def _run(task):
             source_events = source(task)
             events = middleware(source_events, task)
             return cast(
-                Trigger[T2], events if isinstance(events, AbstractAsyncContextManager) else maybe_closing(events)
+                "Trigger[T2]", events if isinstance(events, AbstractAsyncContextManager) else maybe_closing(events)
             )
 
         return _run
@@ -30,7 +29,7 @@ def trigger_factory_middleware(middleware: TriggerFactoryMiddleware[T, T2]) -> T
     return _decorator
 
 
-def take_first(n: int, /) -> TriggerFactoryDecorator[T, T]:
+def take_first[T](n: int, /) -> TriggerFactoryDecorator[T, T]:
     if n < 0:
         raise ValueError("n must be a non-negative integer")
 
@@ -49,7 +48,7 @@ def take_first(n: int, /) -> TriggerFactoryDecorator[T, T]:
     return middleware
 
 
-def delay(value: DelayFactory, /) -> TriggerFactoryDecorator[T, T]:
+def delay[T](value: DelayFactory, /) -> TriggerFactoryDecorator[T, T]:
     delay_f = ensure_delay_factory(value)
 
     @trigger_factory_middleware
