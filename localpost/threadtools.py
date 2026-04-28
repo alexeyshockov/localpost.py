@@ -264,20 +264,25 @@ class SendChannel[T](BaseSendChannel[T]):
 
     @override
     def put(self, item: T, /) -> None:
-        # Phase 1: wait for space in the buffer
+        state = self._state
+        # Phase 1: wait for space in the buffer.
+        # Body of ``put_nowait`` is inlined here to avoid re-entering the lock
+        # and to skip the ``WouldBlock`` exception on the contended path.
         while True:
             check_cancelled()
-            with self._state as state:
-                try:
-                    self.put_nowait(item)
+            with state:
+                if self._closed:
+                    raise ClosedResourceError("send channel has been closed")
+                if state.can_put:
+                    state.buffer.append(item)
+                    state.not_empty.notify()
                     break
-                except WouldBlock:
-                    state.not_full.wait()
+                state.not_full.wait()
 
         # Phase 2 (rendezvous only): wait until the item is consumed
-        if self._state.capacity == 0:
+        if state.capacity == 0:
             while True:
-                with self._state as state:
+                with state:
                     if self._closed:
                         raise ClosedResourceError("send channel has been closed")
                     if len(state.buffer) == 0:
@@ -312,10 +317,11 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
 
     @override
     def get(self) -> T:
+        state = self._state
         check_cancelled()
         while not self._closed:
-            with self._state as state:
-                if len(state.buffer) > 0:
+            with state:
+                if state.buffer:
                     item = state.buffer.popleft()
                     state.not_full.notify()
                     return item
