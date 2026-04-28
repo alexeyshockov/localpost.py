@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any `RequestHandler` so it runs on a worker thread. Compose explicitly
   with `http_server` when you need a worker pool; immediate handlers
   (including a `Router`'s 404/405 path) stay on the selector thread.
+- `just deadcode` — vulture-based dead-code finder, configured in
+  `pyproject.toml` (`[tool.vulture]`).
 
 ### Changed
 

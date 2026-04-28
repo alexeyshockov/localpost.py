@@ -134,6 +134,7 @@ dev-types = [
     "types-protobuf ~=6.29",  # Must be in sync with protobuf version, see above
     "types-grpcio",  # Replaces grpc-stubs, see: https://github.com/python/typeshed/pull/11204
     "types-boto3-lite[sqs] ~=1.38",
+    "vulture ~=2.14",
 ]
 examples = [
     "fast-depends ~=3.0",
@@ -168,6 +169,27 @@ bench = [
 
 [tool.coverage.run]
 omit = ["tests/*"]
+
+[tool.vulture]
+# Dead-code finder. Run via ``just deadcode``.
+#
+# ``min_confidence`` is set high (80) so vulture stays a useful signal: the
+# 60-confidence band is dominated by public API surface vulture can't see
+# being used (decorated routes, hosting services, dataclass fields exposed
+# through reflection, etc.). The whitelist below names the 80+ confidence
+# false positives explicitly.
+paths = ["localpost"]
+exclude = ["localpost/consumers/", "localpost/openapi/"]
+min_confidence = 80
+sort_by_size = true
+ignore_names = [
+    # Overload signature parameters — present for type-checker consumption only,
+    # implementation uses ``_=None``.
+    "ret_t",
+    # Bound-method protocol parameters that ARE used in other implementations
+    # of the same protocol; vulture sees only this file.
+    "this_task",
+]
 
 [[tool.mypy.overrides]]
 module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]
