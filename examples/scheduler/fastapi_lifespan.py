@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from fastapi import FastAPI
 
+from localpost.hosting import serve
 from localpost.scheduler import Scheduler, delay, every
 
 scheduler = Scheduler()
@@ -17,9 +18,8 @@ async def heavy_background_task():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    async with scheduler.aserve():  # Scheduler in the same thread, same event loop
+    async with serve(scheduler):  # Scheduler in the same thread, same event loop
         yield
-        scheduler.shutdown()
 
 
 app = FastAPI(lifespan=lifespan)

@@ -5,10 +5,10 @@ import inspect
 import logging
 import math
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, ExitStack, asynccontextmanager
-from typing import Any, Generic, Protocol, TypeVar, cast, final
+from contextlib import AbstractAsyncContextManager, ExitStack
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, create_task_group, to_thread
+from anyio import BrokenResourceError, WouldBlock, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
@@ -18,8 +18,11 @@ from localpost._utils import (
     Result,
     def_full_name,
     is_async_callable,
-    start_task_soon,
+    wait_all,
 )
+
+if TYPE_CHECKING:
+    from localpost.hosting import ServiceLifetime
 
 # We keep module-level TypeVars (and ``Generic[...]``) for the entire module
 # rather than mixing PEP 695 ``class Foo[T]:`` with these TypeVars. ty's
@@ -191,8 +194,10 @@ class _ScheduledTask[T, R]:
             logger.debug("%r trigger is completed", self)
         logger.debug("%r is done", self)
 
-    async def __call__(self, shutting_down: EventView) -> None:
-        return await self.run(shutting_down)
+    async def __call__(self, lt: ServiceLifetime) -> None:
+        """ServiceF entry point: drives the trigger lifecycle from a hosting lifetime."""
+        lt.set_started()
+        await self.run(lt.shutting_down)
 
 
 type Trigger[T] = AbstractAsyncContextManager[AsyncIterator[T]]
@@ -230,15 +235,13 @@ def scheduled_task(  # noqa: UP047 — see TypeVar comment above
 
 class Scheduler:
     """
-    Manages a collection of periodic tasks.
-
-    Can be used standalone via `aserve()`, or integrated with hosting via `as_service()`.
+    Manages a collection of periodic tasks. ``Scheduler`` is itself a ``ServiceF`` —
+    pass it to ``localpost.hosting.run_app(...)`` or ``serve(...)`` to run.
     """
 
     def __init__(self, name: str = "scheduler"):
         self._name = name
         self._scheduled_tasks: list[_ScheduledTask[Any, Any]] = []
-        self._shutting_down: Event | None = None
 
     @property
     def name(self) -> str:
@@ -260,25 +263,18 @@ class Scheduler:
 
         return _decorator
 
-    def shutdown(self) -> None:
-        if self._shutting_down:
-            self._shutting_down.set()
-
-    @asynccontextmanager
-    async def aserve(self):
-        """Run all scheduled tasks. Use `shutdown()` or exit the context to stop."""
-        shutting_down = self._shutting_down = Event()
-        if not self._scheduled_tasks:
-            yield
-            return
-        async with create_task_group() as tg:
-            for st in self._scheduled_tasks:
-                start_task_soon(tg, lambda s=st: s.run(shutting_down))
-            yield
-            shutting_down.set()
-
-    async def as_service(self, lt) -> None:
-        """Run the scheduler as a hosting service (accepts a ServiceLifetime)."""
-        async with self.aserve():
-            lt.set_started()
+    async def __call__(self, lt: ServiceLifetime) -> None:
+        """ServiceF entry point: starts every registered task as a child service."""
+        children = [lt.start(st) for st in self._scheduled_tasks]
+        lt.set_started()
+        if not children:
             await lt.shutting_down.wait()
+            return
+
+        async def propagate_shutdown() -> None:
+            await lt.shutting_down.wait()
+            for c in children:
+                c.shutdown()
+
+        lt.tg.start_soon(propagate_shutdown)
+        await wait_all(c.stopped for c in children)

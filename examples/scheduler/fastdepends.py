@@ -2,11 +2,13 @@
 
 import logging
 import random
+import sys
 from datetime import timedelta
 
 from fast_depends import Depends, inject
 
-from localpost.scheduler import delay, every, run, scheduled_task
+from localpost.hosting import run_app
+from localpost.scheduler import delay, every, scheduled_task
 
 
 def roll_dice():
@@ -28,4 +30,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(run(print_task))
+    sys.exit(run_app(print_task))

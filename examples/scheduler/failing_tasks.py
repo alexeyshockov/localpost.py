@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 
 import logging
+import sys
 from datetime import timedelta
 
-from localpost.scheduler import Scheduler, delay, every, run, take_first
+from localpost.hosting import run_app
+from localpost.scheduler import Scheduler, delay, every, take_first
 
 scheduler = Scheduler()
 
@@ -25,4 +27,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(run(scheduler))
+    sys.exit(run_app(scheduler))

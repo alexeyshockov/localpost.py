@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import logging
 import random
 import sys
@@ -7,10 +8,10 @@ from localpost.hosting import run_app
 from localpost.scheduler import delay, every, scheduled_task, take_first
 
 
-@scheduled_task(every(timedelta(seconds=3)) // take_first(3) // delay((0, 3)))
-def task1(_):
+@scheduled_task(every(timedelta(seconds=3)) // delay((0, 3)) // take_first(3))
+def task1():
     """
-    A simple repeating task that returns a random number.
+    Fires three times (with jitter) and then the process exits on its own.
     """
     print("task1 running!")
     return random.randint(1, 22)  # Not used

@@ -74,6 +74,10 @@ See [`examples/scheduler/`](../../examples/scheduler/) for more
   same way.
 - **`Result[T]`** — output envelope (`Ok` or failure). `after()` filters
   successes and forwards the `T`; `after_all()` forwards every result.
+- **Hosting integration** — both individual tasks and `Scheduler` instances
+  are `ServiceF`s. Pass them to `localpost.hosting.run_app(...)` (entry point,
+  signal handling) or `localpost.hosting.serve(...)` (async CM, e.g. for
+  embedding in a FastAPI lifespan).
 
 ## Public API
 
@@ -83,8 +87,7 @@ See [`examples/scheduler/`](../../examples/scheduler/) for more
 | `Task`                          | Base task type                                |
 | `ScheduledTask`                 | Runtime task object                           |
 | `ScheduledTaskTemplate`         | Trigger + middleware, not yet bound to handler |
-| `Scheduler`                     | Groups multiple tasks into one hosted service |
-| `run(task_or_scheduler)`        | Entry point                                   |
+| `Scheduler`                     | Groups multiple tasks. Itself a `ServiceF` — pass to `run_app(...)` / `serve(...)` from `localpost.hosting` |
 | `every(period)`                 | Trigger: every `timedelta` or string ("3s")   |
 | `after(task)`                   | Trigger: after each success of `task`         |
 | `after_all(task)`               | Trigger: after every run of `task` (success or failure) |

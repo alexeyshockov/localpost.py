@@ -457,6 +457,14 @@ def _run_many(*svcs: ServiceF) -> ServiceF:
 
     async def _run(lt: ServiceLifetime) -> None:
         children = [lt.start(svc) for svc in svcs]
+
+        async def propagate_shutdown() -> None:
+            await lt.shutting_down.wait()
+            for c in children:
+                c.shutdown()
+
+        if children:
+            lt.tg.start_soon(propagate_shutdown)
         await wait_all(c.stopped for c in children)
 
     return _run

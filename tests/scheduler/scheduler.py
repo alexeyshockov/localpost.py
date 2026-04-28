@@ -5,6 +5,7 @@ import anyio
 import pytest
 from anyio import fail_after
 
+from localpost.hosting import serve
 from localpost.scheduler import Scheduler, every, scheduled_task
 
 pytestmark = [pytest.mark.anyio, pytest.mark.integration]
@@ -12,18 +13,17 @@ pytestmark = [pytest.mark.anyio, pytest.mark.integration]
 
 async def test_task_decorator():
     results = []
+    scheduler = Scheduler()
 
-    @scheduled_task(every(timedelta(seconds=1)))
+    @scheduler.task(every(timedelta(seconds=1)))
     def sample_task():
         results.append(random.randint(0, 10))
 
     assert callable(sample_task)
 
-    scheduler = Scheduler()
-    scheduler._scheduled_tasks.append(sample_task)
-    async with scheduler.aserve():
+    async with serve(scheduler) as lt:
         await anyio.sleep(0.5)  # "App is working"
-        scheduler.shutdown()
+        lt.shutdown()
 
     assert len(results) == 1  # Only one initial run
 
@@ -42,9 +42,9 @@ async def test_scheduler_tasks():
 
     assert callable(sample_task1)
 
-    async with scheduler.aserve():
+    async with serve(scheduler) as lt:
         await anyio.sleep(0.5)  # "App is working"
-        scheduler.shutdown()
+        lt.shutdown()
 
     assert len(results) == 2  # Only one initial run for each task
     assert "task1 result" in results
@@ -56,5 +56,20 @@ async def test_empty_scheduler():
     scheduler = Scheduler()
 
     with fail_after(1):
-        async with scheduler.aserve():
+        async with serve(scheduler):
             pass
+
+
+async def test_single_scheduled_task():
+    """A single ``@scheduled_task``-decorated function is itself a ServiceF."""
+    results = []
+
+    @scheduled_task(every(timedelta(seconds=1)))
+    def sample_task():
+        results.append(1)
+
+    async with serve(sample_task) as lt:
+        await anyio.sleep(0.5)
+        lt.shutdown()
+
+    assert len(results) == 1
