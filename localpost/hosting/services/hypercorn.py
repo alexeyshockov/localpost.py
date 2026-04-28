@@ -11,10 +11,13 @@ from localpost.hosting.services._asgi import report_started
 def hypercorn_server(app, config: hypercorn.Config, /) -> ServiceF:
     def run(sl: ServiceLifetime) -> Awaitable[None]:
         # See https://hypercorn.readthedocs.io/en/latest/how_to_guides/api_usage.html
+        # Imports must stay inline — hypercorn ships separate ``trio`` and
+        # ``asyncio`` ``serve`` modules and we pick one based on the running
+        # event loop. A top-level import would force one backend at import time.
         if current_async_library() == "trio":
-            from hypercorn.trio import serve
+            from hypercorn.trio import serve  # noqa: PLC0415
         else:
-            from hypercorn.asyncio import serve  # type: ignore[assignment]
+            from hypercorn.asyncio import serve  # type: ignore[assignment]  # noqa: PLC0415
         observed_app = report_started(sl.started, app)
         return serve(observed_app, config, shutdown_trigger=sl.shutting_down.wait)
 

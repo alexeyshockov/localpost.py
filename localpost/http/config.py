@@ -16,7 +16,7 @@ LOGGER_NAME: Final = "localpost.http"
 @final
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # noqa: S104 — listen on all interfaces by default; explicit choice for a server lib
     port: int = 8000
     backlog: int = 1024
     """Maximum number of queued (in the kernel) connections."""

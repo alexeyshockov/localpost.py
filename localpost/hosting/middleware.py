@@ -16,8 +16,8 @@ async def _observe_started(lt: ServiceLifetimeView, timeout: float) -> None:
     raise TimeoutError(f"Service did not start within {timeout} second(s)")
 
 
-def start_timeout[F](timeout: float) -> Callable[[F], F]:
-    def decorator(func: F) -> F:
+def start_timeout(timeout: float) -> Callable[[ServiceF], ServiceF]:
+    def decorator(func: ServiceF) -> ServiceF:
         @wraps(func)
         def wrapper(lt: ServiceLifetime) -> Awaitable[None]:
             lt.tg.start_soon(lt.view.cancel_on_shutdown(_observe_started), lt, timeout)

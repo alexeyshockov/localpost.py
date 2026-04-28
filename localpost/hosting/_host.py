@@ -288,7 +288,7 @@ class _ResolvedService(AbstractAsyncContextManager[ServiceLifetimeView]):
         self._run = serve(self.func, parent=_svc_lt.get(None))
         return await self._run.__aenter__()
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool | None:
         assert self._run is not None
         return await self._run.__aexit__(exc_type, exc_val, exc_tb)
 
@@ -317,7 +317,10 @@ def service(target: Callable[..., Any] | None = None):
             if is_async_callable(raw_svc_f):
                 svc_f = raw_svc_f
             else:
-                svc_f = lambda lt: to_thread.run_sync(raw_svc_f, lt, limiter=CapacityLimiter(1))
+                limiter = CapacityLimiter(1)
+
+                async def svc_f(lt: ServiceLifetime) -> None:
+                    await to_thread.run_sync(raw_svc_f, lt, limiter=limiter)
             return _ResolvedService(svc_f)
 
         if inspect.isasyncgenfunction(func):

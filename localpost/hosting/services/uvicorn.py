@@ -24,8 +24,13 @@ def uvicorn_server(config: uvicorn.Config):
             await server_main_loop()
             sl.set_shutting_down()
 
-        server.main_loop = lf_aware_main_loop
-        server.capture_signals = nullcontext
+        # Monkey-patch the bound methods on this Server instance: the original
+        # ``main_loop`` is wrapped to fire ``set_started`` / ``set_shutting_down``
+        # at the right moments, and ``capture_signals`` is replaced with a no-op
+        # CM so uvicorn doesn't install its own signal handlers (we want our
+        # ``shutdown_on_signal`` middleware to drive shutdown).
+        server.main_loop = lf_aware_main_loop  # ty: ignore[invalid-assignment]
+        server.capture_signals = nullcontext  # ty: ignore[invalid-assignment]
 
         async def observe_shutdown(trigger: AnyEventView):
             await trigger.wait()
