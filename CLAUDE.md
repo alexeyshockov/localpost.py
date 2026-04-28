@@ -11,14 +11,15 @@ processes. Five pillars:
 - **scheduler** *(stable)* — in-process, composable task scheduler.
 - **http** *(stable)* — lightweight sync HTTP/1.1 server.
 - **di** *(stable)* — small `.NET`-style IoC container with scopes.
-- **consumers** *(experimental)* — message broker consumers (channel, stream, queue, Pub/Sub; more planned).
-- **openapi** *(experimental)* — type-driven OpenAPI layer on top of `http`.
+- **experimental.consumers** *(experimental)* — message broker consumers (channel, stream, queue, Pub/Sub; more planned).
+- **experimental.openapi** *(experimental)* — type-driven OpenAPI layer on top of `http`.
 
 Built on AnyIO (runs on asyncio or Trio).
 
 **Stability note:** "stable" modules have settled public APIs — avoid
-breaking changes unless explicitly asked. "Experimental" modules are usable
-but their shape is still evolving; feel free to refactor them, and flag
+breaking changes unless explicitly asked. Experimental modules live under
+``localpost.experimental.`` so the import path itself flags them; they're
+usable but their shape is still evolving — refactor freely, and flag
 breaking changes in the CHANGELOG.
 
 ## Development commands
@@ -68,13 +69,6 @@ localpost/
 │   ├── _trigger.py      # Trigger decorators (WIP)
 │   └── cond/cron.py     # cron(...) trigger — needs [cron] extra
 │
-├── consumers/           # Message broker consumers
-│   ├── channel.py       # in-memory channel
-│   ├── stream.py        # AnyIO ObjectReceiveStream
-│   ├── stdlib_queue.py  # queue.Queue / SimpleQueue
-│   ├── pubsub.py        # Google Cloud Pub/Sub (in-progress; imports are broken)
-│   └── _utils.py        # SyncHandler / AsyncHandler / AnyHandler types
-│
 ├── di/                  # IoC container
 │   ├── _services.py     # ServiceRegistry, ServiceProvider, AppContext
 │   ├── flask.py         # Flask integration (RequestContext per request)
@@ -87,15 +81,22 @@ localpost/
 │   ├── config.py        # ServerConfig
 │   └── _service.py      # @hosting.service wrappers (http_server, wsgi_server)
 │
-└── openapi/             # Type-driven OpenAPI framework
-    ├── app.py           # HttpApp, FromPath/Query/Header/Body, OpResult hierarchy
-    ├── spec.py          # OpenAPI spec dataclasses
-    ├── converters.py
-    ├── pydantic.py      # Pydantic body/result converters
-    ├── msgspec.py       # msgspec converters (stub)
-    ├── sse.py           # Server-Sent Events
-    ├── _docs.py         # Swagger UI / ReDoc / Scalar HTML templates
-    └── DESIGN.md        # Deeper design notes
+└── experimental/        # Unstable APIs — wrapped in their own subpackage as a marker
+    ├── consumers/       # Message broker consumers
+    │   ├── channel.py       # in-memory channel
+    │   ├── stream.py        # AnyIO ObjectReceiveStream
+    │   ├── stdlib_queue.py  # queue.Queue / SimpleQueue
+    │   ├── pubsub.py        # Google Cloud Pub/Sub (in-progress; imports are broken)
+    │   └── _utils.py        # SyncHandler / AsyncHandler / AnyHandler types
+    └── openapi/         # Type-driven OpenAPI framework
+        ├── app.py           # HttpApp, FromPath/Query/Header/Body, OpResult hierarchy
+        ├── spec.py          # OpenAPI spec dataclasses
+        ├── converters.py
+        ├── pydantic.py      # Pydantic body/result converters
+        ├── msgspec.py       # msgspec converters (stub)
+        ├── sse.py           # Server-Sent Events
+        ├── _docs.py         # Swagger UI / ReDoc / Scalar HTML templates
+        └── DESIGN.md        # Deeper design notes
 ```
 
 Files prefixed with `_` are internal; public API is re-exported from each
@@ -137,7 +138,7 @@ For more detail on each module, see:
 
 @localpost/hosting/README.md
 @localpost/scheduler/README.md
-@localpost/consumers/README.md
 @localpost/di/README.md
 @localpost/http/README.md
-@localpost/openapi/README.md
+@localpost/experimental/consumers/README.md
+@localpost/experimental/openapi/README.md

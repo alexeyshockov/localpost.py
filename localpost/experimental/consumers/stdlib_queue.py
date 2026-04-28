@@ -9,7 +9,7 @@ from anyio import CancelScope, CapacityLimiter, create_task_group, from_thread, 
 
 from localpost import threadtools
 from localpost._utils import is_async_callable
-from localpost.consumers._utils import AnyHandler
+from localpost.experimental.consumers._utils import AnyHandler
 
 if sys.version_info >= (3, 13):
     from queue import ShutDown

@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drop their `max_concurrency` kwarg for the same reason — wrap with
   `thread_pool_handler` if you need a pool (typical for blocking WSGI
   / Flask apps).
+- **Experimental sub-packages moved.** `localpost.consumers` →
+  `localpost.experimental.consumers`; `localpost.openapi` →
+  `localpost.experimental.openapi`. The `experimental` segment in every
+  import path is the new stability marker — README notes alone were too
+  easy to miss. APIs themselves are unchanged.
 
 ### Removed
 

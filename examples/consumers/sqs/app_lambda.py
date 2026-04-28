@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from localpost.consumers.sqs import lambda_handler, sqs_queue_consumer
+from localpost.experimental.consumers.sqs import lambda_handler, sqs_queue_consumer
 
 
 @sqs_queue_consumer("weather-forecasts")

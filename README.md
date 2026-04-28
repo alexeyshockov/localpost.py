@@ -75,18 +75,19 @@ parallel, and exits cleanly when they all stop.
 
 ## Modules
 
-| Module                              | Status         | Purpose                                                 |
-| ----------------------------------- | -------------- | ------------------------------------------------------- |
-| [`hosting`](localpost/hosting/)     | stable         | Service lifecycle, signals, middleware, ASGI/gRPC adapters |
-| [`scheduler`](localpost/scheduler/) | stable         | Composable in-process task scheduler                    |
-| [`di`](localpost/di/)               | stable         | Scoped IoC container                                    |
-| [`http`](localpost/http/)           | stable         | Small h11-based HTTP/1.1 server                         |
-| [`consumers`](localpost/consumers/) | experimental   | Message broker consumer services                        |
-| [`openapi`](localpost/openapi/)     | experimental   | Type-driven OpenAPI framework                           |
+| Module                                                                         | Status         | Purpose                                                 |
+| ------------------------------------------------------------------------------ | -------------- | ------------------------------------------------------- |
+| [`hosting`](localpost/hosting/)                                                | stable         | Service lifecycle, signals, middleware, ASGI/gRPC adapters |
+| [`scheduler`](localpost/scheduler/)                                            | stable         | Composable in-process task scheduler                    |
+| [`di`](localpost/di/)                                                          | stable         | Scoped IoC container                                    |
+| [`http`](localpost/http/)                                                      | stable         | Small h11-based HTTP/1.1 server                         |
+| [`experimental.consumers`](localpost/experimental/consumers/)                  | experimental   | Message broker consumer services                        |
+| [`experimental.openapi`](localpost/experimental/openapi/)                      | experimental   | Type-driven OpenAPI framework                           |
 
 "Stable" means the public API is not expected to break in a patch or minor
-release. "Experimental" means the module is usable and tested, but the API
-surface is still being shaped — breaking changes may land before `1.0`.
+release. Experimental modules live under `localpost.experimental.<name>`;
+the import path itself is the marker — the API is still being shaped and
+breaking changes may land before `1.0`.
 
 Each subdirectory has its own README with a quickstart, key concepts, and
 extension points.

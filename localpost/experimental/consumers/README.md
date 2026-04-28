@@ -1,6 +1,6 @@
-# localpost.consumers
+# localpost.experimental.consumers
 
-> **Status:** experimental — API surface is still being shaped; expect breaking changes before `1.0`.
+> **Status:** experimental — lives under ``localpost.experimental.`` so the import path itself is the marker; expect breaking changes before `1.0`.
 
 Consumer services for message sources. A consumer is a small `@hosting.service`
 wrapper that reads from a source (in-memory channel, AnyIO stream, `queue.Queue`,
@@ -31,14 +31,14 @@ Shipped adapters:
   being reworked — treat as in-progress)
 
 Adapters for SQS, Kafka, NATS and Azure exist as extras in `pyproject.toml` but
-the integrations currently live in [`examples/consumers/`](../../examples/consumers/).
-They will move into `localpost.consumers` as they stabilise.
+the integrations currently live in [`examples/consumers/`](../../../examples/consumers/).
+They will move into `localpost.experimental.consumers` as they stabilise.
 
 ## Quick start
 
 ```python
 import anyio
-from localpost.consumers.stream import stream_consumer
+from localpost.experimental.consumers.stream import stream_consumer
 from localpost.hosting import run_app
 
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
 ```
 
 For a full consumer-as-service example, see
-[`examples/host/channel.py`](../../examples/host/channel.py).
+[`examples/host/channel.py`](../../../examples/host/channel.py).
 
 ## Key concepts
 
@@ -103,7 +103,7 @@ has started. Pattern from `stream.py`:
 ```python
 from anyio import Semaphore, create_task_group
 from localpost import hosting
-from localpost.consumers._utils import AnyHandler, ensure_async_handler
+from localpost.experimental.consumers._utils import AnyHandler, ensure_async_handler
 
 
 @hosting.service
@@ -133,6 +133,6 @@ Accept a source, a handler, and at least `max_concurrency`. Honour
 
 ## See also
 
-- Examples: [`examples/consumers/`](../../examples/consumers/) (SQS, Kafka stubs)
-- Channel + host: [`examples/host/channel.py`](../../examples/host/channel.py)
-- Sync primitives: [`../threadtools.py`](../threadtools.py)
+- Examples: [`examples/consumers/`](../../../examples/consumers/) (SQS, Kafka stubs)
+- Channel + host: [`examples/host/channel.py`](../../../examples/host/channel.py)
+- Sync primitives: [`../../threadtools.py`](../../threadtools.py)

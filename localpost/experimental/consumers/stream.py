@@ -7,7 +7,7 @@ from anyio.abc import ObjectReceiveStream
 
 from localpost import hosting
 from localpost._utils import NullSemaphore, ensure_int_or_inf
-from localpost.consumers._utils import AnyHandler, ensure_async_handler
+from localpost.experimental.consumers._utils import AnyHandler, ensure_async_handler
 
 __all__ = ["stream_consumer"]
 

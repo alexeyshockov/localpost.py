@@ -3,8 +3,8 @@
 import os
 
 from localpost import flow
-from localpost.consumers import sqs_otel
-from localpost.consumers.sqs import SqsMessage, sqs_queue_consumer
+from localpost.experimental.consumers import sqs_otel
+from localpost.experimental.consumers.sqs import SqsMessage, sqs_queue_consumer
 
 
 @sqs_queue_consumer("weather-forecasts")

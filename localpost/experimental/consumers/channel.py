@@ -5,7 +5,7 @@ from anyio import CapacityLimiter, ClosedResourceError, create_task_group, from_
 
 from localpost import hosting, threadtools
 from localpost._utils import is_async_callable
-from localpost.consumers._utils import AnyHandler
+from localpost.experimental.consumers._utils import AnyHandler
 from localpost.threadtools import Channel, ReceiveChannel
 
 __all__ = ["channel_consumer"]

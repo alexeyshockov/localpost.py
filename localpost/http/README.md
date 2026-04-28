@@ -8,7 +8,7 @@ server core is ~540 lines of focused, sync code — easy to read, easy to embed.
 
 Pair it with `localpost.hosting` for lifecycle management, or run it standalone.
 For OpenAPI / content negotiation / validation, see
-[`localpost.openapi`](../openapi/README.md).
+[`localpost.experimental.openapi`](../experimental/openapi/README.md).
 
 ## Install
 
@@ -309,7 +309,7 @@ for the analysis behind the current bench numbers.
 
 - **Flask** — Flask is web-first (templates, Jinja, sessions) with no built-in
   OpenAPI support. `localpost.http` is a low-level server; pair it with
-  `localpost.openapi` for type-driven OpenAPI.
+  `localpost.experimental.openapi` for type-driven OpenAPI.
 - **FastAPI** — FastAPI is async, Pydantic-only, OpenAPI-only, and ships a
   dependency-injection system. `localpost.http` is sync, has no opinions on
   serialization, and is small enough to read in one sitting.
@@ -317,6 +317,6 @@ for the analysis behind the current bench numbers.
 ## See also
 
 - Examples: [`examples/http/`](../../examples/http/)
-- OpenAPI on top: [`../openapi/README.md`](../openapi/README.md)
+- OpenAPI on top: [`../experimental/openapi/README.md`](../experimental/openapi/README.md)
 - Server source: [`server.py`](server.py)
 - Router source: [`router.py`](router.py)

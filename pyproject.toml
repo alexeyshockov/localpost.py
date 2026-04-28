@@ -179,7 +179,7 @@ omit = ["tests/*"]
 # through reflection, etc.). The whitelist below names the 80+ confidence
 # false positives explicitly.
 paths = ["localpost"]
-exclude = ["localpost/consumers/", "localpost/openapi/"]
+exclude = ["localpost/experimental/"]
 min_confidence = 80
 sort_by_size = true
 ignore_names = [

@@ -1,7 +1,7 @@
 import pytest
 from anyio import create_memory_object_stream, sleep
 
-from localpost.consumers.stream import stream_consumer
+from localpost.experimental.consumers.stream import stream_consumer
 from localpost.hosting import serve
 
 pytestmark = [pytest.mark.anyio]

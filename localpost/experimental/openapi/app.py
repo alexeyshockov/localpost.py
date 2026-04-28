@@ -11,9 +11,9 @@ from typing import Annotated, Any, ParamSpec, Protocol, Self, TypeVar, Union, fi
 
 import msgspec
 
-import localpost.openapi.spec as openapi_spec
+import localpost.experimental.openapi.spec as openapi_spec
 from localpost.http.router import RequestCtx, RequestHandler, Response, Router, URITemplate
-from localpost.openapi._docs import REDOC_HTML, SCALAR_HTML, SWAGGER_HTML
+from localpost.experimental.openapi._docs import REDOC_HTML, SCALAR_HTML, SWAGGER_HTML
 
 P = ParamSpec("P")
 R = TypeVar("R")

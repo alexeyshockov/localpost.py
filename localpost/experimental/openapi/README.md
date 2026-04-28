@@ -1,8 +1,8 @@
-# localpost.openapi
+# localpost.experimental.openapi
 
-> **Status:** experimental — API surface is still being shaped; expect breaking changes before `1.0`.
+> **Status:** experimental — lives under ``localpost.experimental.`` so the import path itself is the marker; expect breaking changes before `1.0`.
 
-A type-driven OpenAPI 3.0 framework sitting on top of [`localpost.http`](../http/README.md).
+A type-driven OpenAPI 3.0 framework sitting on top of [`localpost.http`](../../http/README.md).
 
 Define operations as ordinary Python functions. Types, annotations, and return
 types are inspected to build the OpenAPI doc and to wire path / query / header /
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Annotated
 from wsgiref.simple_server import make_server
 
-from localpost.openapi.app import BadRequest, FromPath, HttpApp, NotFound
+from localpost.experimental.openapi.app import BadRequest, FromPath, HttpApp, NotFound
 
 
 @dataclass
@@ -67,7 +67,7 @@ if __name__ == "__main__":
         server.serve_forever()
 ```
 
-Full example: [`examples/openapi/app.py`](../../examples/openapi/app.py).
+Full example: [`examples/openapi/app.py`](../../../examples/openapi/app.py).
 
 ## Key concepts
 
@@ -75,7 +75,7 @@ Full example: [`examples/openapi/app.py`](../../examples/openapi/app.py).
   registered operations. Exposes `.wsgi` for any WSGI host (including
   `localpost.http.wsgi_server`).
 - **Operations** — Python functions registered with `@app.get(path)`,
-  `.post`, etc. The path follows [`URITemplate`](../http/README.md) syntax
+  `.post`, etc. The path follows [`URITemplate`](../../http/README.md) syntax
   (`/books/{id}`).
 - **Arg resolvers** — one per parameter, picked from the annotation. Factories:
   - `FromPath()` — path variable (auto-detected for params whose name matches a
@@ -97,7 +97,7 @@ Full example: [`examples/openapi/app.py`](../../examples/openapi/app.py).
 
 ## Public API
 
-From `localpost.openapi.app`:
+From `localpost.experimental.openapi.app`:
 
 | Symbol              | Purpose                                             |
 | ------------------- | --------------------------------------------------- |
@@ -110,7 +110,7 @@ From `localpost.openapi.app`:
 | `BadRequest[T]`, `Unauthorized[T]`, `NotFound[T]`, `TooManyRequests[T]` | `OpResult` subclasses |
 | `OpFilter` (Protocol) | Per-operation pre-filter (e.g. `limit_requests`)  |
 
-From `localpost.openapi.spec`:
+From `localpost.experimental.openapi.spec`:
 
 | Symbol               | Notes                                               |
 | -------------------- | --------------------------------------------------- |
@@ -131,7 +131,7 @@ From `localpost.openapi.spec`:
 ## Writing a custom arg resolver
 
 ```python
-from localpost.openapi.app import ArgResolverFactory
+from localpost.experimental.openapi.app import ArgResolverFactory
 from localpost.http.router import RequestCtx
 
 class FromCookie(ArgResolverFactory):
@@ -156,6 +156,6 @@ def me(session: Annotated[str, FromCookie("session")]) -> str:
 
 ## See also
 
-- Examples: [`examples/openapi/`](../../examples/openapi/)
+- Examples: [`examples/openapi/`](../../../examples/openapi/)
 - Design notes: [`DESIGN.md`](DESIGN.md)
-- Underlying server: [`../http/README.md`](../http/README.md)
+- Underlying server: [`../../http/README.md`](../../http/README.md)
