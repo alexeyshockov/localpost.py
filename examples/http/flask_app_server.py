@@ -1,4 +1,4 @@
-"""Flask app served via ``flask_server`` — streaming without ``@stream_with_context``.
+"""Flask app served via the native Flask adapter — streaming without ``@stream_with_context``.
 
 Run::
 
@@ -9,9 +9,9 @@ Run::
 
 Key difference from the WSGI example: the ``/stream/...`` view returns a
 generator that reads ``flask.request.headers`` while yielding — and we did
-**not** wrap it in ``@stream_with_context``. It works because
-:func:`localpost.http.flask.flask_server` keeps Flask's request context
-active through response-body iteration.
+**not** wrap it in ``@stream_with_context``. It works because the native
+Flask handler (:func:`localpost.http.flask.flask_handler`) keeps Flask's
+request context active through response-body iteration.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ import sys
 from flask import Flask, Response
 from flask import request as flask_request
 
-from localpost.hosting import run_app
-from localpost.http import ServerConfig
-from localpost.http.flask import flask_server
+from localpost.hosting import run_app, service
+from localpost.http import ServerConfig, http_server, thread_pool_handler
+from localpost.http.flask import flask_handler
 
 
 def build_app() -> Flask:
@@ -46,16 +46,23 @@ def build_app() -> Flask:
 
     @app.teardown_request
     def _log_teardown(exc):
-        # Under flask_server this runs AFTER the body is fully sent.
+        # Under the native Flask handler this runs AFTER the body is fully sent.
         app.logger.info("teardown_request (exc=%r)", exc)
 
     return app
 
 
+@service
+async def app_svc():
+    config = ServerConfig(host="127.0.0.1", port=8000)
+    async with thread_pool_handler(flask_handler(build_app()), max_concurrency=8) as wrapped:
+        async with http_server(config, wrapped):
+            yield
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    config = ServerConfig(host="127.0.0.1", port=8000)
-    return run_app(flask_server(config, build_app(), max_concurrency=8))
+    return run_app(app_svc())
 
 
 if __name__ == "__main__":

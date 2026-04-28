@@ -237,6 +237,15 @@ class Server:
         # Selector-thread only. Lock-free: ``self.selector`` and
         # ``conn.tracked`` are owned by the selector thread.
         #
+        # We deliberately keep this on the selector thread rather than a
+        # dedicated cleanup thread. With the lazy gate below the common
+        # case is an O(1) timestamp compare (no walk); the actual O(N)
+        # sweep runs at most every ``_cleanup_interval``, ~twice a second
+        # by default. A separate thread would either need a lock around
+        # ``selector.get_map()`` (losing the lock-free property of the
+        # current op-queue model) or maintain a parallel data structure
+        # — both add machinery without buying anything visible.
+        #
         # Lazy: skip the O(N) walk over registered conns when not enough
         # time has passed since the last sweep. Worst-case extra detection
         # latency is ``_cleanup_interval`` (default 0.5 s) on top of the
@@ -664,14 +673,24 @@ class HTTPReqCtx:
 
     @contextmanager
     def borrow(self):
+        """Switch the conn out of selector tracking for the duration of the block.
+
+        Useful for selector-thread handlers that need to do blocking I/O
+        (e.g. reading a request body after sending ``100 Continue``).
+        ``finish_response`` re-tracks the conn via ``_maybe_give_back`` on
+        the success path; on early exit we re-track here.
+
+        The :func:`thread_pool_handler` dispatch path doesn't go through this
+        CM — it calls ``stop_tracking`` directly before queueing the conn to
+        a worker, and the response-completion logic re-tracks via
+        ``finish_response``.
+        """
         assert not self.borrowed
         self._server.stop_tracking(self._conn)
         try:
             yield self
         finally:
             self._maybe_give_back()
-            # if not self._conn.recv_closed:
-            #     self._server.track(self._conn)
 
     def _maybe_give_back(self) -> None:
         if self.borrowed:

@@ -8,9 +8,11 @@ Run::
     curl http://localhost:8000/hello/world
     curl http://localhost:8000/slow    # sleeps; spam a few of these in parallel
 
-Handlers run in AnyIO worker threads (``to_thread.run_sync``), bounded by
-``max_concurrency``. Each request becomes its own async task in the service's task
-group, so SIGINT / SIGTERM cancels in-flight work cleanly.
+The whole router is wrapped with :func:`localpost.http.thread_pool_handler` so
+every matched route runs on a worker thread (bounded by ``max_concurrency``).
+SIGINT / SIGTERM signals shutdown; in-flight handlers see ``RequestCancelled``
+on the next ``check_cancelled`` call and the pool drains before the process
+exits.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import sys
 import threading
 import time
 
-from localpost.hosting import run_app
+from localpost.hosting import run_app, service
 from localpost.http import (
     RequestCtx,
     Response,
@@ -28,6 +30,7 @@ from localpost.http import (
     Routes,
     ServerConfig,
     http_server,
+    thread_pool_handler,
 )
 
 
@@ -55,11 +58,17 @@ def build_router() -> Router:
     return routes.build()
 
 
+@service
+async def app():
+    config = ServerConfig(host="127.0.0.1", port=8000)
+    async with thread_pool_handler(build_router().as_handler(), max_concurrency=16) as wrapped:
+        async with http_server(config, wrapped):
+            yield
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
-    router = build_router()
-    config = ServerConfig(host="127.0.0.1", port=8000)
-    return run_app(http_server(config, router.as_handler(), max_concurrency=16))
+    return run_app(app())
 
 
 if __name__ == "__main__":

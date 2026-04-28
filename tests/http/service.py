@@ -1,4 +1,6 @@
-"""Tests for localpost.http._service (the hosted http_server service)."""
+"""Tests for ``localpost.http._service`` (the hosted ``http_server`` service)
+and ``localpost.http._pool`` (the ``thread_pool_handler`` async CM).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +9,8 @@ import socket
 import threading
 import time
 from collections import Counter
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 import anyio
 import h11
@@ -14,7 +18,7 @@ import httpx
 import pytest
 from anyio import to_thread
 
-from localpost.hosting import serve
+from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
     HTTPReqCtx,
     RequestCancelled,
@@ -24,9 +28,27 @@ from localpost.http import (
     ServerConfig,
     check_cancelled,
     http_server,
+    thread_pool_handler,
 )
+from localpost.http.server import RequestHandler
 
 pytestmark = pytest.mark.anyio
+
+
+@asynccontextmanager
+async def _serve_pooled(
+    cfg: ServerConfig,
+    handler: RequestHandler,
+    *,
+    max_concurrency: int,
+) -> AsyncGenerator[ServiceLifetimeView]:
+    """Compose ``thread_pool_handler`` + ``http_server`` and yield the http_server lifetime view.
+
+    Tests own shutdown via the yielded lifetime; the pool drains on exit.
+    """
+    async with thread_pool_handler(handler, max_concurrency=max_concurrency) as wrapped:
+        async with serve(http_server(cfg, wrapped)) as lt:
+            yield lt
 
 
 def _handler_200(body: bytes = b"ok"):
@@ -64,10 +86,23 @@ async def _wait_server_ready(port: int, deadline: float = 5.0):
 
 
 class TestHttpServerService:
-    async def test_serves_single_request(self, free_port):
+    async def test_serves_single_request_immediate(self, free_port):
+        """Immediate handler: no thread pool, runs on the selector thread."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, _handler_200(b"hi"))
-        async with serve(svc) as lt:
+        async with serve(http_server(cfg, _handler_200(b"hi"))) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+            resp = await _get(f"http://127.0.0.1:{free_port}/")
+            assert resp.status_code == 200
+            assert resp.text == "hi"
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_serves_single_request_pooled(self, free_port):
+        """Pool-wrapped handler: same observable behaviour, but on a worker thread."""
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_pooled(cfg, _handler_200(b"hi"), max_concurrency=1) as lt:
             await lt.started
             await _wait_server_ready(free_port)
             resp = await _get(f"http://127.0.0.1:{free_port}/")
@@ -96,8 +131,7 @@ class TestHttpServerService:
             )
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=4)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=4) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -134,7 +168,7 @@ class TestHttpServerService:
             await lt.stopped
 
     async def test_max_concurrency_one_serializes(self, free_port):
-        """With max_concurrency=1, requests are handled one at a time."""
+        """With a 1-slot pool, requests are handled one at a time."""
         in_flight = 0
         peak = 0
         lock = threading.Lock()
@@ -150,8 +184,7 @@ class TestHttpServerService:
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=1)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -165,13 +198,17 @@ class TestHttpServerService:
             await lt.stopped
 
     async def test_shutdown_cancels_inflight(self, free_port):
-        """Triggering shutdown while a handler is running cancels it via the HTTP cancellation token."""
+        """Triggering shutdown while a handler is running cancels it via the HTTP cancellation token.
+
+        ``thread_pool_handler``'s exit sets the shared shutdown event ORed into
+        every in-flight ``RequestCancel``, so the next ``check_cancelled`` call
+        in the handler raises ``RequestCancelled``.
+        """
         handler_started = threading.Event()
         handler_cancelled = threading.Event()
 
         def handler(ctx: HTTPReqCtx):
             handler_started.set()
-            # Cooperate with cancellation via localpost.http.check_cancelled
             try:
                 for _ in range(100):
                     check_cancelled()
@@ -182,8 +219,7 @@ class TestHttpServerService:
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=2)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -202,7 +238,7 @@ class TestHttpServerService:
 
             await lt.stopped
 
-        # The handler's own loop observes cancellation via from_thread.check_cancelled.
+        # The handler's own loop observes cancellation via ``check_cancelled``.
         assert handler_cancelled.is_set()
 
     async def test_router_dispatch_via_service(self, free_port):
@@ -216,8 +252,7 @@ class TestHttpServerService:
         router = routes.build()
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, router.as_handler(), max_concurrency=4)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, router.as_handler(), max_concurrency=4) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -233,7 +268,53 @@ class TestHttpServerService:
 
     async def test_invalid_max_concurrency(self):
         with pytest.raises(ValueError, match="max_concurrency"):
-            http_server(ServerConfig(), _handler_200(), max_concurrency=0)
+            # The CM-creation call is enough to trigger validation; we don't
+            # need to enter it.
+            thread_pool_handler(_handler_200(), max_concurrency=0)
+
+
+class TestSelectorThreadFastPath:
+    """When the Router is passed directly to ``http_server`` (no ``thread_pool_handler``
+    wrapping), every route — including the 404 / 405 paths — runs on the selector
+    thread. No thread pool is involved at all, so 404/405 cost is just a regex
+    match plus a static response payload."""
+
+    async def test_router_direct_runs_on_one_thread(self, free_port):
+        """Matched routes all share a single thread (the selector). 404 returns
+        normally even though there's no worker pool to dispatch it through."""
+        threads_seen: set[int] = set()
+        lock = threading.Lock()
+
+        routes = Routes()
+
+        @routes.get("/hit")
+        def hit(_: RequestCtx) -> Response:
+            with lock:
+                threads_seen.add(threading.get_ident())
+            return Response(200, {"content-type": "text/plain"}, [b"ok"])
+
+        assert hit is not None
+        router = routes.build()
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, router.as_handler())) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            for _ in range(3):
+                r = await _get(f"http://127.0.0.1:{free_port}/hit")
+                assert r.status_code == 200
+
+            r = await _get(f"http://127.0.0.1:{free_port}/missing")
+            assert r.status_code == 404
+
+            # Every matched request was served from the same thread — the
+            # selector. With no ``thread_pool_handler`` in the composition,
+            # there are no worker threads to fan out to.
+            assert len(threads_seen) == 1, threads_seen
+
+            lt.shutdown()
+            await lt.stopped
 
 
 class TestServiceRobustness:
@@ -255,8 +336,7 @@ class TestServiceRobustness:
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=3)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=3) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -292,8 +372,7 @@ class TestServiceRobustness:
             raise RuntimeError("handler crashed")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, boom, max_concurrency=2)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, boom, max_concurrency=2) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -308,18 +387,17 @@ class TestServiceRobustness:
         assert lt.exit_code == 0
 
     async def test_slot_released_after_normal_request(self, free_port):
-        """Repeatedly hitting a max_concurrency=1 service must keep working.
+        """Repeatedly hitting a 1-slot pool must keep working.
 
-        Indirectly confirms ``req_slots.release()`` runs on the success path —
-        if it didn't, the second request would block forever on the semaphore.
+        Indirectly confirms the worker channel slot is released on the success
+        path — if it weren't, the second request would block forever.
         """
 
         def handler(ctx: HTTPReqCtx):
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=1)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -342,8 +420,7 @@ class TestDispatchLoad:
                 tid,
             )
 
-        svc = http_server(cfg, handler, max_concurrency=8)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=8) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -391,8 +468,7 @@ class TestRequestCancellation:
             ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        svc = http_server(cfg, handler, max_concurrency=2)
-        async with serve(svc) as lt:
+        async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -410,9 +486,6 @@ class TestRequestCancellation:
                 return handler_cancelled.wait(5.0)
 
             assert await to_thread.run_sync(wait_for_cancel)
-
-            lt.shutdown()
-            await lt.stopped
 
             lt.shutdown()
             await lt.stopped

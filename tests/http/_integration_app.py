@@ -1,8 +1,8 @@
 """Subprocess entry point for integration tests.
 
 Runs a hosted localpost HTTP server (Router-based by default; switchable
-to wsgi_server / flask_server via env vars) on the port given by
-``LP_TEST_PORT`` and the anyio backend given by ``LP_TEST_BACKEND``
+to a WSGI / Flask app via the ``LP_TEST_MODE`` env var) on the port given
+by ``LP_TEST_PORT`` and the anyio backend given by ``LP_TEST_BACKEND``
 (``asyncio`` or ``trio``).
 """
 
@@ -78,19 +78,23 @@ def _build_handler():
 def _main() -> int:
     logging.basicConfig(level=logging.INFO)
 
-    from localpost.hosting import run
+    from localpost.hosting import run, service
+    from localpost.hosting.middleware import shutdown_on_signal
+    from localpost.http import ServerConfig, http_server, thread_pool_handler
 
     # Honor LP_TEST_BACKEND so tests can pin asyncio vs trio.
     backend = os.environ.get("LP_TEST_BACKEND", "asyncio")
     port = int(os.environ["LP_TEST_PORT"])
     handler = _build_handler()
-
-    from localpost.hosting.middleware import shutdown_on_signal
-    from localpost.http import ServerConfig, http_server
-
     cfg = ServerConfig(host="127.0.0.1", port=port)
-    svc = shutdown_on_signal()(http_server(cfg, handler, max_concurrency=8))
 
+    @service
+    async def app():
+        async with thread_pool_handler(handler, max_concurrency=8) as wrapped:
+            async with http_server(cfg, wrapped):
+                yield
+
+    svc = shutdown_on_signal()(app())
     return anyio.run(run, svc, None, backend=backend)
 
 

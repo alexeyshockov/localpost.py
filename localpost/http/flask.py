@@ -71,9 +71,15 @@ def _write_response(http_ctx: HTTPReqCtx, response) -> None:
     http_ctx.finish_response()
 
 
-def flask_server(config: ServerConfig, app: Flask, /, *, max_concurrency: int = 1):
+def flask_server(config: ServerConfig, app: Flask, /):
     """Hosted service serving a Flask app via :func:`flask_handler`.
 
-    See :func:`localpost.http.http_server` for the concurrency model.
+    Flask views block during request handling, so to serve more than one
+    request at a time wrap the handler with
+    :func:`localpost.http.thread_pool_handler`::
+
+        async with thread_pool_handler(flask_handler(app), max_concurrency=8) as h:
+            async with http_server(config, h):
+                ...
     """
-    return http_server(config, flask_handler(app), max_concurrency=max_concurrency)
+    return http_server(config, flask_handler(app))

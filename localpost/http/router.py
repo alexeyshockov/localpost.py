@@ -231,7 +231,7 @@ class Router:
     def _match(self, path: str, method_str: str) -> _MatchResult:
         m = self._regex.match(path)
         if m is None:
-            return _MatchResult(kind="not_found")
+            return _MATCH_NOT_FOUND
 
         for route in self.routes:
             if m.group(route._group_prefix) is None:
@@ -243,28 +243,17 @@ class Router:
             try:
                 method = HTTPMethod(method_str)
             except ValueError:
-                return _MatchResult(
-                    kind="method_not_allowed",
-                    allowed=tuple(method_map),
-                    allow_header=route.allow_header,
-                )
+                return _MatchMethodNotAllowed(allow_header=route.allow_header)
 
             handler = method_map.get(method)
             if handler is None:
-                return _MatchResult(
-                    kind="method_not_allowed",
-                    allowed=tuple(method_map),
-                    allow_header=route.allow_header,
-                )
+                return _MatchMethodNotAllowed(allow_header=route.allow_header)
 
-            return _MatchResult(
-                kind="ok",
+            return _MatchOk(
                 handler=handler,
                 method=method,
                 matched_template=tmpl,
                 path_args=path_args,
-                allowed=tuple(method_map),
-                allow_header=route.allow_header,
             )
 
         raise AssertionError("unreachable: regex matched but no outer group set")
@@ -275,19 +264,15 @@ class Router:
         request_method_str = environ.get("REQUEST_METHOD", "GET").upper()
         match = self._match(request_path, request_method_str)
 
-        if match.kind == "not_found":
+        if isinstance(match, _MatchNotFound):
             start_response("404 Not Found", [("Content-Type", "text/plain")])
             return [b"Not Found"]
-        if match.kind == "method_not_allowed":
+        if isinstance(match, _MatchMethodNotAllowed):
             start_response(
                 "405 Method Not Allowed",
                 [("Content-Type", "text/plain"), ("Allow", match.allow_header)],
             )
             return [b"Method Not Allowed"]
-
-        assert match.handler is not None
-        assert match.matched_template is not None
-        assert match.method is not None
 
         query_string = environ.get("QUERY_STRING", "")
         headers = _headers_from_environ(environ)
@@ -317,7 +302,14 @@ class Router:
         return response.body
 
     def as_handler(self) -> NativeRequestHandler:
-        """Return a :class:`localpost.http.RequestHandler` that dispatches via this router."""
+        """Return a :class:`localpost.http.RequestHandler` that dispatches via this router.
+
+        404 (no template match) and 405 (template match, method mismatch) are
+        answered inline on the calling thread — no thread hop, no allocation
+        beyond the static response payload. A matched route delegates to its
+        registered handler, which may itself be a synchronous handler or a
+        :func:`thread_pool_handler`-wrapped one.
+        """
 
         def handle(http_ctx: HTTPReqCtx) -> None:
             req = http_ctx.request
@@ -330,10 +322,10 @@ class Router:
 
             match = self._match(path, method_str)
 
-            if match.kind == "not_found":
+            if isinstance(match, _MatchNotFound):
                 _send_plain(http_ctx, 404, b"Not Found")
                 return
-            if match.kind == "method_not_allowed":
+            if isinstance(match, _MatchMethodNotAllowed):
                 _send_plain(
                     http_ctx,
                     405,
@@ -341,10 +333,6 @@ class Router:
                     extra_headers=[(b"Allow", match.allow_header.encode("ascii"))],
                 )
                 return
-
-            assert match.handler is not None
-            assert match.matched_template is not None
-            assert match.method is not None
 
             headers = {name.decode("iso-8859-1").lower(): value.decode("iso-8859-1") for name, value in req.headers}
 
@@ -380,14 +368,27 @@ class Router:
 
 @final
 @dataclass(frozen=True, slots=True)
-class _MatchResult:
-    kind: str  # "ok" | "not_found" | "method_not_allowed"
-    handler: RequestHandler | None = None
-    method: HTTPMethod | None = None
-    matched_template: URITemplate | None = None
-    path_args: Mapping[str, str] = field(default_factory=dict)
-    allowed: tuple[HTTPMethod, ...] = ()
-    allow_header: str = ""
+class _MatchOk:
+    handler: RequestHandler
+    method: HTTPMethod
+    matched_template: URITemplate
+    path_args: Mapping[str, str]
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _MatchNotFound:
+    pass
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class _MatchMethodNotAllowed:
+    allow_header: str
+
+
+_MatchResult = _MatchOk | _MatchNotFound | _MatchMethodNotAllowed
+_MATCH_NOT_FOUND = _MatchNotFound()
 
 
 def _literal_prefix_len(t: URITemplate) -> int:

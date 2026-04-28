@@ -7,8 +7,15 @@ import time
 
 from benchmarks.http.apps._cli import parse_port
 from benchmarks.http.scenarios import PING_BODY, PROFILE_WORK_DELAYS_S, hello_body, profile_update_body
-from localpost.hosting import run_app
-from localpost.http import RequestCtx, Response, Routes, ServerConfig, http_server
+from localpost.hosting import run_app, service
+from localpost.http import (
+    RequestCtx,
+    Response,
+    Routes,
+    ServerConfig,
+    http_server,
+    thread_pool_handler,
+)
 
 
 def _ping(_: RequestCtx) -> Response:
@@ -38,7 +45,15 @@ def main() -> int:
     routes.post("/echo")(_echo)
     routes.post("/users/{user_id}/profile")(_profile_update)
     handler = routes.build().as_handler()
-    return run_app(http_server(ServerConfig(host="127.0.0.1", port=port), handler, max_concurrency=32))
+    cfg = ServerConfig(host="127.0.0.1", port=port)
+
+    @service
+    async def app():
+        async with thread_pool_handler(handler, max_concurrency=32) as wrapped:
+            async with http_server(cfg, wrapped):
+                yield
+
+    return run_app(app())
 
 
 if __name__ == "__main__":

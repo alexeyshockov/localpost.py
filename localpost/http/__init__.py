@@ -1,4 +1,5 @@
 from localpost.http._cancel import RequestCancelled, check_cancelled
+from localpost.http._pool import thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
@@ -36,6 +37,7 @@ __all__ = [
     # hosting
     "http_server",
     "wsgi_server",
+    "thread_pool_handler",
     # cancellation
     "check_cancelled",
     "RequestCancelled",

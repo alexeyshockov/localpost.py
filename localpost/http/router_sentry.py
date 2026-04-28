@@ -19,7 +19,9 @@ Usage::
     sentry_sdk.init(dsn=..., traces_sample_rate=1.0)
     handler = sentry_router_handler(router)
 
-    run_app(http_server(config, handler, max_concurrency=16))
+    async with thread_pool_handler(handler, max_concurrency=16) as wrapped:
+        async with http_server(config, wrapped):
+            ...
 
 Pure Router instrumentation — no Flask import. Use
 :mod:`localpost.http.flask_sentry` for Flask apps.
@@ -29,7 +31,7 @@ from __future__ import annotations
 
 import sentry_sdk
 
-from localpost.http.router import Router
+from localpost.http.router import Router, _MatchOk
 from localpost.http.server import HTTPReqCtx, RequestHandler
 
 __all__ = ["sentry_router_handler"]
@@ -49,7 +51,7 @@ def sentry_router_handler(router: Router, *, op: str = "http.server") -> Request
         # Router's dispatch will match again, but template matching is a single
         # combined regex run — cheap.
         match = router._match(path, method)
-        if match.kind == "ok" and match.matched_template is not None:
+        if isinstance(match, _MatchOk):
             tx_name = f"{method} {match.matched_template.template}"
             source = "route"
         else:

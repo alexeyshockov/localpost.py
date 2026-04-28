@@ -11,7 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `localpost.http.thread_pool_handler` — async context manager that wraps
+  any `RequestHandler` so it runs on a worker thread. Compose explicitly
+  with `http_server` when you need a worker pool; immediate handlers
+  (including a `Router`'s 404/405 path) stay on the selector thread.
+
 ### Changed
+
+- `localpost.http._service.http_server` no longer accepts `max_concurrency`
+  and no longer owns a worker pool. Wrap your handler with
+  `thread_pool_handler` to opt back into worker dispatch.
+- `localpost.http.flask.flask_server` and `localpost.http.wsgi_server`
+  drop their `max_concurrency` kwarg for the same reason — wrap with
+  `thread_pool_handler` if you need a pool (typical for blocking WSGI
+  / Flask apps).
 
 ### Removed
 

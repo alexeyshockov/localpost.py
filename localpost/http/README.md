@@ -117,7 +117,7 @@ straight to h11. See [`flask.py`](flask.py).
 | Symbol                                    | Notes                                                               |
 | ----------------------------------------- | ------------------------------------------------------------------- |
 | `flask_handler(app)`                      | Flask → `RequestHandler`                                            |
-| `flask_server(config, app, *, max_concurrency=1)` | Hosted service serving a Flask app                          |
+| `flask_server(config, app)`               | Hosted service serving a Flask app (selector-thread, no pool)       |
 
 ### `localpost.http.router_sentry`
 
@@ -152,7 +152,7 @@ keeps everything on the same transaction.
 Transaction is named after Flask's `url_rule.rule` (e.g. `"GET /hello/<name>"`)
 once routing has matched.
 
-**Behavior differences from `wsgi_server`** (with a Flask app):
+**Behavior differences from `wsgi_server`** (Flask served via `wrap_wsgi`):
 
 - Flask's **request context is active during response-body iteration**. A
   generator returned from a view can use `flask.request`, `session`, `g`
@@ -177,16 +177,58 @@ on the documented public Flask API.
 
 ### Hosting integration
 
-`@hosting.service` wrappers for running the server inside a hosted app:
-
-| Service                                      | Module                       | Notes                                       |
-| -------------------------------------------- | ---------------------------- | ------------------------------------------- |
-| `http_server(config, handler)`               | `localpost.http._service`    | Runs the server loop with your handler      |
-| `wsgi_server(config, app)`                   | `localpost.http._service`    | Same, for a generic WSGI app                |
-| `flask_server(config, app)`                  | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`   |
+| Symbol                                            | Module                       | Notes                                                                               |
+| ------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------- |
+| `http_server(config, handler)`                    | `localpost.http._service`    | `@hosting.service` — runs the server loop with `handler`. No thread pool.           |
+| `wsgi_server(config, app)`                        | `localpost.http._service`    | Same, for a generic WSGI app.                                                       |
+| `flask_server(config, app)`                       | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`.                                          |
+| `thread_pool_handler(inner, *, max_concurrency)`  | `localpost.http._pool`       | Async CM. Yields a `RequestHandler` that runs `inner` on a worker thread.           |
 
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
-is driven by `lt.shutting_down` via `threadtools.check_cancelled()`.
+is driven by `lt.shutting_down` via `threadtools.check_cancelled()`. The
+server hosts a single handler; whether that handler runs synchronously on the
+selector thread or hops to a worker is the handler's choice.
+
+#### Composition pattern
+
+`http_server`, the `Router`, and `thread_pool_handler` are three orthogonal
+concepts that you compose explicitly:
+
+```python
+from localpost.hosting import run_app, service
+from localpost.http import (
+    Routes, ServerConfig, http_server, thread_pool_handler,
+)
+
+
+@service
+async def app():
+    routes = Routes()
+
+    @routes.get("/hello/{name}")
+    def hello(ctx): ...   # plain RequestCtx → Response handler
+
+    config = ServerConfig(host="127.0.0.1", port=8000)
+    async with thread_pool_handler(routes.build().as_handler(), max_concurrency=8) as h:
+        async with http_server(config, h):
+            yield
+
+
+run_app(app())
+```
+
+What this gives you:
+
+- **404 / 405 stay on the selector thread.** When the `Router` is the handler
+  (wrapped or not), unmatched paths and method mismatches go through
+  `_send_plain` inline — no worker hop.
+- **Matched routes run wherever you want.** Wrap the entire router with
+  `thread_pool_handler` (above) to run all matched handlers on workers; pass
+  the router directly to `http_server` to keep them all on the selector;
+  more granular per-route control is the user's composition problem (today
+  there is no per-route pool API).
+- **No max\_concurrency on `http_server`.** The pool is the wrapper's
+  concern; `http_server` has one job and one job only.
 
 ## Design
 
@@ -195,14 +237,34 @@ is driven by `lt.shutting_down` via `threadtools.check_cancelled()`.
 `RequestHandler` is `Callable[[HTTPReqCtx], None]`, sync-only. **This is
 intentional and not a planned extension.**
 
-The whole package is built around blocking sockets and a thread pool: the
-selector accepts connections, parses HTTP/1.1 with h11, and dispatches each
-request to a worker thread that does its I/O synchronously.
+The whole package is built around blocking sockets: the selector accepts
+connections, parses HTTP/1.1 with h11, and either dispatches the request
+synchronously on the selector thread (e.g. for a 404 from `Router`) or
+hands it off to a worker thread (when the user composes
+`thread_pool_handler` into the handler chain).
 
 If you need an async server, use one of the ASGI servers that already exist
 (uvicorn, hypercorn, granian, …) — the `localpost.hosting` adapters in
 `localpost.hosting.services/` plug them in cleanly. There is no need for
 this package to grow a second, parallel async path.
+
+### Three orthogonal concerns
+
+- **Handler** — `Callable[[HTTPReqCtx], None]`. Immediate by default
+  (runs on whichever thread invokes it). The thread-pool variant is just
+  a wrapper that borrows the connection, queues it, and runs `inner` on
+  a worker.
+- **Router** — itself an immediate handler. Runs `_match()` inline on the
+  calling thread; 404/405 are sent via `_send_plain` and the conn re-tracks
+  via the existing connection loop. Matched routes call the registered
+  per-route handler — which the user can choose to pool or not.
+- **`http_server`** — hosting integration only. Owns the AnyIO bridge,
+  drives `server.run()` in a thread, watches `lt.shutting_down`. Doesn't
+  know about pools, doesn't know about routing.
+
+This split means the simple case (all-immediate handlers) doesn't pay for a
+worker pool, and the Router's 404/405 path doesn't either even when the
+matched routes run on workers.
 
 ### Two-state connection model
 

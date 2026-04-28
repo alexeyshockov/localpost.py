@@ -21,8 +21,15 @@ import time
 
 import sentry_sdk
 
-from localpost.hosting import run_app
-from localpost.http import RequestCtx, Response, Routes, ServerConfig, http_server
+from localpost.hosting import run_app, service
+from localpost.http import (
+    RequestCtx,
+    Response,
+    Routes,
+    ServerConfig,
+    http_server,
+    thread_pool_handler,
+)
 from localpost.http.router_sentry import sentry_router_handler
 
 
@@ -45,16 +52,22 @@ def build_router():
     return routes.build()
 
 
+@service
+async def app():
+    handler = sentry_router_handler(build_router())
+    config = ServerConfig(host="127.0.0.1", port=8000)
+    async with thread_pool_handler(handler, max_concurrency=8) as wrapped:
+        async with http_server(config, wrapped):
+            yield
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
     sentry_sdk.init(
         dsn=os.environ.get("SENTRY_DSN"),  # None → Sentry runs in disabled mode
         traces_sample_rate=1.0,
     )
-
-    handler = sentry_router_handler(build_router())
-    config = ServerConfig(host="127.0.0.1", port=8000)
-    return run_app(http_server(config, handler, max_concurrency=8))
+    return run_app(app())
 
 
 if __name__ == "__main__":
