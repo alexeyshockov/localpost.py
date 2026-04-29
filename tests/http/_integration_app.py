@@ -20,7 +20,7 @@ import anyio
 def _build_handler():
     mode = os.environ.get("LP_TEST_MODE", "router")
     if mode == "router":
-        from localpost.http import (
+        from localpost.http import (  # noqa: PLC0415
             BodyHandler,
             HTTPReqCtx,
             NativeResponse,
@@ -45,9 +45,11 @@ def _build_handler():
             return None
 
         def _slow(ctx: HTTPReqCtx) -> BodyHandler | None:
-            time.sleep(float(os.environ.get("LP_TEST_SLOW_S", "0.2")))
-            _emit(ctx, str(threading.get_ident()).encode())
-            return None
+            def post_body(ctx: HTTPReqCtx) -> None:
+                time.sleep(float(os.environ.get("LP_TEST_SLOW_S", "0.2")))
+                _emit(ctx, str(threading.get_ident()).encode())
+
+            return post_body
 
         def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
             _emit(ctx, f"hi {route_match(ctx).path_args['name']}".encode())
@@ -60,7 +62,7 @@ def _build_handler():
         return routes.build().as_handler()
 
     if mode == "wsgi":
-        from localpost.http import wrap_wsgi
+        from localpost.http import wrap_wsgi  # noqa: PLC0415
 
         def wsgi_app(environ, start_response):
             path = environ.get("PATH_INFO", "/")
@@ -74,9 +76,9 @@ def _build_handler():
         return wrap_wsgi(wsgi_app)
 
     if mode == "flask":
-        from flask import Flask
+        from flask import Flask  # noqa: PLC0415
 
-        from localpost.http.flask import flask_handler
+        from localpost.http.flask import flask_handler  # noqa: PLC0415
 
         flask_app = Flask(__name__)
 
@@ -98,9 +100,9 @@ def _build_handler():
 def _main() -> int:
     logging.basicConfig(level=logging.INFO)
 
-    from localpost.hosting import run, service
-    from localpost.hosting.middleware import shutdown_on_signal
-    from localpost.http import ServerConfig, http_server, thread_pool_handler
+    from localpost.hosting import run, service  # noqa: PLC0415
+    from localpost.hosting.middleware import shutdown_on_signal  # noqa: PLC0415
+    from localpost.http import ServerConfig, http_server, thread_pool_handler  # noqa: PLC0415
 
     # Honor LP_TEST_BACKEND so tests can pin asyncio vs trio.
     backend = os.environ.get("LP_TEST_BACKEND", "asyncio")
