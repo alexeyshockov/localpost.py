@@ -1,0 +1,491 @@
+"""Tests for ``localpost.http.app.HttpApp`` — the framework layer.
+
+Covers decorator registration, parameter injection, response conversion,
+middleware (app-level + per-route), and the hosted-service path.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import socket
+import threading
+import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+import anyio
+import httpx
+import pytest
+from anyio import to_thread
+
+from localpost.hosting import ServiceLifetimeView, serve
+from localpost.http import (
+    BodyHandler,
+    HttpApp,
+    HTTPReqCtx,
+    Middleware,
+    NativeResponse,
+    RequestHandler,
+    ServerConfig,
+)
+
+pytestmark = pytest.mark.anyio
+
+
+# --- helpers -------------------------------------------------------------
+
+
+@asynccontextmanager
+async def _serve_app(app: HttpApp, cfg: ServerConfig) -> AsyncGenerator[ServiceLifetimeView]:
+    async with serve(app.service(cfg)) as lt:
+        yield lt
+
+
+async def _wait_ready(port: int, deadline: float = 5.0) -> bool:
+    def probe():
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    return True
+            except OSError:
+                time.sleep(0.05)
+        return False
+
+    return await to_thread.run_sync(probe)
+
+
+async def _get(url: str, **kw) -> httpx.Response:
+    return await to_thread.run_sync(lambda: httpx.get(url, **kw))
+
+
+async def _post(url: str, **kw) -> httpx.Response:
+    return await to_thread.run_sync(lambda: httpx.post(url, **kw))
+
+
+# --- response conversion -------------------------------------------------
+
+
+class TestResponseConversion:
+    async def test_str_returns_text(self, free_port):
+        app = HttpApp()
+
+        @app.get("/{name}")
+        def hello(name: str):
+            return f"Hello, {name}!"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/world")
+            assert r.status_code == 200
+            assert r.text == "Hello, world!"
+            assert r.headers["content-type"] == "text/plain; charset=utf-8"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_dict_returns_json(self, free_port):
+        app = HttpApp()
+
+        @app.get("/data")
+        def data():
+            return {"x": 1, "y": [2, 3]}
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/data")
+            assert r.status_code == 200
+            assert r.headers["content-type"] == "application/json"
+            assert r.json() == {"x": 1, "y": [2, 3]}
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_none_returns_204(self, free_port):
+        app = HttpApp()
+
+        @app.get("/empty")
+        def empty():
+            return None
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/empty")
+            assert r.status_code == 204
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_bytes_returns_octet_stream(self, free_port):
+        app = HttpApp()
+
+        @app.get("/bin")
+        def bin_():
+            return b"\x00\x01\x02"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/bin")
+            assert r.status_code == 200
+            assert r.content == b"\x00\x01\x02"
+            assert r.headers["content-type"] == "application/octet-stream"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_native_response_passes_through(self, free_port):
+        """Handlers can drop to wire-format with NativeResponse. Body must match
+        the declared Content-Length (or set 0)."""
+        app = HttpApp()
+
+        @app.get("/raw")
+        def raw():
+            return NativeResponse(
+                status_code=418,
+                headers=[(b"content-type", b"text/plain"), (b"content-length", b"0")],
+            )
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/raw")
+            assert r.status_code == 418
+            assert r.content == b""
+            lt.shutdown()
+            await lt.stopped
+
+
+# --- param injection -----------------------------------------------------
+
+
+class TestParamInjection:
+    async def test_path_arg(self, free_port):
+        app = HttpApp()
+
+        @app.get("/users/{uid}")
+        def show(uid: str):
+            return f"u={uid}"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/users/alice")
+            assert r.text == "u=alice"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_ctx_inject(self, free_port):
+        app = HttpApp()
+
+        @app.post("/echo")
+        def echo(ctx: HTTPReqCtx):
+            return ctx.body
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _post(f"http://127.0.0.1:{free_port}/echo", content=b"abcdef")
+            assert r.status_code == 200
+            assert r.content == b"abcdef"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_ctx_and_path_arg(self, free_port):
+        app = HttpApp()
+
+        @app.post("/{name}/profile")
+        def update_profile(ctx: HTTPReqCtx, name: str):
+            payload = json.loads(ctx.body)
+            return {"name": name, "payload": payload}
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _post(
+                f"http://127.0.0.1:{free_port}/alice/profile",
+                json={"theme": "dark"},
+            )
+            assert r.status_code == 200
+            assert r.json() == {"name": "alice", "payload": {"theme": "dark"}}
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_unresolvable_param_raises_at_registration(self):
+        app = HttpApp()
+        with pytest.raises(ValueError, match="cannot resolve parameter"):
+
+            @app.get("/x")
+            def bad(unresolved: str):
+                return "x"
+
+
+# --- middleware ---------------------------------------------------------
+
+
+def _add_marker(value: str) -> Middleware:
+    """Pre-body middleware: writes a marker into ctx.attrs."""
+
+    def mw(inner: RequestHandler) -> RequestHandler:
+        def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+            ctx.attrs.setdefault("markers", []).append(value)
+            return inner(ctx)
+
+        return wrapped
+
+    return mw
+
+
+def _short_circuit_with_status(status: int, body: bytes) -> Middleware:
+    def mw(inner: RequestHandler) -> RequestHandler:
+        def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+            ctx.complete(
+                NativeResponse(
+                    status_code=status,
+                    headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
+                ),
+                body,
+            )
+            return None  # do not call inner
+
+        return wrapped
+
+    return mw
+
+
+class TestMiddleware:
+    async def test_app_level_middleware_runs(self, free_port):
+        captured: list[str] = []
+
+        def capturing_mw(inner):
+            def wrapped(ctx):
+                captured.append("before")
+                result = inner(ctx)
+                if result is None:
+                    captured.append("after-inline")
+                    return None
+                # wrap continuation
+                def post(ctx):
+                    result(ctx)
+                    captured.append("after-body")
+                return post
+            return wrapped
+
+        app = HttpApp(middleware=[capturing_mw])
+
+        @app.get("/{name}")
+        def hello(name: str):
+            return f"hi {name}"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/world")
+            assert r.text == "hi world"
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured == ["before", "after-body"]
+
+    async def test_app_middleware_short_circuits_pre_body(self, free_port):
+        app = HttpApp(middleware=[_short_circuit_with_status(401, b"unauthorized")])
+
+        @app.get("/{name}")
+        def hello(name: str):
+            return f"hi {name}"  # pragma: no cover
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/world")
+            assert r.status_code == 401
+            assert r.text == "unauthorized"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_per_route_middleware(self, free_port):
+        app = HttpApp()
+
+        @app.get("/protected", middleware=[_short_circuit_with_status(403, b"forbidden")])
+        def protected():
+            return "secret"  # pragma: no cover
+
+        @app.get("/public")
+        def public():
+            return "open"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r1 = await _get(f"http://127.0.0.1:{free_port}/protected")
+            assert r1.status_code == 403
+            r2 = await _get(f"http://127.0.0.1:{free_port}/public")
+            assert r2.status_code == 200
+            assert r2.text == "open"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_attrs_propagate_pre_to_post_body(self, free_port):
+        """Middleware writes to ctx.attrs in pre-body; post-body handler reads it."""
+        app = HttpApp(middleware=[_add_marker("auth-ok")])
+
+        @app.post("/echo")
+        def echo(ctx: HTTPReqCtx):
+            return {
+                "markers": ctx.attrs.get("markers", []),
+                "body": ctx.body.decode("utf-8"),
+            }
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _post(f"http://127.0.0.1:{free_port}/echo", content=b"hi")
+            assert r.json() == {"markers": ["auth-ok"], "body": "hi"}
+            lt.shutdown()
+            await lt.stopped
+
+
+# --- 404 / 405 -----------------------------------------------------------
+
+
+class TestNotFoundAndMethodNotAllowed:
+    async def test_404_when_no_route(self, free_port):
+        app = HttpApp()
+
+        @app.get("/known")
+        def known():
+            return "x"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/missing")
+            assert r.status_code == 404
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_405_with_allow_header(self, free_port):
+        app = HttpApp()
+
+        @app.post("/r")
+        def post_only():
+            return "ok"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/r")
+            assert r.status_code == 405
+            assert r.headers.get("allow") == "POST"
+            lt.shutdown()
+            await lt.stopped
+
+
+# --- pool / concurrency --------------------------------------------------
+
+
+class TestWorkerPool:
+    async def test_handlers_run_on_worker_threads(self, free_port):
+        """Default ``max_concurrency=32`` — handlers run on worker threads,
+        not the selector thread."""
+        seen: list[int] = []
+        lock = threading.Lock()
+
+        app = HttpApp()
+
+        @app.get("/tid")
+        def tid():
+            with lock:
+                seen.append(threading.get_ident())
+            return "x"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            async with anyio.create_task_group() as tg:
+                for _ in range(8):
+                    tg.start_soon(_get, f"http://127.0.0.1:{free_port}/tid")
+
+            assert len(seen) == 8
+            assert len(set(seen)) >= 2  # at least two distinct worker threads
+
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_max_concurrency_zero_runs_inline(self, free_port):
+        """When the pool is disabled, handlers run on the selector thread."""
+        seen: set[int] = set()
+        lock = threading.Lock()
+
+        app = HttpApp(max_concurrency=0)
+
+        @app.get("/tid")
+        def tid():
+            with lock:
+                seen.add(threading.get_ident())
+            return "x"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            for _ in range(5):
+                await _get(f"http://127.0.0.1:{free_port}/tid")
+
+            assert len(seen) == 1  # all on the selector thread
+
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_invalid_max_concurrency(self):
+        with pytest.raises(ValueError, match="max_concurrency"):
+            HttpApp(max_concurrency=-1)
+
+
+# --- backend selection ---------------------------------------------------
+
+
+class TestBackendSelection:
+    async def test_httptools_backend(self, free_port):
+        app = HttpApp()
+
+        @app.get("/{name}")
+        def hello(name: str):
+            return f"hi {name}"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(app.service(cfg, backend="httptools")) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            r = await _get(f"http://127.0.0.1:{free_port}/world")
+            assert r.status_code == 200
+            assert r.text == "hi world"
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_invalid_backend(self):
+        app = HttpApp()
+        cfg = ServerConfig(host="127.0.0.1", port=0)
+        with pytest.raises(ValueError, match="unknown backend"):
+            app.service(cfg, backend="bogus")  # type: ignore[arg-type]
+
+
+# Avoid "imported but unused" lints — the helper is part of the public smoke API.
+_keep = (contextlib,)

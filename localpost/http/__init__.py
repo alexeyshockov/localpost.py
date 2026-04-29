@@ -3,6 +3,7 @@ from localpost.http._pool import thread_pool_handler
 from localpost.http._service import http_server, httptools_server, wsgi_server
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request
 from localpost.http._types import Response as NativeResponse
+from localpost.http.app import HttpApp
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
     Route,
@@ -40,6 +41,8 @@ __all__ = [
     "RouteMatch",
     "URITemplate",
     "route_match",
+    # framework
+    "HttpApp",
     # wsgi
     "wrap_wsgi",
     # hosting
