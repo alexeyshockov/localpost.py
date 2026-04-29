@@ -10,6 +10,23 @@ Pair it with `localpost.hosting` for lifecycle management, or run it standalone.
 For OpenAPI / content negotiation / validation, see
 [`localpost.experimental.openapi`](../experimental/openapi/README.md).
 
+## Scope and constraints
+
+The server is intentionally bounded:
+
+- **In-process only.** No multi-processing, no `fork` / `spawn`. If you need
+  multi-core fanout, run multiple `localpost` processes under an external
+  supervisor (systemd, gunicorn, k8s replicas, etc.). Multi-*selector*
+  inside one process is on the roadmap.
+- **Sync handlers only.** No `asyncio` / `uvloop` / ASGI on the server side.
+  The hosting layer's AnyIO integration is unaffected — that's lifecycle
+  plumbing, not the request hot path. If you need an async server, use one
+  of the ASGI servers via `localpost.hosting.services/`.
+- **GIL or free-threaded.** Standard CPython 3.12+ is the baseline.
+  Free-threaded builds (3.13t / 3.14t) are an accepted target — the design
+  is single-writer-per-selector and uses only thread-safe primitives, but
+  see `benchmarks/http/PERF_FINDINGS.md` for any noted caveats per release.
+
 ## Install
 
 ```bash

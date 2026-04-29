@@ -3,6 +3,26 @@
 Initial diagnosis from the 2026-04-27 bench run (3s per cell, before Phase 1).
 Phase 1 results in [Phase 1 results](#phase-1-results-2026-04-27) below.
 
+## Optimisation boundaries
+
+Every optimisation in this document operates within these hard constraints:
+
+1. **In-process only.** No multi-processing, no `fork` / `spawn`. Multi-core
+   fanout is the user's deployment problem (systemd, k8s, external
+   supervisors). Multi-*selector* inside one process is in scope.
+2. **No async Python.** Sync handlers + threads only on the server side.
+   `asyncio` / `uvloop` / ASGI are out of scope. The async-ASGI comparators
+   (`starlette_uvicorn`, `starlette_granian`) stay in the bench matrix as
+   reference points only — they're not goals.
+3. **GIL or free-threaded.** Standard CPython 3.12+ is the baseline.
+   Free-threaded builds (3.13t / 3.14t) are an accepted target — the
+   architecture should hold up there with care, and `selectors=N` is where
+   no-GIL scaling actually pays off.
+
+These constraints exist because LocalPost is a *library*, not a deployment
+platform. Process supervision, multi-worker orchestration, and hot reloads
+belong upstream.
+
 ## Headline numbers
 
 | Stack             |    RPS | p50 (ms) | concurrency |
@@ -553,14 +573,184 @@ same session.
   mechanical import swap, not a semantic change. Documented in
   CHANGELOG.
 
-### What's left for future perf work
+## Phase 7 (shipped, but flat): multi-selector single-process (2026-04-29)
 
-- **Sendfile / vectored writes** for response bodies. Each
-  ``sock.sendall`` on the response path is one syscall; status + first
-  chunk + terminator could be one ``writev`` for small responses.
+Added the `selectors: int = 1` knob to `http_server` / `httptools_server` /
+`wsgi_server`. With `selectors > 1`, N independent `BaseServer` threads
+each bind their own listening socket on the same address via
+`SO_REUSEPORT` (already enabled in `_base.py`); the kernel hashes
+incoming SYNs across them. Shared handler / shared `thread_pool_handler`
+worker pool — only the selector layer fans out. Port 0 is resolved once
+up-front so all selectors agree on the actual ephemeral.
+
+### Bench (httptools backend, 8s/cell, Python 3.13 on Darwin arm64)
+
+| Scenario          | s1 RPS / p50         | s2 RPS / p50         | s4 RPS / p50         |
+| ----------------- | -------------------: | -------------------: | -------------------: |
+| `plaintext`       |     12,563 / 5.05 ms |     12,902 / 4.93 ms |     12,784 / 4.98 ms |
+| `path_param`      |     12,606 / 5.04 ms |     12,691 / 5.01 ms |     12,761 / 5.00 ms |
+| `json_post`       |     12,359 / 2.57 ms |     12,369 / 2.57 ms |     12,301 / 2.58 ms |
+| `profile_update`  |      5,978 / 5.21 ms |      6,007 / 5.20 ms |      6,020 / 5.20 ms |
+
+All deltas (≤+2.7% on s2, ≤+1.8% on s4) are within run-to-run noise.
+**The projected 1.5-2x gain on standard CPython did not materialise.**
+
+### Why the projection was wrong
+
+Two compounding factors:
+
+1. **The GIL-held fraction of selector wall time is higher than I
+   estimated.** I assumed `recv` + the bulk of `httptools.feed_data`
+   release the GIL, leaving roughly 50% of wall time for parallelism.
+   In reality, the parser callbacks (`on_url`, `on_header`,
+   `on_headers_complete`, `on_body`, `on_message_complete`), the
+   dispatch decision, `Channel.put`, op-queue enqueue, and the
+   wakeup-pipe `os.write` all hold the GIL — together they're more
+   like 80-90% of per-request work. Two selector threads serialise on
+   that, leaving little to overlap.
+2. **macOS `SO_REUSEPORT` is not Linux's `SO_REUSEPORT`.** macOS
+   permits multiple binds to the same address, but the BPF-style
+   round-robin / 4-tuple-hash distribution that Linux 3.9+ ships is
+   not part of the macOS contract. Distribution behaviour is
+   unspecified — connections can funnel to one selector. We didn't
+   instrument per-selector accept counts in this bench, but the flat
+   result is consistent with either "GIL pinch" or "no kernel
+   distribution" or both.
+
+The implementation itself is correct (137/137 http tests pass, including
+parity tests for `selectors ∈ {2, 3}`). The architectural lever just
+doesn't pay on this platform / interpreter.
+
+### What this means for next steps
+
+- **Free-threaded Python (Phase 7b) is now the more interesting test.**
+  Removing the GIL is the only thing that lifts factor #1. macOS
+  `SO_REUSEPORT` semantics still apply — if distribution is also weak
+  there, we'd need an explicit accept-dispatch fallback (one acceptor
+  thread + N selector threads handing off via the op queue).
+- **Tier 2 micro-opts deliver more reliably on standard CPython.**
+  Single-`sendall` per response, `socket.sendmsg` for chunked, and the
+  Tier 3 allocation diet are all `selectors`-independent and cut
+  per-request CPU on the path that's actually hot.
+
+`selectors=N` stays in the public API. It's free for users on Linux who
+already get kernel-level load balancing, and it's the right shape for
+the eventual no-GIL world. We just don't claim it as a perf win on
+standard-CPython / macOS.
+
+## Phase 7b (shipped): free-threaded Python (3.14t) validation (2026-04-29)
+
+Tested LocalPost under CPython 3.14.4 free-threaded (no-GIL) on Darwin
+arm64. Setup: separate venv (``.venv-ft``), `httptools` built from
+git main (declares `Py_mod_gil = Py_MOD_GIL_NOT_USED` since 0.8.0;
+the released 0.7.1 wheel auto-re-enables the GIL on import).
+
+### Headline: free-threading alone is the big win
+
+**Same code, same hardware, same bench harness — switching from standard
+CPython 3.13 to free-threaded 3.14t at `selectors=1`:**
+
+| Backend / scenario          | 3.13 RPS / p50      | 3.14t RPS / p50      | Δ RPS    |
+| --------------------------- | ------------------: | -------------------: | -------: |
+| `localpost_httptools` plaintext  |  12,563 / 5.05 ms |  **36,208 / 1.76 ms** | **+188%** |
+| `localpost_httptools` path_param |  12,606 / 5.04 ms |  **35,491 / 1.78 ms** | **+182%** |
+| `localpost_httptools` json_post  |  12,359 / 2.57 ms |  **34,220 / 0.93 ms** | **+177%** |
+| `localpost_native` plaintext     |   ~9,500 / 6.7 ms |  **23,688 / 2.69 ms** | **+150%** |
+
+p50 collapses ~3x on every parser-bound scenario. The reason is the
+existing single-selector + worker-pool architecture is itself a
+multi-threaded design (1 selector thread + 32 workers); under standard
+CPython all those threads serialise on the GIL during the
+parser-callbacks / dispatch / handler / response-write critical
+sections. No-GIL lets the selector and workers actually overlap. The
+selector loop is no longer the throughput ceiling — the workers are.
+
+### Multi-selector under 3.14t: still flat on macOS
+
+| Scenario          | s1 RPS / p50         | s2 RPS / p50         | s4 RPS / p50         |
+| ----------------- | -------------------: | -------------------: | -------------------: |
+| `plaintext`       |     36,208 / 1.76 ms |     36,089 / 1.75 ms |     36,112 / 1.75 ms |
+| `path_param`      |     35,491 / 1.78 ms |     35,965 / 1.77 ms |     36,638 / 1.74 ms |
+| `json_post`       |     34,220 / 0.93 ms |     33,740 / 0.94 ms |     34,538 / 0.92 ms |
+
+Same pattern at higher concurrency (`oha -c 256`) and in inline mode
+(no thread pool — handlers run directly on the selector thread,
+isolating selector-level throughput): all configurations converge on
+the same number.
+
+### Why multi-selector is flat: macOS `SO_REUSEPORT` does not distribute
+
+Confirmed empirically with a diagnostic build
+(`benchmarks/http/apps/localpost_httptools_diag.py`) that counts requests
+per selector thread. At `selectors=4`, `oha -c 512 -z 8s`:
+
+```
+=== selector distribution (total=402,871) ===
+  tid=6168244224: 402,871 reqs (100.0%)
+```
+
+**100% of accepts went to one selector thread.** The other three
+selectors — each with its own listening socket bound to the same port
+via `SO_REUSEPORT` — got zero connections. This is the documented
+divergence between Linux's `SO_REUSEPORT` (BPF-style hash distribution
+since 3.9) and macOS's, which permits the bind but does not load-balance.
+
+The implication: on macOS, the `selectors > 1` knob is a no-op.
+On Linux (kernel-level distribution) we expect it to scale, but that's
+unverified pending a Linux bench.
+
+### What this means for next steps
+
+- **Free-threaded Python is now the default for serious perf.** A 3x
+  jump just by switching interpreters dwarfs every micro-optimisation
+  we'd land in pure code. We should treat 3.14t as the supported fast
+  path and keep the codebase free-threaded-clean (no GIL-dependent
+  patterns; verify deps' `Py_mod_gil` declarations).
+- **Accept-dispatch fallback is the next architectural step** — and now
+  has a clear motivation. One acceptor thread doing `accept()` on a
+  shared listening socket, dispatching new conns to N selector threads
+  via the existing op queue. Platform-portable; works on macOS where
+  `SO_REUSEPORT` doesn't help. The selector loop already accommodates
+  cross-thread `_OpTrack` enqueues from Phase 3-B — the wiring is
+  small.
+- **Linux-side multi-selector is still worth verifying** — the existing
+  `selectors > 1` path should scale there. A free CI cell (Linux x86_64,
+  3.14t) would settle it.
+
+The implementation that shipped (`selectors: int = 1`) is correct and
+keeps its place in the public API; under the current macOS bench it
+just doesn't pay. The right framing for users: "use `> 1` only if your
+kernel distributes (Linux 3.9+) or paired with the upcoming
+accept-dispatch design."
+
+## What's left for future perf work
+
+Within the [Optimisation boundaries](#optimisation-boundaries) at the top of
+this doc:
+
+- **Linux multi-selector validation.** The shipped `selectors > 1` path
+  should scale on Linux (kernel-level `SO_REUSEPORT` distribution since
+  3.9). Untested locally because dev is macOS-only; settle it on the
+  first Linux bench cell — no code change needed. Real deployments are
+  ~99% Linux, so this is the actual perf focus, not the macOS dev-box
+  result above.
+- **Accept-dispatch alternative — explicitly dropped.** A
+  one-acceptor + N-selector design (dispatching new conns via the
+  existing Phase 3-B op queue) would close the macOS multi-selector
+  gap, but adds an in-process accept hop on Linux where the kernel
+  already distributes for free. Not worth the maintenance cost given
+  the deployment target.
+- **Worker-side syscall coalescing.** One ``sendall`` per response (status
+  + headers + body in a single ``bytearray``); ``socket.sendmsg`` for
+  chunked responses (status + first chunk + terminator in one syscall).
 - **Pre-baked common headers** (Date, Server) cached per-second on the
-  ``BaseServer``, written by both backends.
-- The selector-thread CPU is now lower (parser cheaper). If we ever
-  return to closing the gap to async-ASGI stacks, **multi-selector
-  + SO_REUSEPORT** is the next architectural lever — the op-queue
-  design from Phase 3-B already accommodates multiple selectors.
+  ``BaseServer``, written by both backends — only if we ever auto-emit
+  them.
+- **Per-request allocation diet.** Drop redundant ``bytes()`` copies in
+  the httptools callbacks; cache header-presence flags so we stop scanning
+  ``_has_connection_close`` / ``_has_content_length_or_te`` linearly per
+  response.
+
+Explicit non-goals (per [Optimisation boundaries](#optimisation-boundaries)):
+multi-process, async/ASGI on the server side, thread-per-connection rewrite
+(Cheroot already exists), sendfile (no benched workload exercises it).

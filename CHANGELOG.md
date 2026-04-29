@@ -11,6 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Free-threaded CPython (3.14t) support** — verified end-to-end with the
+  full http test suite passing and the bench delivering a ~3x RPS jump at
+  `selectors=1` (httptools plaintext: 12,563 → 36,208 RPS) just from
+  switching interpreters. The existing single-selector + worker-pool
+  architecture is already multi-threaded, so removing the GIL lets the
+  selector and workers actually overlap. Tested with `httptools >= 0.8`
+  (declares `Py_mod_gil = Py_MOD_GIL_NOT_USED`); the released 0.7.1 wheel
+  auto-re-enables the GIL on import. See
+  `benchmarks/http/PERF_FINDINGS.md` Phase 7b.
+- **Multi-selector single-process** via the new `selectors: int = 1` knob
+  on `localpost.http.http_server` and `httptools_server`. With
+  `selectors > 1`, each selector thread binds its own listening socket on
+  the same address via `SO_REUSEPORT`; the kernel distributes incoming
+  connections across them. Handlers (and any wrapped
+  `thread_pool_handler`) are shared. **Note: on macOS this knob is a
+  no-op.** Verified empirically (`localpost_httptools_diag.py`): with
+  `selectors=4`, 100% of accepts go to one selector thread. macOS's
+  `SO_REUSEPORT` permits the bind but does not load-balance accepts —
+  unlike Linux 3.9+. An accept-dispatch design (one acceptor thread +
+  N selectors fed via the existing op queue) is the platform-portable
+  fix and is the next planned step. The knob still works on Linux,
+  pending a Linux bench cell to confirm scaling.
 - `localpost.http.thread_pool_handler` — async context manager that wraps
   any `RequestHandler` so it runs on a worker thread. Compose explicitly
   with `http_server` when you need a worker pool; immediate handlers

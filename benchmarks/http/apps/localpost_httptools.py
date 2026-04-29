@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 import time
 
-from benchmarks.http.apps._cli import parse_port
+from benchmarks.http.apps._cli import parse_args
 from benchmarks.http.scenarios import PING_BODY, PROFILE_WORK_DELAYS_S, hello_body, profile_update_body
 from localpost.hosting import run_app, service
 from localpost.http import (
@@ -41,19 +41,19 @@ def _profile_update(ctx: RequestCtx) -> Response:
 
 
 def main() -> int:
-    port = parse_port()
+    args = parse_args()
     routes = Routes()
     routes.get("/ping")(_ping)
     routes.get("/hello/{name}")(_hello)
     routes.post("/echo")(_echo)
     routes.post("/users/{user_id}/profile")(_profile_update)
     handler = routes.build().as_handler()
-    cfg = ServerConfig(host="127.0.0.1", port=port)
+    cfg = ServerConfig(host="127.0.0.1", port=args.port)
 
     @service
     async def app():
         async with thread_pool_handler(handler, max_concurrency=32) as wrapped:
-            async with httptools_server(cfg, wrapped):
+            async with httptools_server(cfg, wrapped, selectors=args.selectors):
                 yield
 
     return run_app(app())

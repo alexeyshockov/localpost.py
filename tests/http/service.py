@@ -20,6 +20,7 @@ from anyio import to_thread
 from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
     HTTPReqCtx,
+    NativeResponse,
     RequestCancelled,
     RequestCtx,
     Response,
@@ -28,7 +29,6 @@ from localpost.http import (
     check_cancelled,
     http_server,
     thread_pool_handler,
-    NativeResponse,
 )
 from localpost.http.server import RequestHandler
 
@@ -271,6 +271,75 @@ class TestHttpServerService:
             # The CM-creation call is enough to trigger validation; we don't
             # need to enter it.
             thread_pool_handler(_handler_200(), max_concurrency=0)
+
+
+class TestMultiSelector:
+    """``selectors=N > 1`` spawns N independent ``BaseServer`` threads bound
+    to the same address via ``SO_REUSEPORT``. Tests assert correctness; the
+    kernel-side distribution of incoming connections across selectors is a
+    deployment-time concern verified by the bench, not unit tests."""
+
+    async def test_invalid_selectors(self, free_port):
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        with pytest.raises(ValueError, match="selectors"):
+            http_server(cfg, _handler_200(), selectors=0)
+
+    async def test_serves_requests_inline(self, free_port):
+        """selectors=2, no thread pool. Each request runs on whichever
+        selector accepted it; both must serve correctly."""
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, _handler_200(b"hi"), selectors=2)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            for _ in range(5):
+                resp = await _get(f"http://127.0.0.1:{free_port}/")
+                assert resp.status_code == 200
+                assert resp.text == "hi"
+
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_serves_requests_pooled_concurrent(self, free_port):
+        """selectors=2 + thread pool. Multiple selectors push onto the
+        single shared channel; the pool drains across both producers."""
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with thread_pool_handler(_handler_200(b"hi"), max_concurrency=4) as wrapped:
+            async with serve(http_server(cfg, wrapped, selectors=2)) as lt:
+                await lt.started
+                await _wait_server_ready(free_port)
+
+                results: list[httpx.Response | None] = [None] * 10
+
+                async def fire(i: int) -> None:
+                    results[i] = await _get(f"http://127.0.0.1:{free_port}/")
+
+                async with anyio.create_task_group() as tg:
+                    for i in range(10):
+                        tg.start_soon(fire, i)
+
+                for r in results:
+                    assert r is not None
+                    assert r.status_code == 200
+                    assert r.text == "hi"
+
+                lt.shutdown()
+                await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_shutdown_stops_all_selectors(self, free_port):
+        """All N selector threads must exit on shutdown — no leaked threads
+        and a clean exit code."""
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, _handler_200(b"x"), selectors=3)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+            resp = await _get(f"http://127.0.0.1:{free_port}/")
+            assert resp.status_code == 200
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
 
 
 class TestSelectorThreadFastPath:

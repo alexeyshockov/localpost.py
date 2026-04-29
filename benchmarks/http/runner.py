@@ -41,7 +41,14 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 STACKS: tuple[str, ...] = (
     "localpost_native",
+    "localpost_native_s2",
+    "localpost_native_s4",
     "localpost_httptools",
+    "localpost_httptools_s2",
+    "localpost_httptools_s4",
+    "localpost_httptools_inline",
+    "localpost_httptools_inline_s2",
+    "localpost_httptools_inline_s4",
     "localpost_wsgi",
     "localpost_flask",
     "flask_cheroot",

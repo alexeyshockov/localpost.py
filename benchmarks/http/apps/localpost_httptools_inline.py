@@ -1,4 +1,13 @@
-"""LocalPost native handler — Router + http_server, no framework."""
+"""LocalPost httptools backend — inline (no thread pool).
+
+Runs every request directly on the selector thread; bypasses
+``thread_pool_handler`` to isolate selector-level throughput. Used to
+characterise whether multi-selector unlocks parallelism when the worker
+pool isn't the bottleneck.
+
+Reads the same ``--port`` / ``--selectors`` flags as the standard
+``localpost_httptools`` app.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +22,7 @@ from localpost.http import (
     Response,
     Routes,
     ServerConfig,
-    http_server,
-    thread_pool_handler,
+    httptools_server,
 )
 
 
@@ -49,9 +57,8 @@ def main() -> int:
 
     @service
     async def app():
-        async with thread_pool_handler(handler, max_concurrency=32) as wrapped:
-            async with http_server(cfg, wrapped, selectors=args.selectors):
-                yield
+        async with httptools_server(cfg, handler, selectors=args.selectors):
+            yield
 
     return run_app(app())
 
