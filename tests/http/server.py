@@ -10,22 +10,7 @@ import httpx
 import pytest
 
 from localpost.http import HTTPReqCtx, NativeResponse, ServerConfig, start_http_server
-
-
-def _drain(sock: socket.socket, deadline: float = 2.0) -> bytes:
-    """Read until the peer closes or the deadline elapses."""
-    sock.settimeout(deadline)
-    out = bytearray()
-    while True:
-        try:
-            chunk = sock.recv(4096)
-        except (TimeoutError, socket.timeout):
-            break
-        if not chunk:
-            break
-        out.extend(chunk)
-    return bytes(out)
-
+from tests.http._helpers import drain_socket
 
 # --- Listening-socket lifecycle (no requests) ---------------------------------
 
@@ -116,8 +101,7 @@ class TestRequestRouting:
         captured_headers: dict[bytes, bytes] = {}
 
         def handler(ctx: HTTPReqCtx):
-            for name, value in ctx.request.headers:
-                captured_headers[name] = value
+            captured_headers.update(ctx.request.headers)
             ctx.complete(NativeResponse(status_code=200, headers=[]), b"")
 
         with serve_in_thread(handler) as port:
@@ -219,11 +203,9 @@ class TestKeepAlive:
 
         with serve_in_thread(handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
-                sock.sendall(
-                    b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
-                )
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 # Read response.
-                data = _drain(sock, deadline=1.0)
+                data = drain_socket(sock, deadline=1.0)
                 assert b"HTTP/1.1 200" in data
                 # Now expect a clean EOF (FIN), not a reset.
                 sock.settimeout(2.0)
@@ -255,7 +237,7 @@ class TestProtocolErrors:
         with serve_in_thread(_ok_handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
                 sock.sendall(b"NOT_A_VALID_HTTP_REQUEST\r\n\r\n")
-                data = _drain(sock, deadline=1.0)
+                data = drain_socket(sock, deadline=1.0)
             assert b"HTTP/1.1 400" in data, f"expected 400 in response, got: {data!r}"
 
             # Sanity: a follow-up valid request is still served.
@@ -327,15 +309,9 @@ class TestClientDisconnects:
         """
         with serve_in_thread(_ok_handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
-                sock.sendall(
-                    b"POST / HTTP/1.1\r\n"
-                    b"Host: x\r\n"
-                    b"Content-Length: 100\r\n"
-                    b"\r\n"
-                    b"hello"
-                )
+                sock.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nhello")
                 sock.shutdown(socket.SHUT_WR)
-                _drain(sock, deadline=1.0)
+                drain_socket(sock, deadline=1.0)
 
             # Server still serves a follow-up valid request.
             resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
@@ -366,13 +342,7 @@ class TestExpect100Continue:
 
         with serve_in_thread(handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
-                sock.sendall(
-                    b"POST / HTTP/1.1\r\n"
-                    b"Host: x\r\n"
-                    b"Content-Length: 5\r\n"
-                    b"Expect: 100-continue\r\n"
-                    b"\r\n"
-                )
+                sock.sendall(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n")
                 # Read the 100 Continue intermediate response.
                 sock.settimeout(2)
                 pre = b""
@@ -383,7 +353,7 @@ class TestExpect100Continue:
                 assert b"100 Continue" in pre, f"expected 100 Continue, got: {pre!r}"
 
                 sock.sendall(b"hello")
-                final = _drain(sock, deadline=2.0)
+                final = drain_socket(sock, deadline=2.0)
 
         assert b"HTTP/1.1 200" in final
         assert b"\r\n\r\nok" in final
@@ -434,10 +404,7 @@ class TestHeadAndPipelining:
 
         with serve_in_thread(handler) as port:
             with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
-                sock.sendall(
-                    b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n"
-                    b"GET /b HTTP/1.1\r\nHost: x\r\n\r\n"
-                )
+                sock.sendall(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n")
                 # Read until both bodies have arrived.
                 sock.settimeout(2)
                 data = b""
@@ -460,9 +427,7 @@ class TestSendBuffer:
         """``ctx.send`` accepts any Buffer (memoryview, bytearray, …)."""
 
         def handler(ctx: HTTPReqCtx) -> None:
-            ctx.start_response(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"5")])
-            )
+            ctx.start_response(NativeResponse(status_code=200, headers=[(b"content-length", b"5")]))
             payload = bytearray(b"hello")
             ctx.send(memoryview(payload)[:5])
             ctx.finish_response()
@@ -496,7 +461,7 @@ class TestStaleCleanup:
                 with socket.create_connection(("127.0.0.1", server.port), timeout=2) as sock:
                     # First request — server then keeps the connection alive.
                     sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-                    _drain(sock, deadline=0.3)
+                    drain_socket(sock, deadline=0.3)
                     # Now sit idle. After keep_alive_timeout (0.1s) + a few iterations,
                     # _cleanup_stale should silently close the conn.
                     sock.settimeout(2.0)
@@ -523,7 +488,7 @@ class TestStaleCleanup:
                     # Send only part of a request and then sit idle.
                     sock.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n")
                     sock.settimeout(2.0)
-                    data = _drain(sock, deadline=1.5)
+                    data = drain_socket(sock, deadline=1.5)
             finally:
                 stop.set()
                 t.join(timeout=2)
@@ -589,7 +554,7 @@ class TestBodyLimit:
                         b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
                         b"10\r\n" + (b"x" * 16) + b"\r\n0\r\n\r\n"
                     )
-                    data = _drain(sock, deadline=2.0)
+                    data = drain_socket(sock, deadline=2.0)
             finally:
                 stop.set()
                 t.join(timeout=2)
@@ -632,7 +597,7 @@ class TestGracefulShutdown:
             try:
                 # Send a request and read its response — connection is kept alive.
                 sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-                _drain(sock, deadline=0.5)
+                drain_socket(sock, deadline=0.5)
             finally:
                 # Pull socket reference outside the with block so we can recv after server exit.
                 pass

@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any, Literal, cast
 
 import anyio
 import httpx
@@ -37,9 +38,18 @@ pytestmark = pytest.mark.anyio
 
 
 @asynccontextmanager
-async def _serve_app(app: HttpApp, cfg: ServerConfig) -> AsyncGenerator[ServiceLifetimeView]:
-    async with serve(app.service(cfg)) as lt:
+async def _serve_app(
+    app: HttpApp,
+    cfg: ServerConfig,
+    *,
+    backend: Literal["h11", "httptools"] = "h11",
+) -> AsyncGenerator[ServiceLifetimeView]:
+    async with serve(app.service(cfg, backend=backend)) as lt:
         yield lt
+
+
+def _backend_name(http_backend) -> Literal["h11", "httptools"]:
+    return cast(Literal["h11", "httptools"], http_backend.name)
 
 
 async def _wait_ready(port: int, deadline: float = 5.0) -> bool:
@@ -272,11 +282,14 @@ class TestMiddleware:
                 if result is None:
                     captured.append("after-inline")
                     return None
+
                 # wrap continuation
                 def post(ctx):
                     result(ctx)
                     captured.append("after-body")
+
                 return post
+
             return wrapped
 
         app = HttpApp(middleware=[capturing_mw])
@@ -463,7 +476,7 @@ class TestWorkerPool:
 
 
 class TestBackendSelection:
-    async def test_httptools_backend(self, free_port):
+    async def test_explicit_backend_basic_response(self, free_port, http_backend):
         app = HttpApp()
 
         @app.get("/{name}")
@@ -471,7 +484,7 @@ class TestBackendSelection:
             return f"hi {name}"
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(app.service(cfg, backend="httptools")) as lt:
+        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
             await lt.started
             await _wait_ready(free_port)
             r = await _get(f"http://127.0.0.1:{free_port}/world")
@@ -484,11 +497,11 @@ class TestBackendSelection:
         app = HttpApp()
         cfg = ServerConfig(host="127.0.0.1", port=0)
         with pytest.raises(ValueError, match="unknown backend"):
-            app.service(cfg, backend="bogus")  # type: ignore[arg-type]
+            app.service(cfg, backend=cast(Any, "bogus"))
 
 
 class TestStreamingRoutes:
-    async def test_streaming_route_reads_body_in_handler(self, free_port):
+    async def test_streaming_route_reads_body_in_handler(self, free_port, http_backend):
         """``buffer_body=False`` — handler runs in a worker on a borrowed
         conn and reads body chunks via ``ctx.receive(...)``."""
         captured: dict = {}
@@ -509,7 +522,7 @@ class TestStreamingRoutes:
             return f"got {len(full)} bytes"
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_app(app, cfg) as lt:
+        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
             await lt.started
             await _wait_ready(free_port)
             payload = b"a" * 1024
@@ -522,42 +535,6 @@ class TestStreamingRoutes:
         assert captured["body"] == b"a" * 1024
         # Streaming handler runs on a worker thread, not the main thread.
         assert captured["thread"] != threading.get_ident()
-
-    async def test_streaming_route_reads_body_httptools(self, free_port):
-        """Streaming under httptools: the body reaches the worker even
-        when the client piggybacks body bytes with the request line in a
-        single TCP segment (the common case without ``Expect: 100-continue``).
-
-        The parser is the single source of truth: ``on_body`` populates
-        ``conn._streaming_body_buf``, which the worker drains via
-        ``ctx.receive``."""
-        captured: dict = {}
-
-        app = HttpApp()
-
-        @app.post("/upload", buffer_body=False)
-        def upload(ctx: HTTPReqCtx):
-            chunks: list[bytes] = []
-            while True:
-                chunk = ctx.receive(8192)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            captured["body"] = b"".join(chunks)
-            return f"got {len(captured['body'])} bytes"
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(app.service(cfg, backend="httptools")) as lt:
-            await lt.started
-            await _wait_ready(free_port)
-            payload = b"a" * 1024
-            r = await _post(f"http://127.0.0.1:{free_port}/upload", content=payload, timeout=3.0)
-            assert r.status_code == 200
-            assert r.text == f"got {len(payload)} bytes"
-            lt.shutdown()
-            await lt.stopped
-
-        assert captured["body"] == payload
 
     async def test_streaming_route_body_across_multiple_recvs_httptools(self, free_port):
         """The client sends headers in one TCP write, body in subsequent
@@ -587,12 +564,7 @@ class TestStreamingRoutes:
             def hit() -> bytes:
                 payload = b"a" * 4096
                 with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
-                    s.sendall(
-                        b"POST /upload HTTP/1.1\r\n"
-                        b"Host: x\r\n"
-                        b"Content-Length: 4096\r\n"
-                        b"\r\n"
-                    )
+                    s.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 4096\r\n\r\n")
                     # Send body in three smaller writes with brief pauses;
                     # the parser will see only headers in its first feed.
                     for i in (0, 1024, 2048):
@@ -648,13 +620,7 @@ class TestStreamingRoutes:
             def hit() -> bytes:
                 with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
                     # Streaming POST.
-                    s.sendall(
-                        b"POST /upload HTTP/1.1\r\n"
-                        b"Host: x\r\n"
-                        b"Content-Length: 1024\r\n"
-                        b"\r\n"
-                        + b"a" * 1024
-                    )
+                    s.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1024\r\n\r\n" + b"a" * 1024)
                     buf1 = b""
                     while b"got 1024 bytes" not in buf1:
                         chunk = s.recv(4096)
