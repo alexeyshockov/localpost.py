@@ -437,3 +437,130 @@ single-writer to the selector**, and the lock is gone. Future work that
 needs to add cross-thread selector mutations (e.g. scheduled FD timers)
 just enqueues an op — no lock to contend with, no consistency invariants
 to re-prove.
+
+## Phase 6 (shipped): optional httptools backend (2026-04-29)
+
+The Phase 5 closing line — "remaining selector-thread CPU is now
+overwhelmingly inside h11" — was the explicit handoff to this phase.
+Cashed it in.
+
+### What shipped
+
+A second HTTP/1.1 server backed by ``httptools`` (llhttp) ships as a
+**peer** of the existing h11 server, opt-in via the ``[http-fast]`` extra.
+Not a parser plugin under one server — two implementations sharing only
+the parser-agnostic infrastructure:
+
+- ``localpost/http/_base.py``: ``BaseServer`` (selector loop, accept,
+  op queue + wakeup pipe, stale sweep, shutdown) lifted from the old
+  ``Server``, parameterised on a ``conn_factory``. ``BaseHTTPConn`` ABC
+  with a small surface (``__call__``, ``close``, ``sock``, ``fd``,
+  ``tracked``, ``close_at``, ``idle``, ``emit_stale_408``) — no parser
+  methods leak through.
+- ``localpost/http/server_h11.py``: existing logic moved here; translates
+  at the boundary (``h11.Request`` ⇄ neutral ``Request``, neutral
+  ``Response`` → ``h11.Response`` before ``parser.send``).
+- ``localpost/http/server_httptools.py``: native push-callback driven;
+  ``_ReadyRequest`` queue handles pipelining naturally; hand-written
+  response serializer. Each accepted conn gets its own
+  ``HttpRequestParser`` with the conn instance as the protocol target.
+- ``localpost/http/_types.py``: neutral ``Request`` / ``NativeResponse``
+  / ``InformationalResponse`` so handlers no longer import ``h11`` or
+  ``httptools`` directly.
+
+Hosted-service form: ``httptools_server`` (peer of ``http_server``,
+lazy-imports the backend so the extra stays optional).
+
+Why two implementations rather than a parser Protocol: h11 is
+pull-events + parse-AND-serialize, httptools is push-callbacks +
+parse-only. Forcing one shape over both restricts the faster backend
+without buying anything (the dispatch path / selector / pool are
+already shared by ``BaseServer``). Each backend uses its parser's
+natural idioms.
+
+### Bench (8 s/cell, Python 3.13 on Darwin arm64, 64 / 32 clients)
+
+| Scenario          | h11 RPS / p50      | httptools RPS / p50    | Δ RPS    |
+| ----------------- | -----------------: | ---------------------: | -------: |
+| `plaintext`       |    9,494 / 6.67 ms |  **12,845 / 4.96 ms**  | **+35%** |
+| `path_param`      |    9,500 / 6.67 ms |  **12,775 / 4.98 ms**  | **+34%** |
+| `json_post`       |    8,616 / 3.66 ms |  **12,504 / 2.54 ms**  | **+45%** |
+| `profile_update`  |    5,841 / 5.43 ms |    5,885 / 5.25 ms     |    +1%   |
+
+Lands almost exactly on the 30–50% projection from the original Phase 1
+diagnosis. ``profile_update`` doesn't move because the synthetic handler
+holds three ``time.sleep`` totalling ~4 ms — at that point parser
+overhead is a rounding error; the gain is in the noise.
+
+p50 latency improves ~25–31% on parser-bound scenarios. We're still
+~3–5× behind ``starlette_uvicorn`` / ``starlette_granian`` on absolute
+RPS — that's the async-ASGI + uvloop ceiling, well outside what a
+sync-handler + thread-pool design gives.
+
+All 142 http tests pass (130 existing + 12 new backend-parity tests
+covering GET / POST-with-body / oversize → 413 / malformed → 400 /
+keep-alive×2 / ``Expect: 100-continue`` across both backends).
+
+### Two bugs the parity tests didn't catch
+
+Both surfaced only under bench load (``oha`` with persistent HTTP/1.1
+connections), not in the parity suite — pinpointed and fixed in the
+same session.
+
+1. **``_ready`` not popped on borrow.** Under ``thread_pool_handler``,
+   ``h(req_ctx)`` returns immediately with ``borrowed=True``; my loop
+   checked ``req_ctx.borrowed`` *before* ``popleft``, so the same
+   request got re-dispatched on every conn re-track. Symptom: RPS = the
+   concurrency limit, every request hitting the 1 s ``rw_timeout``.
+   Fix: ``popleft`` *before* dispatch — ownership transfers to the
+   ``HTTPReqCtx`` regardless of whether the handler runs synchronously
+   or hands the conn off.
+2. **No body framing for responses without Content-Length.** h11
+   silently inserts ``Transfer-Encoding: chunked`` when neither
+   ``Content-Length`` nor ``Transfer-Encoding`` is set; my hand-written
+   serializer wrote raw bytes and HTTP/1.1 clients waited for FIN
+   before considering the response complete. The CHANGELOG/README
+   "Content-Length only" claim was wrong: ``Router.as_handler`` doesn't
+   compute lengths from ``Iterable[bytes]`` bodies, and many WSGI apps
+   don't set the header either. Fix: in the httptools backend's
+   ``start_response``, when the response lacks both headers, append
+   ``Transfer-Encoding: chunked`` and frame chunks
+   (``<hex-len>\r\n<data>\r\n``) plus the ``0\r\n\r\n`` terminator on
+   ``finish_response``. **One** ``sendall`` per chunk — the first
+   version did three, and the syscall overhead alone (~75 µs/req at
+   small bodies) was eating the entire C-parser win, leaving the bench
+   at parity with h11.
+
+### Trade-offs
+
+- **Two parallel implementations, not one.** ~340 lines for the h11
+  backend (mostly verbatim from the old ``server.py``) + ~430 lines for
+  the httptools backend (callback bookkeeping + response serializer +
+  chunked framing). The shared ``BaseServer`` is ~370 lines, lifted
+  unchanged. The duplication is intentional: each backend reads as a
+  straight translation of its parser's natural idioms.
+- **Auto-chunked is now in scope.** The CHANGELOG / README originally
+  said "Content-Length only initially". That stance was based on the
+  assumption that ``Router`` and ``wrap_wsgi`` always set
+  Content-Length. They don't. The httptools backend now matches h11's
+  effective behaviour (silent chunked) for un-framed responses; chunked
+  remains absent from the trailer / Transfer-Encoding-other-than-chunked
+  paths, which is fine.
+- **Public API took a one-time break.** ``HTTPReqCtx.request`` is now a
+  neutral ``Request`` (was ``h11.Request``); ``start_response`` /
+  ``complete`` accept neutral ``NativeResponse`` /
+  ``InformationalResponse``. Field shapes match h11's — migration is a
+  mechanical import swap, not a semantic change. Documented in
+  CHANGELOG.
+
+### What's left for future perf work
+
+- **Sendfile / vectored writes** for response bodies. Each
+  ``sock.sendall`` on the response path is one syscall; status + first
+  chunk + terminator could be one ``writev`` for small responses.
+- **Pre-baked common headers** (Date, Server) cached per-second on the
+  ``BaseServer``, written by both backends.
+- The selector-thread CPU is now lower (parser cheaper). If we ever
+  return to closing the gap to async-ASGI stacks, **multi-selector
+  + SO_REUSEPORT** is the next architectural lever — the op-queue
+  design from Phase 3-B already accommodates multiple selectors.
