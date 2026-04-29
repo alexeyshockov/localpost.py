@@ -96,15 +96,9 @@ def test_simple_get(serve_parity):
 def test_post_with_body(serve_parity):
     received: list[bytes] = []
 
-    def handler(ctx: HTTPReqCtx) -> None:
-        body = b""
-        while True:
-            chunk = ctx.receive(4096)
-            if not chunk:
-                break
-            body += chunk
-        received.append(body)
-        out = b"echo:" + body
+    def body_handler(ctx: HTTPReqCtx) -> None:
+        received.append(ctx.body)
+        out = b"echo:" + ctx.body
         ctx.complete(
             NativeResponse(
                 status_code=200,
@@ -115,6 +109,9 @@ def test_post_with_body(serve_parity):
             ),
             out,
         )
+
+    def handler(_ctx: HTTPReqCtx):
+        return body_handler
 
     with serve_parity(handler) as port:
         r = httpx.post(f"http://127.0.0.1:{port}/x", content=b"hello world", timeout=2)
@@ -204,14 +201,8 @@ def test_malformed_request_returns_400(serve_parity):
 
 
 def test_expect_100_continue(serve_parity):
-    def handler(ctx: HTTPReqCtx) -> None:
-        body = b""
-        while True:
-            chunk = ctx.receive(4096)
-            if not chunk:
-                break
-            body += chunk
-        out = b"got:" + body
+    def body_handler(ctx: HTTPReqCtx) -> None:
+        out = b"got:" + ctx.body
         ctx.complete(
             NativeResponse(
                 200,
@@ -219,6 +210,9 @@ def test_expect_100_continue(serve_parity):
             ),
             out,
         )
+
+    def handler(_ctx: HTTPReqCtx):
+        return body_handler
 
     with serve_parity(handler) as port:
         with socket.create_connection(("127.0.0.1", port), timeout=3) as s:

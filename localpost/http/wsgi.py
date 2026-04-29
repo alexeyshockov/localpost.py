@@ -7,19 +7,22 @@ from typing import Any, final, override
 from wsgiref.types import WSGIApplication
 
 from localpost.http._types import Response as _NativeResponse
-from localpost.http.server import HTTPReqCtx, RequestHandler
+from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 
 __all__ = ["wrap_wsgi"]
 
 
 @final
 class _RequestBodyStream(RawIOBase):
-    """Expose ``HTTPReqCtx.receive`` as a readable file-like object for ``wsgi.input``."""
+    """Expose the buffered ``HTTPReqCtx.body`` as ``wsgi.input``.
 
-    def __init__(self, ctx: HTTPReqCtx) -> None:
-        self._ctx = ctx
-        self._eof = False
-        self._leftover = b""
+    The body has already been read by the selector before the WSGI app
+    runs, so this is a thin slicing view — no I/O, no ``recv``.
+    """
+
+    def __init__(self, body: bytes) -> None:
+        self._buf = body
+        self._pos = 0
 
     @override
     def writable(self) -> bool:
@@ -35,43 +38,32 @@ class _RequestBodyStream(RawIOBase):
 
     @override
     def readall(self) -> bytes:
-        buf = bytearray(self._leftover)
-        self._leftover = b""
-        while not self._eof:
-            chunk = self._ctx.receive()
-            if not chunk:
-                self._eof = True
-                break
-            buf.extend(chunk)
-        return bytes(buf)
+        result = self._buf[self._pos :]
+        self._pos = len(self._buf)
+        return result
 
     @override
     def readinto(self, buffer: Buffer, /) -> int:
         view = memoryview(buffer).cast("B")
         n = len(view)
-        if self._leftover:
-            take = min(n, len(self._leftover))
-            view[:take] = self._leftover[:take]
-            self._leftover = self._leftover[take:]
-            return take
-        if self._eof:
+        avail = len(self._buf) - self._pos
+        if avail == 0:
             return 0
-        data = self._ctx.receive(n)
-        if not data:
-            self._eof = True
-            return 0
-        if len(data) <= n:
-            view[: len(data)] = data
-            return len(data)
-        view[:n] = data[:n]
-        self._leftover = data[n:]
-        return n
+        take = min(n, avail)
+        view[:take] = self._buf[self._pos : self._pos + take]
+        self._pos += take
+        return take
 
 
 def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
-    """Wrap a WSGI application as a native :class:`RequestHandler`."""
+    """Wrap a WSGI application as a native :class:`RequestHandler`.
 
-    def handler(ctx: HTTPReqCtx) -> None:
+    WSGI apps may consume ``wsgi.input`` from any route, so the wrapper
+    always returns a :data:`BodyHandler` continuation — the selector
+    buffers the request body into ``ctx.body`` before the WSGI app runs.
+    """
+
+    def run_wsgi(ctx: HTTPReqCtx) -> None:
         environ = _build_environ(ctx)
 
         response_state: dict[str, Any] = {}
@@ -124,7 +116,10 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
             if close is not None:
                 close()
 
-    return handler
+    def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
+        return run_wsgi
+
+    return pre_body
 
 
 def _wsgi_write_deprecated(_: bytes) -> None:
@@ -151,7 +146,7 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": "http",
-        "wsgi.input": _RequestBodyStream(ctx),
+        "wsgi.input": _RequestBodyStream(ctx.body),
         "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
         "wsgi.multiprocess": False,

@@ -27,6 +27,28 @@ The server is intentionally bounded:
   is single-writer-per-selector and uses only thread-safe primitives, but
   see `benchmarks/http/PERF_FINDINGS.md` for any noted caveats per release.
 
+### Workload shape (the JSON-API common case)
+
+The hot path is tuned for the JSON web-API common case, and we cut
+corners on shapes that don't fit it:
+
+- **Reject before body.** Handlers that decide based on headers
+  (no-route, wrong method, auth) return `None` and the body is never
+  recv'd. No worker hop, no allocation.
+- **Body is buffered, not streamed.** When a handler needs the body
+  (e.g. to deserialise JSON), it needs the *whole* body. The selector
+  buffers it into `ctx.body` and invokes a `BodyHandler` continuation;
+  the continuation just reads `ctx.body`. There is still a
+  `ctx.receive(size)` streaming API but it isn't the optimised path.
+- **Response is one chunk or SSE.** Most responses are one
+  status+headers+body block; SSE generators emit the same opening
+  block then per-event chunks. The response writer auto-buffers
+  headers and flushes them with the first body chunk in a single
+  `sendall` — common-case `complete(...)` is one syscall.
+- **No HTTP/1.1 pipelining.** Pipelined clients are served sequentially
+  (correct, just no parallelism). The simpler per-conn state machine
+  is the trade we made for it.
+
 ## Install
 
 ```bash

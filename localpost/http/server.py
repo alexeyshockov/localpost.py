@@ -10,6 +10,7 @@ from localpost.http._base import (
     BaseServer as Server,
 )
 from localpost.http._base import (
+    BodyHandler,
     HTTPReqCtx,
     RequestHandler,
     emit_handler_error,
@@ -27,6 +28,7 @@ __all__ = [
     "HTTPConn",
     "HTTPReqCtx",
     "HTTPReqCtxH11",
+    "BodyHandler",
     "RequestHandler",
     "BodyTooLarge",
     "emit_handler_error",

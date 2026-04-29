@@ -119,7 +119,7 @@ class TestHttpServerService:
         entered = threading.Semaphore(0)  # used as a barrier signal
         release = threading.Event()
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             with lock:
                 thread_ids.append(threading.get_ident())
             entered.release()
@@ -129,6 +129,9 @@ class TestHttpServerService:
                 NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=4) as lt:
@@ -173,7 +176,7 @@ class TestHttpServerService:
         peak = 0
         lock = threading.Lock()
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             nonlocal in_flight, peak
             with lock:
                 in_flight += 1
@@ -182,6 +185,9 @@ class TestHttpServerService:
             with lock:
                 in_flight -= 1
             ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
@@ -207,7 +213,7 @@ class TestHttpServerService:
         handler_started = threading.Event()
         handler_cancelled = threading.Event()
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             handler_started.set()
             try:
                 for _ in range(100):
@@ -217,6 +223,9 @@ class TestHttpServerService:
                 handler_cancelled.set()
                 raise
             ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
@@ -394,7 +403,7 @@ class TestServiceRobustness:
         lock = threading.Lock()
         gate = threading.Event()
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             nonlocal in_flight, peak
             with lock:
                 in_flight += 1
@@ -403,6 +412,9 @@ class TestServiceRobustness:
             with lock:
                 in_flight -= 1
             ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=3) as lt:
@@ -482,12 +494,15 @@ class TestDispatchLoad:
     async def test_many_requests_served_from_worker_threads(self, free_port):
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             tid = str(threading.get_ident()).encode()
             ctx.complete(
                 NativeResponse(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
                 tid,
             )
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         async with _serve_pooled(cfg, handler, max_concurrency=8) as lt:
             await lt.started
@@ -524,7 +539,7 @@ class TestRequestCancellation:
         handler_started = threading.Event()
         handler_cancelled = threading.Event()
 
-        def handler(ctx: HTTPReqCtx):
+        def body_handler(ctx: HTTPReqCtx):
             handler_started.set()
             try:
                 for _ in range(200):
@@ -535,6 +550,9 @@ class TestRequestCancellation:
                 raise
             # Should not be reached
             ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        def handler(_ctx: HTTPReqCtx):
+            return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:

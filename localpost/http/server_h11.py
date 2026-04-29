@@ -2,6 +2,16 @@
 
 Pure-Python parser/state-machine. The default backend; readable, no C deps.
 For the C-based alternative see :mod:`localpost.http.server_httptools`.
+
+Like the httptools backend, this one:
+
+- buffers the full request body into ``ctx.body`` before invoking a
+  returned :data:`BodyHandler` continuation
+- auto-buffers the response headers; the next ``send`` (or
+  ``finish_response`` for empty bodies) emits headers + first body chunk
+  in a single ``sendall``
+- does not parallelise pipelined requests on the same connection
+  (sequential serving via h11's own state machine)
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ from localpost.http._base import (
     REQUEST_TIMEOUT_RESPONSE,
     BaseHTTPConn,
     BaseServer,
+    BodyHandler,
     RequestHandler,
     emit_handler_error,
     start_http_server_base,
@@ -72,6 +83,16 @@ class HTTPConnH11(BaseHTTPConn):
     ``parser.start_next_cycle``. Compared against ``ServerConfig.max_body_size``
     to enforce the upload cap."""
     idle: bool = True
+
+    # Per-request dispatch state. Set on ``h11.Request``, used while we
+    # iterate ``h11.Data`` events to accumulate the body, and consumed on
+    # ``h11.EndOfMessage`` to fire the continuation. ``_ctx`` is the
+    # current request context shared with the handler; ``_continuation``
+    # is the post-body callback (None if the pre-body handler completed
+    # inline or borrowed).
+    _ctx: HTTPReqCtxH11 | None = None
+    _continuation: BodyHandler | None = None
+    _body_buf: bytearray = field(default_factory=bytearray)
 
     def __post_init__(self) -> None:
         self.fd = self.sock.fileno()
@@ -126,13 +147,27 @@ class HTTPConnH11(BaseHTTPConn):
                 self.body_bytes_received = 0
                 self.idle = True
                 self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
+                # Per-request state from previous cycle is no longer relevant.
+                self._ctx = None
+                self._continuation = None
+                self._body_buf = bytearray()
 
             event = parser.next_event()
 
             if event is h11.NEED_DATA:
                 if parser.they_are_waiting_for_100_continue:
-                    self.send(h11.Response(status_code=417, headers=[], reason="Expectation Failed"))
-                    continue
+                    if self._continuation is not None:
+                        # Body is wanted (handler returned a continuation) —
+                        # tell the client to send it. Fall through to recv.
+                        self.send(
+                            h11.InformationalResponse(
+                                status_code=100, headers=[], reason="Continue"
+                            )
+                        )
+                    else:
+                        # No body needed — short-circuit with 417.
+                        self.send(h11.Response(status_code=417, headers=[], reason="Expectation Failed"))
+                        continue
                 try:
                     self.receive()
                 except BlockingIOError:
@@ -142,9 +177,30 @@ class HTTPConnH11(BaseHTTPConn):
                 self.body_bytes_received += len(event.data)
                 if self.body_bytes_received > self.server.config.max_body_size:
                     raise BodyTooLarge(self.body_bytes_received)
-                continue  # Drain the request body
+                if self._continuation is not None:
+                    self._body_buf += event.data
+                # Else: pre-body handler returned None — drain silently.
             elif isinstance(event, h11.EndOfMessage):
-                continue
+                if self._continuation is not None:
+                    cont = self._continuation
+                    ctx = self._ctx
+                    assert ctx is not None
+                    self._continuation = None
+                    ctx.body = bytes(self._body_buf)
+                    self._body_buf = bytearray()
+                    try:
+                        cont(ctx)
+                    except BodyTooLarge:
+                        raise
+                    except Exception:
+                        self.server.logger.exception(
+                            "Body handler raised for %s %r", ctx.request.method, ctx.request.target
+                        )
+                        emit_handler_error(ctx)
+                    if ctx.borrowed:
+                        return
+                    if not self.tracked:
+                        return
             elif isinstance(event, h11.Request):
                 cl = _content_length(event.headers)
                 if cl is not None and cl > self.server.config.max_body_size:
@@ -155,15 +211,21 @@ class HTTPConnH11(BaseHTTPConn):
                     headers=[(bytes(n), bytes(v)) for n, v in event.headers],
                     http_version=bytes(event.http_version),
                 )
-                req_ctx = HTTPReqCtxH11(self.server, self, req)
+                ctx = HTTPReqCtxH11(self.server, self, req)
+                self._ctx = ctx
+                self._body_buf = bytearray()
+                self._continuation = None
                 try:
-                    h(req_ctx)
+                    result = h(ctx)
                 except BodyTooLarge:
                     raise
                 except Exception:
                     self.server.logger.exception("Handler raised for %s %r", event.method, event.target)
-                    emit_handler_error(req_ctx)
-                if req_ctx.borrowed:
+                    emit_handler_error(ctx)
+                    result = None
+                if result is not None:
+                    self._continuation = result
+                if ctx.borrowed:
                     return
                 if not self.tracked:
                     return  # connection was closed during error recovery
@@ -209,18 +271,25 @@ class HTTPConnH11(BaseHTTPConn):
             pass
 
 
-@dataclass(eq=False, frozen=True, slots=True)
+@dataclass(eq=False, slots=True)
 class HTTPReqCtxH11:
     """Per-request context for the h11 backend.
 
     Structurally satisfies :class:`localpost.http._base.HTTPReqCtx`.
+
+    The response-write path auto-buffers: ``start_response`` advances h11
+    and stashes the returned bytes; the next ``send`` (or
+    ``finish_response`` for empty bodies) emits headers + first body
+    chunk in a single ``sendall``.
     """
 
     _server: BaseServer
     _conn: HTTPConnH11
     request: Request
 
-    response_status: int | None = field(default=None, init=False)
+    body: bytes = b""
+    response_status: int | None = None
+    _pending_header_bytes: bytes | None = None
 
     @property
     def borrowed(self) -> bool:
@@ -247,6 +316,10 @@ class HTTPReqCtxH11:
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
+        """Streaming-read API. Rare under the JSON-API contract — typical
+        callers receive the buffered body via ``ctx.body``. After the
+        :data:`BodyHandler` continuation runs, the body has been fully
+        consumed and the parser's state side reads ``b""``."""
         parser = self._conn.parser
         if parser.their_state is h11.DONE:
             return b""
@@ -282,16 +355,42 @@ class HTTPReqCtxH11:
 
     def start_response(self, response: Response | InformationalResponse, /) -> None:
         if isinstance(response, Response):
-            object.__setattr__(self, "response_status", response.status_code)
-        self._conn.send(_to_h11_response(response))
+            self.response_status = response.status_code
+            # Drive the h11 state machine, but buffer the bytes for a
+            # coalesced ``sendall`` with the first body chunk.
+            payload = self._conn.parser.send(_to_h11_response(response))
+            self._pending_header_bytes = bytes(payload) if payload else b""
+        else:
+            # Informational responses (100 Continue, etc.) flush immediately.
+            self._conn.send(_to_h11_response(response))
 
     def send(self, chunk: Buffer, /) -> None:
         # h11 wants bytes; widen the public API to any Buffer (memoryview,
         # bytearray, …) so callers can avoid an explicit copy.
-        self._conn.send(h11.Data(data=bytes(chunk) if not isinstance(chunk, bytes) else chunk))
+        chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
+        payload = self._conn.parser.send(h11.Data(data=chunk_bytes))
+        if payload is None:
+            return
+        if self._pending_header_bytes is not None:
+            combined = self._pending_header_bytes + payload
+            self._pending_header_bytes = None
+            self._sock_sendall(combined)
+        elif payload:
+            self._sock_sendall(payload)
 
     def finish_response(self) -> None:
-        self._conn.send(h11.EndOfMessage())
+        # Coalesce: ``EndOfMessage`` payload (chunked terminator or nothing)
+        # plus any still-pending header bytes (empty-body case) emit in one
+        # ``sendall``.
+        eom_payload = self._conn.parser.send(h11.EndOfMessage())
+        eom_bytes = bytes(eom_payload) if eom_payload else b""
+        if self._pending_header_bytes is not None:
+            combined = self._pending_header_bytes + eom_bytes
+            self._pending_header_bytes = None
+            if combined:
+                self._sock_sendall(combined)
+        elif eom_bytes:
+            self._sock_sendall(eom_bytes)
         # Drain h11's pending ``EndOfMessage`` for the request side before
         # giving the conn back. For a no-body request the selector parsed
         # ``Request`` and stopped — h11 still has the implicit EndOfMessage
@@ -308,6 +407,14 @@ class HTTPReqCtxH11:
                 self._conn.close()
                 return
         self._maybe_give_back()
+
+    def _sock_sendall(self, payload: bytes) -> None:
+        sock, total_sent, payload_len = self._conn.sock, 0, len(payload)
+        while total_sent < payload_len:
+            sent = sock.send(payload[total_sent:])
+            if sent == 0:
+                raise ConnectionAbortedError("socket is broken")
+            total_sent += sent
 
 
 def start_http_server(config: ServerConfig, handler: RequestHandler, /):

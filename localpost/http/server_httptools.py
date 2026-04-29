@@ -4,23 +4,26 @@ Faster, opt-in alternative to the default :mod:`localpost.http.server_h11`
 backend. httptools is a parse-only C extension — response bytes and
 keep-alive bookkeeping are handled here.
 
-Initial scope:
+Scope:
 
-- request body streaming via per-conn body buffer
-- ``Expect: 100-continue`` (response written inline on first ``receive()``)
-- keep-alive driven by ``parser.should_keep_alive()`` and response headers
-- pipelining (multiple requests parsed from one ``feed_data`` call) supported
-  via a ready-queue
-- request bodies serialised by the caller using ``Content-Length``
-  (matching what ``Router`` and ``wrap_wsgi`` already produce)
+- request body is buffered in full into ``ctx.body`` before the
+  :data:`BodyHandler` continuation is invoked (JSON-API common case)
+- ``Expect: 100-continue`` is sent inline only when the pre-body
+  :data:`RequestHandler` returns a continuation (i.e., the body is
+  actually wanted)
+- keep-alive driven by ``parser.should_keep_alive()`` and response
+  headers
+- HTTP/1.1 pipelining is **not supported**: pipelined clients are served
+  one request at a time on the same connection (no parallelism gained,
+  no incorrect interleaving emitted)
+- response framing: ``Content-Length`` (set by the caller) or auto
+  ``Transfer-Encoding: chunked`` if neither is present
 
-Out of scope for v1: chunked Transfer-Encoding on the response side, HTTP
-upgrade negotiation (WebSockets), HTTP/2.
+Out of scope: HTTP upgrade negotiation (WebSockets), HTTP/2.
 """
 
 from __future__ import annotations
 
-import collections
 import socket
 import time
 from collections.abc import Buffer, Iterator
@@ -44,6 +47,7 @@ from localpost.http._base import (
     REQUEST_TIMEOUT_RESPONSE,
     BaseHTTPConn,
     BaseServer,
+    BodyHandler,
     RequestHandler,
     emit_handler_error,
     start_http_server_base,
@@ -93,33 +97,20 @@ def _serialize_response(r: Response | InformationalResponse) -> bytes:
     return bytes(out)
 
 
-def _has_connection_close(headers: list[tuple[bytes, bytes]]) -> bool:
-    return any(name.lower() == b"connection" and b"close" in value.lower() for name, value in headers)
+def _scan_response_headers(headers: list[tuple[bytes, bytes]]) -> tuple[bool, bool]:
+    """One-pass scan: ``(has_connection_close, has_content_length_or_te)``.
 
-
-def _has_content_length_or_te(headers: list[tuple[bytes, bytes]]) -> bool:
-    """True if the user already framed the response (Content-Length or Transfer-Encoding)."""
-    for name, _ in headers:
-        n = name.lower()
-        if n == b"content-length" or n == b"transfer-encoding":
-            return True
-    return False
-
-
-@dataclass(eq=False, slots=True)
-class _ReadyRequest:
-    """A request whose headers have been parsed (and possibly more).
-
-    Body chunks accumulate as they arrive from subsequent ``feed_data`` calls;
-    ``complete`` flips when ``on_message_complete`` fires.
+    Combined to avoid two walks per response.
     """
-
-    request: Request
-    body: collections.deque[bytes] = field(default_factory=collections.deque)
-    complete: bool = False
-    expect_100_continue: bool = False
-    keep_alive: bool = True
-    body_received: int = 0
+    has_close = False
+    has_framing = False
+    for name, value in headers:
+        n = name.lower()
+        if n == b"connection" and b"close" in value.lower():
+            has_close = True
+        elif n in {b"content-length", b"transfer-encoding"}:
+            has_framing = True
+    return has_close, has_framing
 
 
 @final
@@ -134,28 +125,29 @@ class HTTPConnHttptools(BaseHTTPConn):
     tracked: bool = False
     idle: bool = True
 
-    # Currently-being-parsed request state (between on_message_begin and on_message_complete):
+    # Per-request scratch state populated by the parser callbacks.
     _cur_target: bytes = b""
     _cur_headers: list[tuple[bytes, bytes]] = field(default_factory=list)
     _cur_expect_100: bool = False
     _cur_oversize: bool = False  # set by on_headers_complete if Content-Length exceeds cap
 
-    # Most recently promoted ready request — body / EOM callbacks update its state.
-    _last_ready: _ReadyRequest | None = None
-
-    # Completed requests waiting for dispatch (head = next to dispatch). A request is
-    # appended here on on_headers_complete; its body chunks accumulate via on_body until
-    # on_message_complete flips ``complete``.
-    _ready: collections.deque[_ReadyRequest] = field(default_factory=collections.deque)
-
-    # Body cap tracking. Populated either eagerly from Content-Length
-    # (on_headers_complete) or progressively via on_body.
+    # Per-conn dispatch state. One in-flight request at a time (no pipelining):
+    # ``_ctx`` is built in ``on_headers_complete`` and the pre-body handler is
+    # invoked inline. If it returns a continuation, ``_continuation`` is set
+    # and ``on_body`` accumulates into ``_body_buf`` until ``on_message_complete``.
+    _ctx: HTTPReqCtxHttptools | None = None
+    _continuation: BodyHandler | None = None
+    _body_buf: bytearray = field(default_factory=bytearray)
+    _message_complete: bool = False
     _body_too_large: int | None = None
 
     # Set when the response indicates ``Connection: close`` or the request lacked
     # keep-alive support — the conn is closed once finish_response returns.
     _close_after_response: bool = False
     _response_started: bool = False
+
+    # Set by ``__call__`` so parser callbacks can dispatch the pre-body handler.
+    _handler: RequestHandler | None = None
 
     def __post_init__(self) -> None:
         self.fd = self.sock.fileno()
@@ -179,7 +171,7 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._cur_expect_100 = True
 
     def on_headers_complete(self) -> None:
-        # Build the neutral Request envelope and promote it to the ready queue.
+        # Build the neutral Request envelope and dispatch the pre-body handler.
         method = self.parser.get_method()
         version = self.parser.get_http_version().encode("ascii")
         keep_alive = self.parser.should_keep_alive()
@@ -204,34 +196,80 @@ class HTTPConnHttptools(BaseHTTPConn):
             headers=self._cur_headers,
             http_version=version,
         )
-        ready = _ReadyRequest(
-            request=req,
-            expect_100_continue=self._cur_expect_100,
-            keep_alive=keep_alive,
+        ctx = HTTPReqCtxHttptools(
+            self.server,
+            self,
+            req,
+            _expect_100_continue=self._cur_expect_100,
+            _keep_alive=keep_alive,
         )
-        self._ready.append(ready)
-        self._last_ready = ready
+        self._ctx = ctx
+        self._body_buf = bytearray()
+        self._message_complete = False
+        self._continuation = None
+
+        # Dispatch the pre-body handler inline. It runs on the selector
+        # thread; it can call ``ctx.complete(...)`` (response sent inline,
+        # returns None), ``ctx.borrow()`` (escape to worker, returns None),
+        # or return a :data:`BodyHandler` continuation to receive the body.
+        assert self._handler is not None
+        try:
+            result = self._handler(ctx)
+        except BodyTooLarge:
+            raise
+        except Exception:
+            self.server.logger.exception("Handler raised for %s %r", req.method, req.target)
+            emit_handler_error(ctx)
+            result = None
+
+        if result is None:
+            return  # done — body bytes (if any) are drained silently below
+
+        # Continuation returned: we'll buffer the body and invoke it on
+        # ``on_message_complete``. If the client sent ``Expect: 100-continue``,
+        # tell them to actually send the body now.
+        self._continuation = result
+        if self._cur_expect_100 and not ctx._continue_sent:
+            try:
+                self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                object.__setattr__(ctx, "_continue_sent", True)
+            except OSError:
+                # Best-effort; the body recv loop will surface the failure.
+                pass
 
     def on_body(self, data: bytes) -> None:
-        if self._cur_oversize or self._last_ready is None:
-            return
-        new_total = self._last_ready.body_received + len(data)
+        if self._continuation is None or self._cur_oversize:
+            return  # no body wanted (handler done) or already oversize
+        new_total = len(self._body_buf) + len(data)
         if new_total > self.server.config.max_body_size:
             self._body_too_large = new_total
             return
-        self._last_ready.body_received = new_total
-        self._last_ready.body.append(bytes(data))
+        self._body_buf += data
 
     def on_message_complete(self) -> None:
-        if self._last_ready is not None:
-            self._last_ready.complete = True
-        self._last_ready = None
+        if self._continuation is not None:
+            cont = self._continuation
+            self._continuation = None
+            ctx = self._ctx
+            assert ctx is not None
+            ctx.body = bytes(self._body_buf)
+            try:
+                cont(ctx)
+            except BodyTooLarge:
+                raise
+            except Exception:
+                self.server.logger.exception(
+                    "Body handler raised for %s %r", ctx.request.method, ctx.request.target
+                )
+                emit_handler_error(ctx)
+        self._message_complete = True
 
     # ----- BaseHTTPConn surface -----
 
     def __call__(self, h: RequestHandler, /) -> None:
+        self._handler = h
         try:
-            self._loop(h)
+            self._loop()
         except _ProtocolError as e:
             self.server.logger.warning("Bad client input from %s: %s", self.addr, e)
             self._try_send_status(BAD_REQUEST_RESPONSE, BAD_REQUEST_BODY)
@@ -255,37 +293,30 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._body_too_large = None
             raise BodyTooLarge(n)
 
-    def _loop(self, h: RequestHandler) -> None:
+    def _loop(self) -> None:
         config = self.server.config
         while self.tracked:
-            # Dispatch any ready request before reading more bytes. We pop
-            # before dispatching: the request is committed to ``req_ctx``
-            # and ownership transfers — otherwise a worker-pool handler
-            # (which sets ``borrowed=True`` and returns) would leave the
-            # request in the queue and we'd re-dispatch it on re-track.
-            if self._ready:
-                ready = self._ready.popleft()
-                req_ctx = HTTPReqCtxHttptools(self.server, self, ready)
-                try:
-                    h(req_ctx)
-                except BodyTooLarge:
-                    raise
-                except Exception:
-                    self.server.logger.exception(
-                        "Handler raised for %s %r", ready.request.method, ready.request.target
-                    )
-                    emit_handler_error(req_ctx)
-                if req_ctx.borrowed:
-                    return
+            # Did the previous request just complete? Either roll into the
+            # next one (keep-alive) or close.
+            if self._message_complete:
+                ctx = self._ctx
+                assert ctx is not None
+                if ctx.borrowed:
+                    return  # worker has the conn now
                 if not self.tracked:
-                    return  # connection was closed during error recovery
-                if self._close_after_response or not ready.keep_alive:
+                    return  # closed during error recovery
+                if self._close_after_response or not ctx._keep_alive:
                     self.close()
                     return
                 self._reset_for_next_request()
+                # Fall through to read more bytes (or to dispatch a request
+                # whose headers were already buffered by the parser).
                 continue
 
-            # No request ready — pump bytes from the socket.
+            # Pump bytes from the socket. Parser callbacks fire inline:
+            # ``on_headers_complete`` dispatches the pre-body handler;
+            # ``on_message_complete`` invokes the continuation if any and
+            # sets ``_message_complete``.
             try:
                 data = self.sock.recv(DEFAULT_BUFFER_SIZE)
             except BlockingIOError:
@@ -298,9 +329,13 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._feed(data)
 
     def _reset_for_next_request(self) -> None:
-        # Per-request parsing scratch is cleared on the next on_message_begin.
-        # Reset our own conn-level fields here.
+        # Per-request parsing scratch is cleared by ``on_message_begin``.
+        self._ctx = None
+        self._continuation = None
+        self._body_buf = bytearray()
+        self._message_complete = False
         self._response_started = False
+        self._close_after_response = False
         self.idle = True
         self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
@@ -310,9 +345,7 @@ class HTTPConnHttptools(BaseHTTPConn):
             return
         try:
             self.sock.settimeout(self.server.config.rw_timeout)
-            self.sock.sendall(_serialize_response(response))
-            if body:
-                self.sock.sendall(body)
+            self.sock.sendall(_serialize_response(response) + body)
         except Exception:  # noqa: BLE001, S110 — connection is being closed anyway
             pass
 
@@ -322,9 +355,7 @@ class HTTPConnHttptools(BaseHTTPConn):
             return
         try:
             self.sock.settimeout(self.server.config.rw_timeout)
-            self.sock.sendall(_serialize_response(REQUEST_TIMEOUT_RESPONSE))
-            if REQUEST_TIMEOUT_BODY:
-                self.sock.sendall(REQUEST_TIMEOUT_BODY)
+            self.sock.sendall(_serialize_response(REQUEST_TIMEOUT_RESPONSE) + REQUEST_TIMEOUT_BODY)
         except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
             pass
 
@@ -333,24 +364,34 @@ class _ProtocolError(Exception):
     """Translated httptools parser error. Mapped to 400 by the conn loop."""
 
 
-@dataclass(eq=False, frozen=True, slots=True)
+@dataclass(eq=False, slots=True)
 class HTTPReqCtxHttptools:
-    """Per-request context for the httptools backend."""
+    """Per-request context for the httptools backend.
+
+    The response-write path auto-buffers: ``start_response`` stores the
+    serialised status + headers without flushing; the next ``send`` (or
+    ``finish_response`` for empty bodies) emits a single ``sendall`` with
+    headers + body framed together. One syscall for the canonical
+    ``ctx.complete(response, body)`` path; two for SSE (headers + first
+    chunk together; one per subsequent chunk).
+    """
 
     _server: BaseServer
     _conn: HTTPConnHttptools
-    _ready: _ReadyRequest
+    request: Request
+    _expect_100_continue: bool = False
+    _keep_alive: bool = True
 
-    response_status: int | None = field(default=None, init=False)
-    _continue_sent: bool = field(default=False, init=False)
-    _chunked: bool = field(default=False, init=False)
+    body: bytes = b""
+    response_status: int | None = None
+    _continue_sent: bool = False
+    _chunked: bool = False
     """``True`` if the backend auto-added ``Transfer-Encoding: chunked`` because
     the response had neither ``Content-Length`` nor an explicit
     ``Transfer-Encoding`` — chunks must be framed and a terminator written."""
-
-    @property
-    def request(self) -> Request:
-        return self._ready.request
+    _pending_header_bytes: bytes | None = None
+    """Buffered status line + headers, awaiting flush on first body chunk
+    or ``finish_response``. ``None`` once flushed."""
 
     @property
     def borrowed(self) -> bool:
@@ -376,92 +417,82 @@ class HTTPReqCtxHttptools:
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        # 100-continue: caller is opting to read the body; tell the client
-        # to actually send it.
-        if self._ready.expect_100_continue and not self._continue_sent:
+        """Streaming-read API. Rare under the JSON-API contract — typical
+        callers receive the buffered body via ``ctx.body``. After the
+        :data:`BodyHandler` continuation runs, the body has been fully
+        consumed and this returns ``b""``."""
+        # 100-continue: caller is opting to read more bytes; tell the client
+        # to actually send body if we haven't already.
+        if self._expect_100_continue and not self._continue_sent:
             self._send_continue()
-        # Drain accumulated chunks before pumping more bytes.
-        if self._ready.body:
-            chunk = self._ready.body.popleft()
-            return chunk
-        if self._ready.complete:
-            return b""
-        # No buffered body, no EOM seen — pump more bytes from the socket.
+        # The continuation-style flow buffers the body in ``self.body`` before
+        # dispatch — there's nothing left to stream when this is called from
+        # a body handler. For non-standard pre-body callers (e.g. handlers
+        # that called ``borrow()`` and read their own body on a worker), fall
+        # through to a blocking-with-timeout recv.
         sock = self._conn.sock
         rw = self._server.config.rw_timeout
-        while True:
+        try:
+            return sock.recv(size)
+        except BlockingIOError:
+            sock.settimeout(rw)
             try:
-                data = sock.recv(size)
-            except BlockingIOError:
-                # Selector-thread handler on a non-blocking socket: switch
-                # to blocking-with-timeout for the duration of this receive,
-                # mirroring the h11 backend.
-                sock.settimeout(rw)
-                try:
-                    data = sock.recv(size)
-                finally:
-                    if self._conn.tracked:
-                        sock.settimeout(0)
-            if not data:
-                # Peer closed mid-body — surface as EOF for the handler.
-                self._ready.complete = True
-                return b""
-            self._conn._feed(data)
-            if self._ready.body:
-                return self._ready.body.popleft()
-            if self._ready.complete:
-                return b""
+                return sock.recv(size)
+            finally:
+                if self._conn.tracked:
+                    sock.settimeout(0)
 
     def _send_continue(self) -> None:
         self._conn.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
-        object.__setattr__(self, "_continue_sent", True)
+        self._continue_sent = True
 
     def start_response(self, response: Response | InformationalResponse, /) -> None:
+        # State updates first (response_status, _close_after_response, _chunked
+        # for the Response case); for Informational responses we just write
+        # bytes without buffering (rare path).
         if isinstance(response, Response):
-            object.__setattr__(self, "response_status", response.status_code)
+            self.response_status = response.status_code
             self._conn._response_started = True
-            if _has_connection_close(response.headers) or not self._ready.keep_alive:
+            has_close, has_framing = _scan_response_headers(response.headers)
+            if has_close or not self._keep_alive:
                 self._conn._close_after_response = True
-            # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
-            # Without framing, an HTTP/1.1 client would wait for the connection
-            # to close before considering the response complete.
-            if not _has_content_length_or_te(response.headers):
+            if not has_framing:
+                # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
+                # Without framing, an HTTP/1.1 client would wait for the
+                # connection to close before considering the response done.
                 response = Response(
                     status_code=response.status_code,
                     headers=[*response.headers, (b"transfer-encoding", b"chunked")],
                     reason=response.reason,
                 )
-                object.__setattr__(self, "_chunked", True)
-        self._conn.sock.sendall(_serialize_response(response))
+                self._chunked = True
+            self._pending_header_bytes = _serialize_response(response)
+        else:
+            # Informational responses (e.g., 100 Continue) flush immediately.
+            self._conn.sock.sendall(_serialize_response(response))
 
     def send(self, chunk: Buffer, /) -> None:
         if not isinstance(chunk, bytes):
             chunk = bytes(chunk)
-        if not chunk:
+        if not chunk and self._pending_header_bytes is None:
             return
-        if self._chunked:
-            # RFC 7230 §4.1: <hex-size> CRLF <data> CRLF — concatenated into
-            # a single ``sendall`` to keep this to one syscall per chunk.
-            framed = f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n"
+        framed = (f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n") if self._chunked and chunk else chunk
+        if self._pending_header_bytes is not None:
+            # Headers + first body chunk in one syscall.
+            self._conn.sock.sendall(self._pending_header_bytes + framed)
+            self._pending_header_bytes = None
+        elif framed:
             self._conn.sock.sendall(framed)
-        else:
-            self._conn.sock.sendall(chunk)
 
     def finish_response(self) -> None:
-        if self._chunked:
-            # Terminating chunk: ``0\r\n\r\n``.
-            self._conn.sock.sendall(b"0\r\n\r\n")
-        # Drain any remaining request-body bytes the handler skipped — leftover
-        # on the wire would corrupt the next pipelined request.
-        if not self._ready.complete:
-            try:
-                while not self._ready.complete:
-                    chunk = self.receive(DEFAULT_BUFFER_SIZE)
-                    if not chunk:
-                        break
-            except (BlockingIOError, OSError, _ProtocolError, BodyTooLarge):
-                # We can't safely recover — the conn must close.
-                self._conn._close_after_response = True
+        # Flush any still-buffered headers (empty-body case) plus the
+        # chunked terminator, in one sendall.
+        terminator = b"0\r\n\r\n" if self._chunked else b""
+        if self._pending_header_bytes is not None:
+            self._conn.sock.sendall(self._pending_header_bytes + terminator)
+            self._pending_header_bytes = None
+        elif terminator:
+            self._conn.sock.sendall(terminator)
         self._maybe_give_back()
 
 

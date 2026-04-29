@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BaseServer",
     "BaseHTTPConn",
+    "BodyHandler",
     "HTTPReqCtx",
     "RequestHandler",
     "start_http_server_base",
@@ -122,9 +123,14 @@ class HTTPReqCtx(Protocol):
     reaches into them to borrow the connection for a worker. They're
     declared as read-only properties so covariant subtypes (concrete
     ``HTTPConnH11`` / ``HTTPConnHttptools``) satisfy the Protocol.
+
+    The ``body`` attribute is empty when a :data:`RequestHandler` runs
+    (pre-body phase). It is populated by the selector with the fully
+    buffered request body before invoking a returned :data:`BodyHandler`.
     """
 
     request: Request
+    body: bytes
     response_status: int | None
 
     @property
@@ -141,7 +147,24 @@ class HTTPReqCtx(Protocol):
     def complete(self, response: Response, body: bytes | None = None) -> None: ...
 
 
-RequestHandler = Callable[[HTTPReqCtx], None]
+BodyHandler = Callable[[HTTPReqCtx], None]
+"""Continuation invoked by the selector after the full request body has been
+buffered into ``ctx.body``. Must complete the response (or borrow the conn)."""
+
+RequestHandler = Callable[[HTTPReqCtx], BodyHandler | None]
+"""Pre-body handler dispatched on ``on_headers_complete``.
+
+Returns one of:
+- ``None`` — handler is done (either it called ``ctx.complete(...)`` to
+  send a response inline, or it called ``ctx.borrow()`` to hand the conn
+  off to a worker thread). Body bytes that arrive afterwards are drained
+  silently for keep-alive.
+- :data:`BodyHandler` — selector buffers the full request body into
+  ``ctx.body`` and then invokes the returned callable. This is the path
+  for the JSON-API common case (parse JSON, build response).
+
+Old-style ``Callable[[HTTPReqCtx], None]`` handlers continue to work —
+returning ``None`` implicitly is the "done inline" path."""
 
 
 def emit_handler_error(ctx: HTTPReqCtx) -> None:

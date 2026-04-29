@@ -23,6 +23,27 @@ These constraints exist because LocalPost is a *library*, not a deployment
 platform. Process supervision, multi-worker orchestration, and hot reloads
 belong upstream.
 
+### Workload assumptions (the JSON-API common case)
+
+These guide which paths get optimised first; we cut corners on shapes
+that don't fit:
+
+- **Reject before body.** No-route / wrong-method / auth failures
+  complete inline on the selector, with no body recv.
+- **Body is buffered, not streamed.** When a handler needs the body, it
+  needs the whole thing (e.g. to deserialise JSON). The selector
+  buffers the full body into ``ctx.body`` and then invokes a
+  :data:`BodyHandler` continuation. There's still a ``ctx.receive``
+  streaming API but it isn't the optimised path.
+- **Response is one chunk or SSE.** Most responses are one
+  status-line + headers + body block; SSE generators emit the same
+  block plus subsequent data chunks. The response writer
+  auto-buffers headers and flushes them with the first body chunk in a
+  single ``sendall``.
+- **No HTTP/1.1 pipelining.** Pipelined clients are served sequentially
+  (correct, just no parallelism). Dropping support simplified the
+  per-conn state machine.
+
 ## Headline numbers
 
 | Stack             |    RPS | p50 (ms) | concurrency |
@@ -722,6 +743,83 @@ keeps its place in the public API; under the current macOS bench it
 just doesn't pay. The right framing for users: "use `> 1` only if your
 kernel distributes (Linux 3.9+) or paired with the upcoming
 accept-dispatch design."
+
+## Phase 8 (shipped): continuation handler + auto-buffered response (2026-04-29)
+
+Restructured the request lifecycle around the JSON-API common case:
+
+1. **Two-phase handler contract.**
+   `RequestHandler = Callable[[HTTPReqCtx], BodyHandler | None]`. The
+   pre-body handler runs on the selector when headers are parsed. It
+   returns either:
+   - `None` — handler completed inline (e.g. a 404 / 405 / auth fail
+     reject) or borrowed the conn for a worker. **No body recv. No
+     worker hop.**
+   - `BodyHandler` — the selector buffers the full body into
+     `ctx.body` and then invokes the continuation.
+2. **HTTP/1.1 pipelining dropped.** The httptools backend's
+   `_ready` deque + per-request cur-state machinery is gone; one
+   in-flight request per connection. Pipelined clients are served
+   sequentially. ~50 lines deleted.
+3. **Auto-buffered response writes.** `start_response` no longer
+   flushes — it stashes the serialised headers and the first
+   `send(...)` (or `finish_response()` for empty bodies) emits
+   headers + body in a single `sendall`. **Common-case `complete()`
+   path is now 1 syscall, down from 2.**
+4. **`thread_pool_handler` adapts.** The pool no longer wraps the
+   pre-body invocation. It pass-through if `inner` returns `None`
+   (inline 404s never enter the channel) and wraps the returned
+   `BodyHandler` into a worker-dispatch continuation otherwise.
+
+### Bench (8 s/cell, 64/32 clients)
+
+**Standard CPython 3.13 / Darwin arm64** — primary perf target (≈
+real-world Linux deployment):
+
+| Scenario          | Phase 7 RPS / p50  | Phase 8 RPS / p50      | Δ RPS    |
+| ----------------- | -----------------: | ---------------------: | -------: |
+| `httptools` plaintext  |  12,563 / 5.05 ms |  **15,197 / 4.13 ms**  | **+21%** |
+| `httptools` path_param |  12,606 / 5.04 ms |  **15,312 / 4.13 ms**  | **+21%** |
+| `httptools` json_post  |  12,359 / 2.57 ms |  **15,051 / 2.11 ms**  | **+22%** |
+| `h11` plaintext        |   9,494 / 6.67 ms |  **10,012 / 6.28 ms**  |  +5%    |
+
+Plus +21% RPS on the path real users will see. p50 collapses with
+the single-sendall flush. h11 gains are smaller (still parser-bound),
+but the simplification is consistent across both backends.
+
+**Free-threaded CPython 3.14t / Darwin arm64**: pooled httptools
+plaintext sits at 34,456 RPS (vs Phase 7's 36,208 — within ±5%
+noise; the bench is client-saturated at `c=64` once p50 drops below
+2 ms). Inline (no-pool) httptools plaintext: 52,015 RPS. The
+restructure is neutral here, as expected — most of the savings are
+already absorbed by the no-GIL win.
+
+### Why this delivers more than syscall coalescing alone
+
+Pure micro-opts (combine sendalls, header scan) saved a syscall but
+left the architectural shape unchanged. The continuation pattern
+adds a bigger lever: **fast handlers (no body) and rejections never
+wait for the body to arrive at all.** For the common JSON-API mix
+(404 / 405 / GET / POST-with-JSON), this:
+
+- removes a pool-channel round-trip from every body-free request
+  (the old `thread_pool_handler` always borrowed)
+- removes the worker-thread body recv from POSTs (selector buffers
+  it; worker just runs the JSON parse + response build)
+
+The single-sendall change rides on top.
+
+### One-time API break
+
+`RequestHandler`'s return type changed from `None` to `BodyHandler |
+None`. Old-style `(ctx) -> None` handlers are forward-compatible —
+returning `None` implicitly is the "complete inline" path. Handlers
+that previously read body via `ctx.receive(size)` need to migrate to
+the continuation pattern (return a `BodyHandler` and read the body
+from `ctx.body`). All in-tree adapters (`Router.as_handler`,
+`wrap_wsgi`, `flask_handler`, `sentry_router_handler`,
+`sentry_flask_handler`) have been updated; user code that bypassed
+those needs the same shape.
 
 ## What's left for future perf work
 

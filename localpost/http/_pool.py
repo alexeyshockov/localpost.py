@@ -1,13 +1,14 @@
 """Thread-pool wrapper for HTTP request handlers.
 
-Turns any ``RequestHandler`` into one that borrows the connection on the
-selector thread, queues it, and runs the original handler on a worker. The
-selector stays free to keep accepting / parsing / dispatching the next
-request.
+Wraps a :data:`RequestHandler` so that, when it returns a
+:data:`BodyHandler` continuation, the continuation is dispatched on a
+worker thread instead of running on the selector. The pre-body phase
+(routing, auth, 404/405) stays on the selector, where it's free; only
+post-body work that the user wants offloaded pays the worker hop.
 
-Compose explicitly with :func:`localpost.http.http_server` — handlers that
-can answer synchronously (e.g. a :class:`Router`'s 404/405 path) stay on
-the selector thread; only the handlers you wrap pay the worker hop.
+Compose explicitly with :func:`localpost.http.http_server` — handlers
+that complete inline (e.g. a :class:`Router`'s 404/405 path or a
+body-free GET) never enter the pool.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from anyio import (
 from localpost import threadtools
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
 from localpost.http.config import LOGGER_NAME
-from localpost.http.server import HTTPReqCtx, RequestHandler, emit_handler_error
+from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
 
 __all__ = ["thread_pool_handler"]
 
@@ -40,14 +41,23 @@ def thread_pool_handler(
     *,
     max_concurrency: int,
 ) -> AbstractAsyncContextManager[RequestHandler]:
-    """Async context manager: yields a ``RequestHandler`` that runs ``inner`` on a worker thread.
+    """Async context manager: yields a ``RequestHandler`` that offloads
+    body-handler continuations to a worker thread.
 
-    On call, the wrapped handler borrows the connection from the selector
-    (``stop_tracking``) and queues ``(ctx, cancel)`` on a bounded channel
-    sized to ``max_concurrency``. ``max_concurrency`` worker threads pull
-    from the channel, run ``inner(ctx)`` under a per-request cancel scope,
-    and release the connection back to the selector via ``finish_response``
-    (or close it on error / cancellation).
+    The wrapper invokes ``inner(ctx)`` on the selector thread (pre-body
+    phase). If ``inner`` returns:
+
+    - ``None`` — pass-through. ``inner`` already completed inline (e.g.
+      a 404 or a body-free GET) or borrowed the conn itself. No worker
+      hop.
+    - :data:`BodyHandler` — the wrapper returns a *new* continuation
+      that, when invoked by the selector after the body has been
+      buffered, ``stop_tracking`` s the conn and queues
+      ``(ctx, cancel, inner_continuation)`` on a bounded channel sized
+      to ``max_concurrency``. ``max_concurrency`` workers pull from the
+      channel, run ``inner_continuation(ctx)`` under a per-request
+      cancel scope, and release the connection back to the selector via
+      ``finish_response`` (or close it on error / cancellation).
 
     Per-request cancellation surfaces through
     :func:`localpost.http.check_cancelled`. Two triggers feed it: client
@@ -73,6 +83,9 @@ def thread_pool_handler(
     return _thread_pool_handler(inner, max_concurrency)
 
 
+_WorkItem = tuple[HTTPReqCtx, RequestCancel, BodyHandler]
+
+
 @asynccontextmanager
 async def _thread_pool_handler(
     inner: RequestHandler,
@@ -80,42 +93,54 @@ async def _thread_pool_handler(
 ) -> AsyncGenerator[RequestHandler]:
     logger = logging.getLogger(LOGGER_NAME)
 
-    tx, rx = threadtools.Channel[tuple[HTTPReqCtx, RequestCancel]].create(capacity=max_concurrency)
+    tx, rx = threadtools.Channel[_WorkItem].create(capacity=max_concurrency)
     shutdown_event = threading.Event()
     # Dedicated limiter so workers don't consume slots from AnyIO's global
     # default thread pool. Each worker holds a slot for its full lifetime,
     # so we need exactly ``max_concurrency`` slots.
     workers_limiter = CapacityLimiter(max_concurrency)
 
-    def submit(ctx: HTTPReqCtx) -> None:
-        """Selector-thread callback: borrow the conn and queue it for a worker."""
-        ctx._server.stop_tracking(ctx._conn)
-        cancel = RequestCancel(_sock=ctx._conn.sock, _shutdown_event=shutdown_event)
-        try:
-            tx.put((ctx, cancel))
-        except (ClosedResourceError, BrokenResourceError):
-            with suppress(Exception):
-                ctx._conn.close()
+    def make_dispatch(body_handler: BodyHandler) -> BodyHandler:
+        """Return a continuation that, given a ctx with body buffered,
+        borrows the conn and queues the work for a worker."""
 
-    def worker(my_rx: threadtools.ReceiveChannel[tuple[HTTPReqCtx, RequestCancel]]) -> None:
+        def dispatched(ctx: HTTPReqCtx) -> None:
+            ctx._server.stop_tracking(ctx._conn)
+            cancel = RequestCancel(_sock=ctx._conn.sock, _shutdown_event=shutdown_event)
+            try:
+                tx.put((ctx, cancel, body_handler))
+            except (ClosedResourceError, BrokenResourceError):
+                with suppress(Exception):
+                    ctx._conn.close()
+
+        return dispatched
+
+    def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+        """The pre-body :data:`RequestHandler` exposed to the server."""
+        result = inner(ctx)
+        if result is None:
+            return None  # inner completed inline or borrowed itself
+        return make_dispatch(result)
+
+    def worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
         with my_rx:
             while True:
                 try:
-                    ctx, cancel = my_rx.get()
+                    ctx, cancel, body_handler = my_rx.get()
                 except (EndOfStream, ClosedResourceError):
                     return
 
                 try:
                     with _enter_request(cancel):
                         try:
-                            inner(ctx)
+                            body_handler(ctx)
                         except RequestCancelled:
                             # Handler bailed cleanly. Connection state is uncertain — close.
                             with suppress(Exception):
                                 ctx._conn.close()
                         except Exception:
                             logger.exception(
-                                "Handler raised for %s %r", ctx.request.method, ctx.request.target
+                                "Body handler raised for %s %r", ctx.request.method, ctx.request.target
                             )
                             emit_handler_error(ctx)
                 finally:
@@ -137,7 +162,7 @@ async def _thread_pool_handler(
                         with suppress(Exception):
                             ctx._conn.close()
 
-    async def run_worker(my_rx: threadtools.ReceiveChannel[tuple[HTTPReqCtx, RequestCancel]]) -> None:
+    async def run_worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
         await to_thread.run_sync(worker, my_rx, limiter=workers_limiter)
 
     async with create_task_group() as tg:
@@ -145,7 +170,7 @@ async def _thread_pool_handler(
             tg.start_soon(run_worker, rx.clone())
         rx.close()
         try:
-            yield submit
+            yield wrapped
         finally:
             # Signal in-flight handlers (next ``check_cancelled`` raises) and
             # let workers drain via ``EndOfStream`` from the closed channel.

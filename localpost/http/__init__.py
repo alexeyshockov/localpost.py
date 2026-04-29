@@ -15,7 +15,7 @@ from localpost.http.router import (
 from localpost.http.router import (
     RequestHandler as RouterRequestHandler,
 )
-from localpost.http.server import HTTPReqCtx, RequestHandler, start_http_server
+from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
 # ``Response`` (the public name) is the high-level router response.
@@ -29,6 +29,7 @@ __all__ = [
     "start_http_server",
     "HTTPReqCtx",
     "RequestHandler",
+    "BodyHandler",
     # backend selection
     "httptools_server",
     # neutral wire types (used directly with HTTPReqCtx)

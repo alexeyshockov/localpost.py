@@ -12,7 +12,7 @@ from urllib.parse import parse_qs
 from localpost._utils import NOT_SET
 from localpost.http._types import Response as _NativeResponse
 from localpost.http.config import DEFAULT_BUFFER_SIZE
-from localpost.http.server import HTTPReqCtx
+from localpost.http.server import BodyHandler, HTTPReqCtx
 from localpost.http.server import RequestHandler as NativeRequestHandler
 
 __all__ = [
@@ -304,13 +304,15 @@ class Router:
         """Return a :class:`localpost.http.RequestHandler` that dispatches via this router.
 
         404 (no template match) and 405 (template match, method mismatch) are
-        answered inline on the calling thread — no thread hop, no allocation
-        beyond the static response payload. A matched route delegates to its
-        registered handler, which may itself be a synchronous handler or a
-        :func:`thread_pool_handler`-wrapped one.
+        answered inline on the selector thread — no body recv, no worker
+        hop, no allocation beyond the static response payload. A matched
+        route returns a :data:`BodyHandler` continuation; the selector
+        buffers the request body into ``ctx.body`` before invoking it,
+        and the continuation can be wrapped with
+        :func:`thread_pool_handler` if you want it offloaded to a worker.
         """
 
-        def handle(http_ctx: HTTPReqCtx) -> None:
+        def handle(http_ctx: HTTPReqCtx) -> BodyHandler | None:
             req = http_ctx.request
             target = req.target.decode("iso-8859-1")
             if "?" in target:
@@ -323,7 +325,7 @@ class Router:
 
             if isinstance(match, _MatchNotFound):
                 _send_plain(http_ctx, 404, b"Not Found")
-                return
+                return None
             if isinstance(match, _MatchMethodNotAllowed):
                 _send_plain(
                     http_ctx,
@@ -331,36 +333,14 @@ class Router:
                     b"Method Not Allowed",
                     extra_headers=[(b"Allow", match.allow_header.encode("ascii"))],
                 )
-                return
+                return None
 
+            # Matched route. Hand the body-bearing closure back to the
+            # selector. ``ctx.body`` is populated when the continuation
+            # runs — for body-less methods (GET / HEAD / DELETE) it's
+            # simply ``b""``.
             headers = {name.decode("iso-8859-1").lower(): value.decode("iso-8859-1") for name, value in req.headers}
-
-            with ExitStack() as stack:
-                ctx = RequestCtx(
-                    exit_stack=stack,
-                    headers=headers,
-                    method=match.method,
-                    matched_template=match.matched_template,
-                    path=path,
-                    query_string=query_string,
-                    query_args=parse_qs(query_string),
-                    path_args=match.path_args,
-                    receive=http_ctx.receive,
-                )
-                response = match.handler(ctx)
-
-            wire_headers = [(k.encode("iso-8859-1"), v.encode("iso-8859-1")) for k, v in response.headers.items()]
-            http_ctx.start_response(
-                _NativeResponse(
-                    status_code=response.status_code,
-                    headers=wire_headers,
-                    reason=_http_phrases.get(response.status_code, "Unknown").encode("iso-8859-1"),
-                )
-            )
-            for chunk in response.body:
-                if chunk:
-                    http_ctx.send(chunk)
-            http_ctx.finish_response()
+            return _make_body_continuation(match, path, query_string, headers)
 
         return handle
 
@@ -429,6 +409,54 @@ def _headers_from_environ(environ: dict) -> dict[str, str]:
     if "CONTENT_LENGTH" in environ:
         headers["content-length"] = environ["CONTENT_LENGTH"]
     return headers
+
+
+def _make_body_continuation(
+    match: _MatchOk,
+    path: str,
+    query_string: str,
+    headers: Mapping[str, str],
+) -> BodyHandler:
+    """Build the post-body continuation for a matched route.
+
+    Pre-populates the :class:`RequestCtx` body cache with the bytes
+    buffered by the selector, so ``ctx.body()`` returns immediately
+    without going through ``receive()``.
+    """
+
+    def run(http_ctx: HTTPReqCtx) -> None:
+        with ExitStack() as stack:
+            ctx = RequestCtx(
+                exit_stack=stack,
+                headers=headers,
+                method=match.method,
+                matched_template=match.matched_template,
+                path=path,
+                query_string=query_string,
+                query_args=parse_qs(query_string),
+                path_args=match.path_args,
+                # Body is pre-buffered into ``http_ctx.body``. ``receive``
+                # is kept for backwards-compat but only fires for handlers
+                # that explicitly call it after the cache is consumed.
+                receive=lambda _: b"",
+            )
+            object.__setattr__(ctx, "_req_body", bytearray(http_ctx.body))
+            response = match.handler(ctx)
+
+        wire_headers = [(k.encode("iso-8859-1"), v.encode("iso-8859-1")) for k, v in response.headers.items()]
+        http_ctx.start_response(
+            _NativeResponse(
+                status_code=response.status_code,
+                headers=wire_headers,
+                reason=_http_phrases.get(response.status_code, "Unknown").encode("iso-8859-1"),
+            )
+        )
+        for chunk in response.body:
+            if chunk:
+                http_ctx.send(chunk)
+        http_ctx.finish_response()
+
+    return run
 
 
 def _send_plain(

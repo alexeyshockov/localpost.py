@@ -23,7 +23,7 @@ from flask import Flask
 from localpost.http._service import http_server
 from localpost.http._types import Response as _NativeResponse
 from localpost.http.config import ServerConfig
-from localpost.http.server import HTTPReqCtx, RequestHandler
+from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http.wsgi import _build_environ
 
 __all__ = ["flask_handler", "flask_server"]
@@ -32,11 +32,15 @@ __all__ = ["flask_handler", "flask_server"]
 def flask_handler(app: Flask) -> RequestHandler:
     """Wrap a Flask app as a native :class:`RequestHandler`.
 
-    See the module docstring for the behavior differences vs. WSGI — notably,
+    Always returns a :data:`BodyHandler` continuation so the selector
+    buffers the request body into ``ctx.body`` before the Flask
+    pipeline runs (Flask reads it via ``request.get_json`` etc.).
+
+    See the module docstring for behaviour differences vs. WSGI — notably,
     the request context stays active during response body streaming.
     """
 
-    def handle(http_ctx: HTTPReqCtx) -> None:
+    def run_flask(http_ctx: HTTPReqCtx) -> None:
         environ = _build_environ(http_ctx)
         with app.request_context(environ):
             try:
@@ -51,7 +55,10 @@ def flask_handler(app: Flask) -> RequestHandler:
             finally:
                 response.close()  # Fire werkzeug's call_on_close callbacks
 
-    return handle
+    def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
+        return run_flask
+
+    return pre_body
 
 
 def _write_response(http_ctx: HTTPReqCtx, response) -> None:

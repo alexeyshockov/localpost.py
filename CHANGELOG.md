@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two-phase HTTP request handler contract.** `RequestHandler` is now
+  `Callable[[HTTPReqCtx], BodyHandler | None]`. The pre-body handler runs
+  on the selector thread when headers are parsed and may either complete
+  inline (returning `None`, e.g. for 404 / 405 / auth fail) or return a
+  `BodyHandler` continuation. The selector buffers the full request body
+  into `ctx.body` before invoking the continuation. Old-style
+  `(ctx) -> None` handlers are forward-compatible. See
+  `benchmarks/http/PERF_FINDINGS.md` Phase 8 for the design rationale and
+  bench numbers (+21% RPS on standard CPython 3.13 httptools).
+- `localpost.http.BodyHandler` — type alias for the post-body continuation.
 - **Free-threaded CPython (3.14t) support** — verified end-to-end with the
   full http test suite passing and the bench delivering a ~3x RPS jump at
   `selectors=1` (httptools plaintext: 12,563 → 36,208 RPS) just from
@@ -34,9 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fix and is the next planned step. The knob still works on Linux,
   pending a Linux bench cell to confirm scaling.
 - `localpost.http.thread_pool_handler` — async context manager that wraps
-  any `RequestHandler` so it runs on a worker thread. Compose explicitly
-  with `http_server` when you need a worker pool; immediate handlers
-  (including a `Router`'s 404/405 path) stay on the selector thread.
+  a `RequestHandler` so the post-body `BodyHandler` continuation it
+  returns is offloaded to a worker thread. Pre-body decisions (routing,
+  auth, 404 / 405) stay on the selector. Compose explicitly with
+  `http_server` when you want body handlers on a worker pool.
 - `just deadcode` — vulture-based dead-code finder, configured in
   `pyproject.toml` (`[tool.vulture]`).
 - **Optional `httptools` HTTP server backend** under the `[http-fast]`
@@ -56,6 +67,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`RequestHandler` return type changed** from `None` to
+  `BodyHandler | None` (see Added). Old-style `(ctx) -> None` handlers
+  still work — returning `None` is the inline-completion path.
+  Handlers that previously read the body via `ctx.receive(size)` need
+  to migrate to the continuation pattern: return a `BodyHandler` and
+  read the body from `ctx.body`. The in-tree adapters
+  (`Router.as_handler`, `wrap_wsgi`, `flask_handler`,
+  `sentry_router_handler`, `sentry_flask_handler`) are updated.
+- **HTTP/1.1 pipelining is no longer supported.** Pipelined clients are
+  served sequentially — correct, but no parallelism on the same
+  connection. The httptools backend's `_ready` deque was removed for the
+  simplification.
 - **`localpost.http` no longer leaks h11 types into the public API.**
   `HTTPReqCtx.request` is now `localpost.http.Request` (was
   `h11.Request`); `HTTPReqCtx.start_response` and `complete` accept
