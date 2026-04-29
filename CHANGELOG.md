@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-request ``settimeout`` calls dropped from the borrow boundary.**
+  The conn stays non-blocking for its lifetime; the worker's send path
+  uses a non-blocking ``send`` with a blocking-with-timeout fallback on
+  ``BlockingIOError``. New ``_send_all`` helper in
+  ``localpost.http._base``. Saves two fcntl per request — see
+  ``benchmarks/http/PERF_FINDINGS.md`` Phase 10 (+21-32% RPS on the
+  bench's hot path).
 - **`HttpApp` framework** (`localpost.http.app`). Decorator-driven HTTP
   app on top of the lean Router. Decorators (`.get`, `.post`, ...),
   parameter injection (`HTTPReqCtx` + path args matched by name),

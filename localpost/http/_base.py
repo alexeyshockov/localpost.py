@@ -214,6 +214,36 @@ def compose(*middlewares: Middleware) -> Middleware:
     return wrap
 
 
+def _send_all(sock: socket.socket, payload: bytes | bytearray | memoryview, rw_timeout: float) -> None:
+    """Send all of ``payload`` to ``sock``.
+
+    Optimised for the JSON-API common case: a small response that fits in
+    the kernel send buffer. Tries non-blocking ``send`` first; on
+    :exc:`BlockingIOError` (kernel buffer full mid-response) transitions
+    to blocking-with-timeout for the remainder, then restores
+    non-blocking on the way out. Saves the two ``settimeout`` (fcntl)
+    calls per request that the prior borrow-with-blocking design paid.
+    """
+    view = payload if isinstance(payload, memoryview) else memoryview(payload)
+    total = len(view)
+    sent = 0
+    while sent < total:
+        try:
+            n = sock.send(view[sent:])
+        except BlockingIOError:
+            # Kernel send buffer full; finish the rest in blocking-with-timeout
+            # mode, then restore non-blocking.
+            sock.settimeout(rw_timeout)
+            try:
+                sock.sendall(view[sent:])
+            finally:
+                sock.settimeout(0)
+            return
+        if n == 0:
+            raise ConnectionAbortedError("socket is broken")
+        sent += n
+
+
 def emit_handler_error(ctx: HTTPReqCtx) -> None:
     """Best-effort recovery when a request handler raises.
 
@@ -431,16 +461,16 @@ class BaseServer:
         ``self._ops`` at the top of the next iteration). ``conn.tracked``
         is flipped optimistically so concurrent readers see the intended
         state.
+
+        The socket is kept non-blocking throughout the connection's
+        lifetime — see :func:`_send_all` for the worker-side send path
+        that handles ``BlockingIOError`` with a blocking-with-timeout
+        fallback. This avoids two ``settimeout`` (fcntl) calls per
+        request on the borrow / re-track boundary.
         """
-        sock = conn.sock
-        try:
-            sock.settimeout(0)
-        except OSError:
-            conn.tracked = False
-            return
         if self.shutting_down:
             try:
-                sock.close()
+                conn.sock.close()
             except OSError:
                 pass
             conn.tracked = False
@@ -458,18 +488,17 @@ class BaseServer:
         """Unregister ``conn`` from the selector; the worker becomes the sole I/O owner.
 
         Selector-thread only (called from the dispatcher inside ``BaseServer.run``'s
-        for-event loop). Switches the socket to blocking-with-timeout
-        (``rw_timeout``) so the worker can do synchronous send/recv.
+        for-event loop). Socket stays non-blocking — the worker's send
+        path (:func:`_send_all`) handles partial writes and falls back
+        to blocking-with-timeout only when the kernel buffer fills.
         Client-disconnect detection while the conn is borrowed lives in
         :func:`localpost.http.check_cancelled` (pull-based ``MSG_PEEK``).
         """
-        sock = conn.sock
         try:
-            self.selector.unregister(sock)
+            self.selector.unregister(conn.sock)
         except (KeyError, ValueError):
             pass
         conn.tracked = False
-        sock.settimeout(self.config.rw_timeout)
 
     # ----- Op queue + self-pipe helpers -----
 
@@ -610,6 +639,12 @@ class BaseServer:
                 continue
             if key.fileobj is server_sock:
                 client_sock, client_addr = server_sock.accept()
+                # Linux 2.6.28+ inherits ``O_NONBLOCK`` from the listening
+                # socket; macOS / BSD do not. Set explicitly — once per
+                # connection, never again. The conn stays non-blocking for
+                # its lifetime; the send path (``_send_all``) handles
+                # blocking-with-timeout fallback on ``BlockingIOError``.
+                client_sock.setblocking(False)
                 conn = self._conn_factory(self, client_sock, client_addr)
                 self.track(conn)
                 continue

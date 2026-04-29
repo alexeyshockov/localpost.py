@@ -49,6 +49,7 @@ from localpost.http._base import (
     BaseServer,
     BodyHandler,
     RequestHandler,
+    _send_all,
     emit_handler_error,
     start_http_server_base,
 )
@@ -344,8 +345,11 @@ class HTTPConnHttptools(BaseHTTPConn):
         if self._response_started:
             return
         try:
-            self.sock.settimeout(self.server.config.rw_timeout)
-            self.sock.sendall(_serialize_response(response) + body)
+            _send_all(
+                self.sock,
+                _serialize_response(response) + body,
+                self.server.config.rw_timeout,
+            )
         except Exception:  # noqa: BLE001, S110 — connection is being closed anyway
             pass
 
@@ -354,8 +358,11 @@ class HTTPConnHttptools(BaseHTTPConn):
         if self.idle or self._response_started:
             return
         try:
-            self.sock.settimeout(self.server.config.rw_timeout)
-            self.sock.sendall(_serialize_response(REQUEST_TIMEOUT_RESPONSE) + REQUEST_TIMEOUT_BODY)
+            _send_all(
+                self.sock,
+                _serialize_response(REQUEST_TIMEOUT_RESPONSE) + REQUEST_TIMEOUT_BODY,
+                self.server.config.rw_timeout,
+            )
         except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
             pass
 
@@ -444,7 +451,11 @@ class HTTPReqCtxHttptools:
                     sock.settimeout(0)
 
     def _send_continue(self) -> None:
-        self._conn.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+        _send_all(
+            self._conn.sock,
+            b"HTTP/1.1 100 Continue\r\n\r\n",
+            self._server.config.rw_timeout,
+        )
         self._continue_sent = True
 
     def start_response(self, response: Response | InformationalResponse, /) -> None:
@@ -470,7 +481,7 @@ class HTTPReqCtxHttptools:
             self._pending_header_bytes = _serialize_response(response)
         else:
             # Informational responses (e.g., 100 Continue) flush immediately.
-            self._conn.sock.sendall(_serialize_response(response))
+            _send_all(self._conn.sock, _serialize_response(response), self._server.config.rw_timeout)
 
     def send(self, chunk: Buffer, /) -> None:
         if not isinstance(chunk, bytes):
@@ -478,22 +489,24 @@ class HTTPReqCtxHttptools:
         if not chunk and self._pending_header_bytes is None:
             return
         framed = (f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n") if self._chunked and chunk else chunk
+        rw = self._server.config.rw_timeout
         if self._pending_header_bytes is not None:
             # Headers + first body chunk in one syscall.
-            self._conn.sock.sendall(self._pending_header_bytes + framed)
+            _send_all(self._conn.sock, self._pending_header_bytes + framed, rw)
             self._pending_header_bytes = None
         elif framed:
-            self._conn.sock.sendall(framed)
+            _send_all(self._conn.sock, framed, rw)
 
     def finish_response(self) -> None:
         # Flush any still-buffered headers (empty-body case) plus the
         # chunked terminator, in one sendall.
         terminator = b"0\r\n\r\n" if self._chunked else b""
+        rw = self._server.config.rw_timeout
         if self._pending_header_bytes is not None:
-            self._conn.sock.sendall(self._pending_header_bytes + terminator)
+            _send_all(self._conn.sock, self._pending_header_bytes + terminator, rw)
             self._pending_header_bytes = None
         elif terminator:
-            self._conn.sock.sendall(terminator)
+            _send_all(self._conn.sock, terminator, rw)
         self._maybe_give_back()
 
 

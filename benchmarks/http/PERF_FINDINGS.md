@@ -894,6 +894,58 @@ return paths are still leaner than the old Router framework.
 - ``localpost.experimental.openapi`` paused — it was built against
   the old Router shape; revive against ``HttpApp`` in a future PR.
 
+## Phase 10 (shipped): drop per-request settimeout (2026-04-30)
+
+Removed the two ``sock.settimeout`` (fcntl) calls per request that the
+borrow / re-track boundary used to pay:
+
+- ``BaseServer.stop_tracking`` no longer flips the socket to
+  blocking-with-timeout. The conn stays non-blocking after the worker
+  borrows it.
+- ``BaseServer.track`` no longer flips back to non-blocking. It's a
+  no-op on socket flags now; only the kernel-level
+  ``selector.register/modify`` op fires.
+- New ``_send_all`` helper in ``_base.py``: tries non-blocking
+  ``send`` first; on ``BlockingIOError`` (kernel buffer full
+  mid-response), transitions to blocking-with-timeout for the
+  remainder, then restores non-blocking. Common-case JSON-API
+  responses fit in the kernel buffer in a single ``send`` — no
+  fallback fires.
+- One-time ``setblocking(False)`` after ``accept`` (macOS / BSD don't
+  inherit ``O_NONBLOCK`` from the listener; Linux 2.6.28+ does).
+
+### Bench (8 s/cell, standard CPython 3.13 / Darwin arm64)
+
+| Scenario          | Phase 9 RPS / p50      | Phase 10 RPS / p50     | Δ RPS    |
+| ----------------- | ---------------------: | ---------------------: | -------: |
+| `httptools` plaintext   |  20,868 / 3.05 ms |  **25,230 / 2.50 ms**  | **+21%** |
+| `httptools` path_param  |  20,667 / 3.08 ms |  **25,247 / 2.51 ms**  | **+22%** |
+| `httptools` json_post   |  20,152 / 1.58 ms |  **24,712 / 1.28 ms**  | **+23%** |
+| `httptools` profile_update |  6,286 / 5.09 ms |   6,311 / 5.08 ms  |   +0%   |
+| `h11` plaintext         |  ~10,012 / 6.28 ms |  **13,225 / 4.81 ms** | **+32%** |
+| `h11` json_post         |  ~9,550 / 3.30 ms  |  **12,432 / 2.55 ms** | **+30%** |
+
+Bigger than the 3-5% I'd projected — the per-request cost of
+``settimeout`` on Darwin is heavier than expected (each fcntl ~5-7 µs
+under realistic load, not the textbook ~1 µs). At 25k RPS, two fcntl
+saved per request is ~250-350 ms/sec of selector / worker CPU
+reclaimed.
+
+p50 collapses ~17-19% across the fast scenarios. ``profile_update``
+remains handler-bound (~4 ms of ``time.sleep`` dominates).
+
+### What this validates
+
+The user's hypothesis: **conn stays non-blocking; ``send`` relies on
+the kernel buffer absorbing small responses, falls back only on
+``BlockingIOError``.** The fallback path is rare in JSON-API
+workloads and the savings on the common path are real.
+
+The "never borrow" variant (don't even ``selector.unregister``) was
+considered and dropped — synchronisation against pipelined clients
+needs *something*, and the unregister is the cheapest correct
+mechanism (~1 µs each on macOS kqueue).
+
 ## What's left for future perf work
 
 Within the [Optimisation boundaries](#optimisation-boundaries) at the top of

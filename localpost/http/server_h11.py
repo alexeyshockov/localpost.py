@@ -38,6 +38,7 @@ from localpost.http._base import (
     BaseServer,
     BodyHandler,
     RequestHandler,
+    _send_all,
     emit_handler_error,
     start_http_server_base,
 )
@@ -109,13 +110,7 @@ class HTTPConnH11(BaseHTTPConn):
         payload = self.parser.send(event)
         if payload is None:
             return
-        payload_len = len(payload)
-        sock, total_sent = self.sock, 0
-        while total_sent < payload_len:
-            sent = sock.send(payload[total_sent:])
-            if sent == 0:
-                raise ConnectionAbortedError("socket is broken")
-            total_sent = total_sent + sent
+        _send_all(self.sock, payload, self.server.config.rw_timeout)
 
     def __call__(self, h: RequestHandler, /) -> None:
         try:
@@ -257,16 +252,16 @@ class HTTPConnH11(BaseHTTPConn):
         if self.idle or self.parser.our_state is not h11.IDLE:
             return
         try:
-            self.sock.settimeout(self.server.config.rw_timeout)
+            rw = self.server.config.rw_timeout
             payload = self.parser.send(_to_h11_response(REQUEST_TIMEOUT_RESPONSE))
             if payload:
-                self.sock.sendall(payload)
+                _send_all(self.sock, payload, rw)
             payload = self.parser.send(h11.Data(data=REQUEST_TIMEOUT_BODY))
             if payload:
-                self.sock.sendall(payload)
+                _send_all(self.sock, payload, rw)
             payload = self.parser.send(h11.EndOfMessage())
             if payload:
-                self.sock.sendall(payload)
+                _send_all(self.sock, payload, rw)
         except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
             pass
 
@@ -410,12 +405,7 @@ class HTTPReqCtxH11:
         self._maybe_give_back()
 
     def _sock_sendall(self, payload: bytes) -> None:
-        sock, total_sent, payload_len = self._conn.sock, 0, len(payload)
-        while total_sent < payload_len:
-            sent = sock.send(payload[total_sent:])
-            if sent == 0:
-                raise ConnectionAbortedError("socket is broken")
-            total_sent += sent
+        _send_all(self._conn.sock, payload, self._server.config.rw_timeout)
 
 
 def start_http_server(config: ServerConfig, handler: RequestHandler, /):
