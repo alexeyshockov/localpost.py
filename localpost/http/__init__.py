@@ -1,5 +1,5 @@
 from localpost.http._cancel import RequestCancelled, check_cancelled
-from localpost.http._pool import thread_pool_handler
+from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, httptools_server, wsgi_server
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request
 from localpost.http._types import Response as NativeResponse
@@ -49,6 +49,7 @@ __all__ = [
     "http_server",
     "wsgi_server",
     "thread_pool_handler",
+    "streaming_pool_handler",
     # cancellation
     "check_cancelled",
     "RequestCancelled",

@@ -487,5 +487,56 @@ class TestBackendSelection:
             app.service(cfg, backend="bogus")  # type: ignore[arg-type]
 
 
+class TestStreamingRoutes:
+    async def test_streaming_route_reads_body_in_handler(self, free_port):
+        """``buffer_body=False`` — handler runs in a worker on a borrowed
+        conn and reads body chunks via ``ctx.receive(...)``."""
+        captured: dict = {}
+
+        app = HttpApp()
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):
+            chunks: list[bytes] = []
+            while True:
+                chunk = ctx.receive(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            full = b"".join(chunks)
+            captured["body"] = full
+            captured["thread"] = threading.get_ident()
+            return f"got {len(full)} bytes"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_app(app, cfg) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            payload = b"a" * 1024
+            r = await _post(f"http://127.0.0.1:{free_port}/upload", content=payload)
+            assert r.status_code == 200
+            assert r.text == "got 1024 bytes"
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured["body"] == b"a" * 1024
+        # Streaming handler runs on a worker thread, not the main thread.
+        assert captured["thread"] != threading.get_ident()
+
+    def test_streaming_route_with_pool_disabled_raises(self):
+        """Registering a streaming route on an HttpApp with ``max_concurrency=0``
+        raises ``RuntimeError`` when the dispatcher is built."""
+        app = HttpApp(max_concurrency=0)
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):  # pragma: no cover
+            return "x"
+
+        assert upload is not None
+        # Buffered routes work fine without a pool, but streaming ones don't.
+        with pytest.raises(RuntimeError, match="streaming route"):
+            app._build_router_handler(None)
+
+
 # Avoid "imported but unused" lints — the helper is part of the public smoke API.
 _keep = (contextlib,)
