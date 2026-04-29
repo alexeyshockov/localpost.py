@@ -21,7 +21,7 @@ import time
 from collections.abc import Buffer, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import final
+from typing import Any, final
 
 import h11
 
@@ -289,6 +289,7 @@ class HTTPReqCtxH11:
 
     body: bytes = b""
     response_status: int | None = None
+    attrs: dict[str, Any] = field(default_factory=dict)
     _pending_header_bytes: bytes | None = None
 
     @property

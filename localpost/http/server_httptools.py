@@ -29,7 +29,7 @@ import time
 from collections.abc import Buffer, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import final
+from typing import Any, final
 
 try:
     import httptools
@@ -384,6 +384,7 @@ class HTTPReqCtxHttptools:
 
     body: bytes = b""
     response_status: int | None = None
+    attrs: dict[str, Any] = field(default_factory=dict)
     _continue_sent: bool = False
     _chunked: bool = False
     """``True`` if the backend auto-added ``Transfer-Encoding: chunked`` because

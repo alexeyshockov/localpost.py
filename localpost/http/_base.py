@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, final
+from typing import TYPE_CHECKING, Any, Protocol, final
 
 from localpost.http._types import InformationalResponse, Request, Response
 from localpost.http.config import LOGGER_NAME, ServerConfig
@@ -35,7 +35,9 @@ __all__ = [
     "BaseHTTPConn",
     "BodyHandler",
     "HTTPReqCtx",
+    "Middleware",
     "RequestHandler",
+    "compose",
     "start_http_server_base",
 ]
 
@@ -127,11 +129,17 @@ class HTTPReqCtx(Protocol):
     The ``body`` attribute is empty when a :data:`RequestHandler` runs
     (pre-body phase). It is populated by the selector with the fully
     buffered request body before invoking a returned :data:`BodyHandler`.
+
+    The ``attrs`` mapping is per-request mutable state for cross-cutting
+    concerns to thread information through. :class:`localpost.http.Router`
+    writes the matched ``RouteMatch`` here; middlewares can attach auth
+    info, tracing transactions, etc.
     """
 
     request: Request
     body: bytes
     response_status: int | None
+    attrs: dict[str, Any]
 
     @property
     def _server(self) -> BaseServer: ...
@@ -165,6 +173,45 @@ Returns one of:
 
 Old-style ``Callable[[HTTPReqCtx], None]`` handlers continue to work —
 returning ``None`` implicitly is the "done inline" path."""
+
+Middleware = Callable[[RequestHandler], RequestHandler]
+"""HTTP middleware: a function that wraps a :data:`RequestHandler`.
+
+Plain Python decorator pattern — no special chain object. A middleware
+can short-circuit pre-body (call ``ctx.complete(...)`` and return
+``None`` without invoking ``inner``), inspect / modify before passing
+through (``return inner(ctx)``), and wrap the returned
+:data:`BodyHandler` continuation to run code after the response::
+
+    def with_logging(inner: RequestHandler) -> RequestHandler:
+        def wrapped(ctx):
+            start = time.monotonic()
+            result = inner(ctx)
+            if result is None:
+                if not ctx.borrowed:
+                    _log(start, ctx)
+                return None
+            def post_body(ctx):
+                result(ctx)
+                _log(start, ctx)
+            return post_body
+        return wrapped
+"""
+
+
+def compose(*middlewares: Middleware) -> Middleware:
+    """Compose middlewares left-to-right (outermost-first).
+
+    ``compose(a, b, c)(handler)`` is equivalent to ``a(b(c(handler)))`` —
+    on dispatch, ``a`` runs first and ``c`` is closest to the handler.
+    """
+
+    def wrap(handler: RequestHandler) -> RequestHandler:
+        for mw in reversed(middlewares):
+            handler = mw(handler)
+        return handler
+
+    return wrap
 
 
 def emit_handler_error(ctx: HTTPReqCtx) -> None:

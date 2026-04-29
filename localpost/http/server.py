@@ -12,7 +12,9 @@ from localpost.http._base import (
 from localpost.http._base import (
     BodyHandler,
     HTTPReqCtx,
+    Middleware,
     RequestHandler,
+    compose,
     emit_handler_error,
 )
 from localpost.http._types import BodyTooLarge
@@ -30,6 +32,8 @@ __all__ = [
     "HTTPReqCtxH11",
     "BodyHandler",
     "RequestHandler",
+    "Middleware",
+    "compose",
     "BodyTooLarge",
     "emit_handler_error",
 ]
