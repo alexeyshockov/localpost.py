@@ -20,18 +20,38 @@ import anyio
 def _build_handler():
     mode = os.environ.get("LP_TEST_MODE", "router")
     if mode == "router":
-        from localpost.http import RequestCtx, Response, Routes
+        from localpost.http import (
+            BodyHandler,
+            HTTPReqCtx,
+            NativeResponse,
+            Routes,
+            route_match,
+        )
 
-        def _ping(_: RequestCtx) -> Response:
-            return Response(200, {"content-type": "text/plain"}, [b"pong"])
+        def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
+            ctx.complete(
+                NativeResponse(
+                    status_code=200,
+                    headers=[
+                        (b"content-type", b"text/plain"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                ),
+                body,
+            )
 
-        def _slow(_: RequestCtx) -> Response:
+        def _ping(ctx: HTTPReqCtx) -> BodyHandler | None:
+            _emit(ctx, b"pong")
+            return None
+
+        def _slow(ctx: HTTPReqCtx) -> BodyHandler | None:
             time.sleep(float(os.environ.get("LP_TEST_SLOW_S", "0.2")))
-            body = str(threading.get_ident()).encode()
-            return Response(200, {"content-type": "text/plain"}, [body])
+            _emit(ctx, str(threading.get_ident()).encode())
+            return None
 
-        def _hello(ctx: RequestCtx) -> Response:
-            return Response(200, {"content-type": "text/plain"}, [f"hi {ctx.path_args['name']}".encode()])
+        def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+            _emit(ctx, f"hi {route_match(ctx).path_args['name']}".encode())
+            return None
 
         routes = Routes()
         routes.get("/ping")(_ping)

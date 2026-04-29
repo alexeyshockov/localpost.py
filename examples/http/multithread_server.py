@@ -24,30 +24,43 @@ import time
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    RequestCtx,
-    Response,
+    BodyHandler,
+    HTTPReqCtx,
+    NativeResponse,
     Router,
     Routes,
     ServerConfig,
     http_server,
+    route_match,
     thread_pool_handler,
 )
 
 
-def _root(_: RequestCtx) -> Response:
-    return Response(200, {"content-type": "text/plain"}, [b"hello from localpost\n"])
+def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
+    ctx.complete(
+        NativeResponse(
+            status_code=200,
+            headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
+        ),
+        body,
+    )
 
 
-def _hello(ctx: RequestCtx) -> Response:
-    name = ctx.path_args["name"]
-    body = f"Hello, {name}! (thread={threading.current_thread().name})\n".encode()
-    return Response(200, {"content-type": "text/plain"}, [body])
+def _root(ctx: HTTPReqCtx) -> BodyHandler | None:
+    _emit(ctx, b"hello from localpost\n")
+    return None
 
 
-def _slow(_: RequestCtx) -> Response:
+def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+    name = route_match(ctx).path_args["name"]
+    _emit(ctx, f"Hello, {name}! (thread={threading.current_thread().name})\n".encode())
+    return None
+
+
+def _slow(ctx: HTTPReqCtx) -> BodyHandler | None:
     time.sleep(1.0)  # exercises concurrency: several of these run in parallel
-    body = f"done on thread={threading.current_thread().name}\n".encode()
-    return Response(200, {"content-type": "text/plain"}, [body])
+    _emit(ctx, f"done on thread={threading.current_thread().name}\n".encode())
+    return None
 
 
 def build_router() -> Router:

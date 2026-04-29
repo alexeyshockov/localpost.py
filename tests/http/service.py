@@ -19,15 +19,15 @@ from anyio import to_thread
 
 from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
+    BodyHandler,
     HTTPReqCtx,
     NativeResponse,
     RequestCancelled,
-    RequestCtx,
-    Response,
     Routes,
     ServerConfig,
     check_cancelled,
     http_server,
+    route_match,
     thread_pool_handler,
 )
 from localpost.http.server import RequestHandler
@@ -254,8 +254,17 @@ class TestHttpServerService:
         routes = Routes()
 
         @routes.get("/books/{id}")
-        def get_book(ctx: RequestCtx) -> Response:
-            return Response(200, {"content-type": "text/plain"}, [f"book={ctx.path_args['id']}".encode()])
+        def get_book(ctx: HTTPReqCtx) -> BodyHandler | None:
+            book_id = route_match(ctx).path_args["id"]
+            body = f"book={book_id}".encode()
+            ctx.complete(
+                NativeResponse(
+                    status_code=200,
+                    headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
+                ),
+                body,
+            )
+            return None
 
         assert get_book is not None
         router = routes.build()
@@ -366,10 +375,17 @@ class TestSelectorThreadFastPath:
         routes = Routes()
 
         @routes.get("/hit")
-        def hit(_: RequestCtx) -> Response:
+        def hit(ctx: HTTPReqCtx) -> BodyHandler | None:
             with lock:
                 threads_seen.add(threading.get_ident())
-            return Response(200, {"content-type": "text/plain"}, [b"ok"])
+            ctx.complete(
+                NativeResponse(
+                    status_code=200,
+                    headers=[(b"content-type", b"text/plain"), (b"content-length", b"2")],
+                ),
+                b"ok",
+            )
+            return None
 
         assert hit is not None
         router = routes.build()

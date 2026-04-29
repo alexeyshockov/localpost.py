@@ -29,11 +29,13 @@ from benchmarks.http.apps._cli import parse_args
 from benchmarks.http.scenarios import PING_BODY, PROFILE_WORK_DELAYS_S, hello_body, profile_update_body
 from localpost.hosting import run_app, service
 from localpost.http import (
-    RequestCtx,
-    Response,
+    BodyHandler,
+    HTTPReqCtx,
+    NativeResponse,
     Routes,
     ServerConfig,
     httptools_server,
+    route_match,
 )
 
 _per_selector: Counter[int] = Counter()
@@ -46,27 +48,47 @@ def _record() -> None:
         _per_selector[tid] += 1
 
 
-def _ping(_: RequestCtx) -> Response:
+def _emit(ctx: HTTPReqCtx, body: bytes, content_type: bytes = b"text/plain") -> None:
+    ctx.complete(
+        NativeResponse(
+            status_code=200,
+            headers=[(b"content-type", content_type), (b"content-length", str(len(body)).encode("ascii"))],
+        ),
+        body,
+    )
+
+
+def _ping(ctx: HTTPReqCtx) -> BodyHandler | None:
     _record()
-    return Response(200, {"content-type": "text/plain"}, [PING_BODY])
+    _emit(ctx, PING_BODY)
+    return None
 
 
-def _hello(ctx: RequestCtx) -> Response:
+def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
     _record()
-    return Response(200, {"content-type": "text/plain"}, [hello_body(ctx.path_args["name"])])
+    _emit(ctx, hello_body(route_match(ctx).path_args["name"]))
+    return None
 
 
-def _echo(ctx: RequestCtx) -> Response:
+def _echo_post_body(ctx: HTTPReqCtx) -> None:
+    _emit(ctx, ctx.body, content_type=b"application/json")
+
+
+def _echo(_: HTTPReqCtx) -> BodyHandler:
     _record()
-    return Response(200, {"content-type": "application/json"}, [ctx.body()])
+    return _echo_post_body
 
 
-def _profile_update(ctx: RequestCtx) -> Response:
-    _record()
-    body = profile_update_body(ctx.path_args["user_id"], ctx.body())
+def _profile_update_post_body(ctx: HTTPReqCtx) -> None:
+    body = profile_update_body(route_match(ctx).path_args["user_id"], ctx.body)
     for delay_s in PROFILE_WORK_DELAYS_S:
         time.sleep(delay_s)
-    return Response(200, {"content-type": "application/json"}, [body])
+    _emit(ctx, body, content_type=b"application/json")
+
+
+def _profile_update(_: HTTPReqCtx) -> BodyHandler:
+    _record()
+    return _profile_update_post_body
 
 
 def _print_distribution() -> None:

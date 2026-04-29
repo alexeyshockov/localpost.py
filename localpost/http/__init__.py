@@ -5,22 +5,16 @@ from localpost.http._types import BodyTooLarge, InformationalResponse, Request
 from localpost.http._types import Response as NativeResponse
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
-    RequestCtx,
-    Response,
     Route,
+    RouteMatch,
     Router,
     Routes,
     URITemplate,
-)
-from localpost.http.router import (
-    RequestHandler as RouterRequestHandler,
+    route_match,
 )
 from localpost.http.server import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
-# ``Response`` (the public name) is the high-level router response.
-# ``NativeResponse`` is the low-level wire-format response used directly
-# with ``HTTPReqCtx.complete`` / ``start_response``.
 __all__ = [
     # config
     "ServerConfig",
@@ -43,10 +37,9 @@ __all__ = [
     "Router",
     "Routes",
     "Route",
+    "RouteMatch",
     "URITemplate",
-    "RequestCtx",
-    "Response",
-    "RouterRequestHandler",
+    "route_match",
     # wsgi
     "wrap_wsgi",
     # hosting

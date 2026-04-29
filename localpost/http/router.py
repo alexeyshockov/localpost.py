@@ -1,28 +1,39 @@
+"""URI-template router for LocalPost HTTP — a thin dispatcher middleware.
+
+Matches the request URI against a table of compiled :class:`URITemplate` s,
+attaches the :class:`RouteMatch` to ``ctx.attrs["route_match"]``, and
+delegates to the matched route's :data:`localpost.http.RequestHandler`.
+
+404 / 405 are answered inline on the selector. The :class:`Router`
+itself is just a :data:`localpost.http.RequestHandler` — wrap it with
+:func:`localpost.http.thread_pool_handler` if you want matched routes
+to run on workers, or compose with middleware via
+:func:`localpost.http.compose`.
+
+For Pythonic helpers (decorators, response conversion, param injection),
+see :class:`localpost.http.app.HttpApp`.
+"""
+
 from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 from http import HTTPMethod
 from http.client import responses as _http_phrases
 from typing import Self, final
-from urllib.parse import parse_qs
 
-from localpost._utils import NOT_SET
 from localpost.http._types import Response as _NativeResponse
-from localpost.http.config import DEFAULT_BUFFER_SIZE
 from localpost.http.server import BodyHandler, HTTPReqCtx
 from localpost.http.server import RequestHandler as NativeRequestHandler
 
 __all__ = [
     "URITemplate",
-    "RequestCtx",
-    "Response",
-    "RequestHandler",
+    "RouteMatch",
     "Route",
     "Routes",
     "Router",
+    "route_match",
 ]
 
 _VAR_PATTERN = re.compile(r"\{([^}]+)\}")
@@ -62,46 +73,25 @@ class URITemplate:
 
 
 @final
-@dataclass(frozen=True, eq=False, slots=True)
-class RequestCtx:
-    exit_stack: ExitStack
+@dataclass(frozen=True, slots=True)
+class RouteMatch:
+    """Attached to ``ctx.attrs["route_match"]`` by :class:`Router` on a successful match.
 
-    headers: Mapping[str, str]
+    Read via :func:`route_match` from inside a route handler or middleware.
+    """
+
     method: HTTPMethod
     matched_template: URITemplate
-    path: str
-    query_string: str
-    query_args: Mapping[str, list[str]]
     path_args: Mapping[str, str]
 
-    receive: Callable[[int], bytes]
 
-    _req_body: bytearray | None | object = field(default=NOT_SET, init=False, repr=False)
+def route_match(ctx: HTTPReqCtx) -> RouteMatch:
+    """Return the :class:`RouteMatch` the :class:`Router` placed on ``ctx``.
 
-    def body(self, cache: bool = False) -> bytes:
-        if self._req_body is None:
-            raise RuntimeError("body has been read and not cached")
-        if isinstance(self._req_body, bytearray):
-            return bytes(self._req_body)
-
-        body = bytearray()
-        object.__setattr__(self, "_req_body", body if cache else None)
-        while True:
-            chunk = self.receive(DEFAULT_BUFFER_SIZE)
-            if not chunk:
-                break
-            body.extend(chunk)
-        return bytes(body)
-
-
-@dataclass(frozen=True, eq=False, slots=True)
-class Response:
-    status_code: int
-    headers: Mapping[str, str]
-    body: Iterable[bytes]
-
-
-RequestHandler = Callable[[RequestCtx], Response]
+    Raises :exc:`KeyError` if called outside a route handler (or before
+    the Router has run).
+    """
+    return ctx.attrs["route_match"]
 
 
 @final
@@ -110,7 +100,7 @@ class Route:
     """One compiled route inside a :class:`Router`."""
 
     template: URITemplate
-    methods: Mapping[HTTPMethod, RequestHandler]
+    methods: Mapping[HTTPMethod, NativeRequestHandler]
     """Method → handler table for this template."""
 
     allow_header: str
@@ -123,47 +113,61 @@ class Route:
 @final
 @dataclass(eq=False, slots=True)
 class Routes:
-    """Mutable route builder. Accumulate routes via decorators, then ``build()`` a Router.
+    """Mutable route builder.
+
+    The decorator forms (``.get``, ``.post``, ...) are thin sugar for
+    :meth:`add` — they register the handler as a plain
+    :data:`localpost.http.RequestHandler`, no framework wrapping. For
+    decorator-driven registration with response conversion, param
+    injection, etc. use :class:`localpost.http.app.HttpApp`.
 
     Usage::
 
         routes = Routes()
 
         @routes.get("/hello/{name}")
-        def hello(ctx: RequestCtx) -> Response:
-            return Response(200, {"content-type": "text/plain"}, [b"hi"])
+        def hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+            match = route_match(ctx)
+            ctx.complete(NativeResponse(...), b"hi " + match.path_args["name"].encode())
+            return None
 
         router = routes.build()
-        # or equivalently: router = Router.from_routes(routes)
     """
 
-    paths: dict[URITemplate, dict[HTTPMethod, RequestHandler]] = field(default_factory=dict)
+    paths: dict[URITemplate, dict[HTTPMethod, NativeRequestHandler]] = field(default_factory=dict)
 
-    def add(self, method: HTTPMethod | str, template: str, handler: RequestHandler) -> None:
+    def add(
+        self,
+        method: HTTPMethod | str,
+        template: str,
+        handler: NativeRequestHandler,
+    ) -> None:
         m = method if isinstance(method, HTTPMethod) else HTTPMethod(method.upper())
         key = _find_template(self.paths, template) or URITemplate.parse(template)
         self.paths.setdefault(key, {})[m] = handler
 
-    def _decorator(self, method: HTTPMethod, template: str) -> Callable[[RequestHandler], RequestHandler]:
-        def deco(handler: RequestHandler) -> RequestHandler:
+    def _decorator(
+        self, method: HTTPMethod, template: str
+    ) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
+        def deco(handler: NativeRequestHandler) -> NativeRequestHandler:
             self.add(method, template, handler)
             return handler
 
         return deco
 
-    def get(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
+    def get(self, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         return self._decorator(HTTPMethod.GET, template)
 
-    def post(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
+    def post(self, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         return self._decorator(HTTPMethod.POST, template)
 
-    def put(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
+    def put(self, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         return self._decorator(HTTPMethod.PUT, template)
 
-    def delete(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
+    def delete(self, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         return self._decorator(HTTPMethod.DELETE, template)
 
-    def patch(self, template: str) -> Callable[[RequestHandler], RequestHandler]:
+    def patch(self, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         return self._decorator(HTTPMethod.PATCH, template)
 
     def build(self) -> Router:
@@ -175,8 +179,11 @@ class Routes:
 class Router:
     """Immutable, compiled URI-template dispatcher.
 
-    Build via :meth:`from_routes` or :meth:`Routes.build`. The constructor fields are
-    an implementation detail — treat the class as read-only outside of ``from_routes``.
+    Build via :meth:`from_routes` or :meth:`Routes.build`. As a
+    :data:`localpost.http.RequestHandler`-producer, the dispatcher is
+    just :meth:`as_handler`'s return value — wrap it with middleware
+    via :func:`localpost.http.compose` and feed it to
+    :func:`localpost.http.http_server`.
     """
 
     routes: tuple[Route, ...]
@@ -209,8 +216,6 @@ class Router:
             compiled_routes.append(
                 Route(
                     template=tmpl,
-                    # Freeze the handler map at the type level (still a plain dict
-                    # underneath, but exposed as Mapping — external mutation is a type error).
                     methods=dict(method_map),
                     allow_header=allow_header,
                     _group_prefix=prefix,
@@ -250,108 +255,61 @@ class Router:
 
             return _MatchOk(
                 handler=handler,
-                method=method,
-                matched_template=tmpl,
-                path_args=path_args,
+                match=RouteMatch(
+                    method=method,
+                    matched_template=tmpl,
+                    path_args=path_args,
+                ),
             )
 
         raise AssertionError("unreachable: regex matched but no outer group set")
 
-    def wsgi(self, environ: dict, start_response) -> Iterable[bytes]:
-        """WSGI app, to be used with any WSGI server, e.g. Gunicorn."""
-        request_path = environ.get("PATH_INFO", "/")
-        request_method_str = environ.get("REQUEST_METHOD", "GET").upper()
-        match = self._match(request_path, request_method_str)
-
-        if isinstance(match, _MatchNotFound):
-            start_response("404 Not Found", [("Content-Type", "text/plain")])
-            return [b"Not Found"]
-        if isinstance(match, _MatchMethodNotAllowed):
-            start_response(
-                "405 Method Not Allowed",
-                [("Content-Type", "text/plain"), ("Allow", match.allow_header)],
-            )
-            return [b"Method Not Allowed"]
-
-        query_string = environ.get("QUERY_STRING", "")
-        headers = _headers_from_environ(environ)
-        wsgi_input = environ.get("wsgi.input")
-
-        def receive(size: int) -> bytes:
-            if wsgi_input is None:
-                return b""
-            return wsgi_input.read(size) or b""
-
-        with ExitStack() as stack:
-            ctx = RequestCtx(
-                exit_stack=stack,
-                headers=headers,
-                method=match.method,
-                matched_template=match.matched_template,
-                path=request_path,
-                query_string=query_string,
-                query_args=parse_qs(query_string),
-                path_args=match.path_args,
-                receive=receive,
-            )
-            response = match.handler(ctx)
-
-        status_line = f"{response.status_code} {_http_phrases.get(response.status_code, 'Unknown')}"
-        start_response(status_line, [(k, v) for k, v in response.headers.items()])
-        return response.body
-
     def as_handler(self) -> NativeRequestHandler:
-        """Return a :class:`localpost.http.RequestHandler` that dispatches via this router.
+        """Return a :data:`localpost.http.RequestHandler` that dispatches via this router.
 
-        404 (no template match) and 405 (template match, method mismatch) are
-        answered inline on the selector thread — no body recv, no worker
-        hop, no allocation beyond the static response payload. A matched
-        route returns a :data:`BodyHandler` continuation; the selector
-        buffers the request body into ``ctx.body`` before invoking it,
-        and the continuation can be wrapped with
-        :func:`thread_pool_handler` if you want it offloaded to a worker.
+        On a match, attaches :class:`RouteMatch` to ``ctx.attrs["route_match"]``
+        and delegates to the registered per-route handler. 404 / 405 are
+        answered inline (via ``ctx.complete``); the body bytes (if any)
+        are silently drained by the http layer.
         """
 
-        def handle(http_ctx: HTTPReqCtx) -> BodyHandler | None:
-            req = http_ctx.request
+        def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
+            req = ctx.request
             target = req.target.decode("iso-8859-1")
             if "?" in target:
-                path, query_string = target.split("?", 1)
+                path, _ = target.split("?", 1)
             else:
-                path, query_string = target, ""
+                path = target
             method_str = req.method.decode("ascii").upper()
 
             match = self._match(path, method_str)
 
             if isinstance(match, _MatchNotFound):
-                _send_plain(http_ctx, 404, b"Not Found")
+                _send_plain(ctx, 404, b"Not Found")
                 return None
             if isinstance(match, _MatchMethodNotAllowed):
                 _send_plain(
-                    http_ctx,
+                    ctx,
                     405,
                     b"Method Not Allowed",
                     extra_headers=[(b"Allow", match.allow_header.encode("ascii"))],
                 )
                 return None
 
-            # Matched route. Hand the body-bearing closure back to the
-            # selector. ``ctx.body`` is populated when the continuation
-            # runs — for body-less methods (GET / HEAD / DELETE) it's
-            # simply ``b""``.
-            headers = {name.decode("iso-8859-1").lower(): value.decode("iso-8859-1") for name, value in req.headers}
-            return _make_body_continuation(match, path, query_string, headers)
+            ctx.attrs["route_match"] = match.match
+            return match.handler(ctx)
 
-        return handle
+        return dispatch
+
+
+# --- Match result types -------------------------------------------------
 
 
 @final
 @dataclass(frozen=True, slots=True)
 class _MatchOk:
-    handler: RequestHandler
-    method: HTTPMethod
-    matched_template: URITemplate
-    path_args: Mapping[str, str]
+    handler: NativeRequestHandler
+    match: RouteMatch
 
 
 @final
@@ -368,6 +326,9 @@ class _MatchMethodNotAllowed:
 
 _MatchResult = _MatchOk | _MatchNotFound | _MatchMethodNotAllowed
 _MATCH_NOT_FOUND = _MatchNotFound()
+
+
+# --- Internal helpers ---------------------------------------------------
 
 
 def _literal_prefix_len(t: URITemplate) -> int:
@@ -390,7 +351,8 @@ def _reprefixed_regex_source(t: URITemplate, prefix: str) -> str:
 
 
 def _find_template(
-    paths: Mapping[URITemplate, Mapping[HTTPMethod, RequestHandler]], template_str: str
+    paths: Mapping[URITemplate, Mapping[HTTPMethod, NativeRequestHandler]],
+    template_str: str,
 ) -> URITemplate | None:
     for t in paths:
         if t.template == template_str:
@@ -398,80 +360,18 @@ def _find_template(
     return None
 
 
-def _headers_from_environ(environ: dict) -> dict[str, str]:
-    headers: dict[str, str] = {}
-    for key, value in environ.items():
-        if key.startswith("HTTP_"):
-            header_name = key[5:].replace("_", "-").lower()
-            headers[header_name] = value
-    if "CONTENT_TYPE" in environ:
-        headers["content-type"] = environ["CONTENT_TYPE"]
-    if "CONTENT_LENGTH" in environ:
-        headers["content-length"] = environ["CONTENT_LENGTH"]
-    return headers
-
-
-def _make_body_continuation(
-    match: _MatchOk,
-    path: str,
-    query_string: str,
-    headers: Mapping[str, str],
-) -> BodyHandler:
-    """Build the post-body continuation for a matched route.
-
-    Pre-populates the :class:`RequestCtx` body cache with the bytes
-    buffered by the selector, so ``ctx.body()`` returns immediately
-    without going through ``receive()``.
-    """
-
-    def run(http_ctx: HTTPReqCtx) -> None:
-        with ExitStack() as stack:
-            ctx = RequestCtx(
-                exit_stack=stack,
-                headers=headers,
-                method=match.method,
-                matched_template=match.matched_template,
-                path=path,
-                query_string=query_string,
-                query_args=parse_qs(query_string),
-                path_args=match.path_args,
-                # Body is pre-buffered into ``http_ctx.body``. ``receive``
-                # is kept for backwards-compat but only fires for handlers
-                # that explicitly call it after the cache is consumed.
-                receive=lambda _: b"",
-            )
-            object.__setattr__(ctx, "_req_body", bytearray(http_ctx.body))
-            response = match.handler(ctx)
-
-        wire_headers = [(k.encode("iso-8859-1"), v.encode("iso-8859-1")) for k, v in response.headers.items()]
-        http_ctx.start_response(
-            _NativeResponse(
-                status_code=response.status_code,
-                headers=wire_headers,
-                reason=_http_phrases.get(response.status_code, "Unknown").encode("iso-8859-1"),
-            )
-        )
-        for chunk in response.body:
-            if chunk:
-                http_ctx.send(chunk)
-        http_ctx.finish_response()
-
-    return run
-
-
 def _send_plain(
     ctx: HTTPReqCtx,
     status_code: int,
     body: bytes,
     *,
-    extra_headers: list[tuple[bytes, bytes]] | None = None,
+    extra_headers: Iterable[tuple[bytes, bytes]] = (),
 ) -> None:
     headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"text/plain"),
         (b"content-length", str(len(body)).encode("ascii")),
+        *extra_headers,
     ]
-    if extra_headers:
-        headers.extend(extra_headers)
     ctx.complete(
         _NativeResponse(
             status_code=status_code,
@@ -480,3 +380,5 @@ def _send_plain(
         ),
         body,
     )
+
+

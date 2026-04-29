@@ -58,7 +58,7 @@ def sentry_router_handler(router: Router, *, op: str = "http.server") -> Request
         # cardinality). Router's dispatch will match again — cheap.
         match = router._match(path, method)
         if isinstance(match, _MatchOk):
-            tx_name = f"{method} {match.matched_template.template}"
+            tx_name = f"{method} {match.match.matched_template.template}"
             source = "route"
         else:
             tx_name = f"{method} {path}"
