@@ -821,6 +821,79 @@ from `ctx.body`). All in-tree adapters (`Router.as_handler`,
 `sentry_flask_handler`) have been updated; user code that bypassed
 those needs the same shape.
 
+## Phase 9 (shipped): middleware + lean Router + HttpApp framework (2026-04-29)
+
+Architectural restructure across the http stack:
+
+1. **Middleware support.** New ``Middleware = Callable[[RequestHandler],
+   RequestHandler]`` type and a ``compose(*mws)`` helper. Plain Python
+   decorator pattern — no special chain object. Pre-body short-circuit
+   and post-body wrapping (via the returned BodyHandler) both work
+   naturally.
+2. **HTTPReqCtx.attrs.** New ``dict[str, Any]`` per-request mutable
+   state on the Protocol. Used by the Router to attach ``RouteMatch``
+   and by middlewares to thread cross-cutting state (auth, tracing).
+3. **Router stripped to a lean middleware-friendly dispatcher.** The
+   framework-y ``RequestCtx`` / ``Response`` / ``RequestHandler`` shapes
+   that lived inside ``router.py`` are gone. ``Router.as_handler()``
+   now matches the URI template, attaches a ``RouteMatch`` to
+   ``ctx.attrs["route_match"]``, and delegates to a registered
+   http-level :data:`localpost.http.RequestHandler`. 404 / 405 stay
+   inline. ``Router.wsgi`` is dropped.
+4. **New ``HttpApp`` framework** (``localpost.http.app``). Decorator-
+   driven, with parameter injection (``HTTPReqCtx`` + path args by
+   name), automatic response conversion (str / bytes / dict / list /
+   ``NativeResponse`` / ``(NativeResponse, bytes)`` / ``None``),
+   app-level + per-route middleware composition, and a ``service()``
+   factory that composes the worker pool + chosen backend.
+5. **``streaming_pool_handler`` + ``buffer_body=False`` per route.**
+   For routes that need raw socket access (large uploads), the handler
+   runs on a worker on a borrowed conn — body **not** pre-buffered.
+   Reads via ``ctx.receive(...)`` chunk by chunk. Internal pool
+   primitive (``_Pool``) shared by both buffered and streaming dispatch.
+
+### Bench (8 s/cell, standard CPython 3.13 / Darwin arm64)
+
+| Scenario          | Phase 8 RPS / p50      | Phase 9 RPS / p50      | Δ RPS    |
+| ----------------- | ---------------------: | ---------------------: | -------: |
+| `httptools` plaintext   |  15,197 / 4.13 ms |  **20,868 / 3.05 ms**  | **+37%** |
+| `httptools` path_param  |  15,312 / 4.13 ms |  **20,667 / 3.08 ms**  | **+35%** |
+| `httptools` json_post   |  15,051 / 2.11 ms |  **20,152 / 1.58 ms**  | **+34%** |
+| `httptools` profile_update |  5,384 / 5.95 ms |    6,286 / 5.09 ms  |   +17%   |
+
+p50 collapses ~25% across the fast scenarios. ``profile_update`` is
+handler-CPU-dominated (4 ms of `time.sleep`), so the framework
+overhead saving shows up as a smaller relative gain.
+
+### Why this delivers another ~35%
+
+The lean Router stops constructing per-request the framework objects
+the old shape needed: ``RequestCtx`` (with its ``ExitStack``, headers
+dict, query parse, receive shim, body cache) and ``Response`` plus
+the wire-bytes encoding of its headers / iter-body.
+
+Now ``Router.as_handler`` is essentially: regex match + ``ctx.attrs[]
+=`` + delegate. The handler chosen by the route is a regular
+``RequestHandler``; if registered through ``HttpApp`` it gets the
+auto-buffered Phase 8 response path with one more layer of param
+resolution.
+
+For the bench specifically, the handlers return
+``(NativeResponse, bytes)`` tuples — pre-baked wire shapes, so we
+skip the str/dict→bytes conversion path. Real apps using ``str`` /
+``dict`` returns will sit slightly below this number; the Pythonic
+return paths are still leaner than the old Router framework.
+
+### One-time API breaks
+
+- ``Router.wsgi`` removed.
+- Router-level ``RequestCtx``, ``Response``, ``RequestHandler`` (the
+  ``(RequestCtx) -> Response`` shape) gone. Migrate to ``HttpApp`` or
+  use the lean http-level :data:`localpost.http.RequestHandler` shape
+  directly.
+- ``localpost.experimental.openapi`` paused — it was built against
+  the old Router shape; revive against ``HttpApp`` in a future PR.
+
 ## What's left for future perf work
 
 Within the [Optimisation boundaries](#optimisation-boundaries) at the top of

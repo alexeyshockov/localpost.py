@@ -3,12 +3,20 @@
 > **Status:** stable — public API is not expected to break in patch/minor releases.
 
 A small synchronous HTTP/1.1 server built on [h11](https://h11.readthedocs.io/),
-plus a router for URI-template-based request dispatch, and a WSGI bridge. The
-server core is ~540 lines of focused, sync code — easy to read, easy to embed.
+plus a URI-template router, a WSGI bridge, and a small framework
+(`HttpApp`) on top. Three layers, each usable on its own:
 
-Pair it with `localpost.hosting` for lifecycle management, or run it standalone.
-For OpenAPI / content negotiation / validation, see
-[`localpost.experimental.openapi`](../experimental/openapi/README.md).
+- **Server**: `start_http_server` (h11) / `start_httptools_server`
+  (httptools) accept connections, parse HTTP, dispatch to a
+  `RequestHandler`. ~540 lines of sync code.
+- **Router**: thin URI-template dispatcher. Matches the request,
+  attaches a `RouteMatch` to `ctx.attrs["route_match"]`, delegates to
+  the registered handler. 404 / 405 inline.
+- **HttpApp**: decorator-driven framework — parameter injection,
+  response conversion, worker-pool dispatch, middleware.
+
+Pair with `localpost.hosting` for lifecycle management, or run any of
+the three layers standalone.
 
 ## Scope and constraints
 
@@ -57,6 +65,34 @@ pip install localpost[http-server,http-fast]  # also adds the httptools backend
 ```
 
 ## Quick start
+
+The recommended path is `HttpApp`:
+
+```python
+import sys
+from localpost.hosting import run_app
+from localpost.http import HttpApp, HTTPReqCtx, ServerConfig
+
+
+app = HttpApp()
+
+
+@app.get("/{name}")
+def hello(name: str):
+    return f"Hello, {name}!"
+
+
+@app.post("/{name}/profile")
+def update_profile(ctx: HTTPReqCtx, name: str):
+    import json
+    profile = json.loads(ctx.body)
+    return {"updated": name, "profile": profile}
+
+
+sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+```
+
+Or stay close to the wire — `start_http_server` directly:
 
 ```python
 import h11

@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`HttpApp` framework** (`localpost.http.app`). Decorator-driven HTTP
+  app on top of the lean Router. Decorators (`.get`, `.post`, ...),
+  parameter injection (`HTTPReqCtx` + path args matched by name),
+  response conversion (str / bytes / dict / list / `NativeResponse` /
+  `(NativeResponse, bytes)` / `None`), worker-pool dispatch, and
+  app-level + per-route middleware. New `app.service(config)` factory
+  for hosting integration. See `localpost/http/README.md` for usage.
+- **HTTP middleware support.** New `localpost.http.Middleware` type
+  (`Callable[[RequestHandler], RequestHandler]`) and a `compose(*mws)`
+  helper. Plain Python decorator pattern — wrap pre-body, wrap the
+  returned `BodyHandler` for post-body work. Used by `HttpApp` for
+  app-level / per-route composition.
+- **`HTTPReqCtx.attrs`** — `dict[str, Any]` mutable per-request state
+  on the Protocol. Used by `Router` to attach `RouteMatch`, available
+  for middlewares to thread auth / tracing / rate-limit state.
+- **`RouteMatch` dataclass** + **`route_match(ctx)` accessor** — the
+  matched route info Router writes into `ctx.attrs["route_match"]`.
+- **`streaming_pool_handler`** — async CM that runs a handler in a
+  worker on a borrowed conn (body **not** pre-buffered). Pair with
+  `HttpApp`'s `buffer_body=False` for streaming uploads.
 - **Two-phase HTTP request handler contract.** `RequestHandler` is now
   `Callable[[HTTPReqCtx], BodyHandler | None]`. The pre-body handler runs
   on the selector thread when headers are parsed and may either complete
@@ -79,6 +99,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   served sequentially — correct, but no parallelism on the same
   connection. The httptools backend's `_ready` deque was removed for the
   simplification.
+- **`Router` is now a lean dispatcher**, not a self-contained framework.
+  Removed `RequestCtx`, `Response`, `RequestHandler` (the
+  `(RequestCtx) -> Response` shape) from `localpost.http.router`.
+  `Router.as_handler()` returns a plain `localpost.http.RequestHandler`
+  that attaches a `RouteMatch` to `ctx.attrs["route_match"]` and
+  delegates to the registered http-level handler. **`Router.wsgi` is
+  removed** — pair with `localpost.http.wrap_wsgi` if you need WSGI
+  output. Pythonic helpers (decorators, response conversion, param
+  injection) move to the new `HttpApp`. See `PERF_FINDINGS.md` Phase 9
+  — restructure delivers another +35% RPS on the bench's hot path.
+- **`localpost.experimental.openapi` is paused.** It was built on the
+  old Router shape; the new lean dispatcher leaves it broken at
+  import time. To be revived against `HttpApp` in a follow-up.
 - **`localpost.http` no longer leaks h11 types into the public API.**
   `HTTPReqCtx.request` is now `localpost.http.Request` (was
   `h11.Request`); `HTTPReqCtx.start_response` and `complete` accept
