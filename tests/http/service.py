@@ -13,7 +13,6 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import anyio
-import h11
 import httpx
 import pytest
 from anyio import to_thread
@@ -29,6 +28,7 @@ from localpost.http import (
     check_cancelled,
     http_server,
     thread_pool_handler,
+    NativeResponse,
 )
 from localpost.http.server import RequestHandler
 
@@ -54,7 +54,7 @@ async def _serve_pooled(
 def _handler_200(body: bytes = b"ok"):
     def handler(ctx: HTTPReqCtx):
         ctx.complete(
-            h11.Response(
+            NativeResponse(
                 status_code=200,
                 headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode())],
             ),
@@ -126,7 +126,7 @@ class TestHttpServerService:
             # Block until the test releases us; this forces parallelism.
             release.wait(timeout=5.0)
             ctx.complete(
-                h11.Response(status_code=200, headers=[(b"content-length", b"2")]),
+                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 
@@ -181,7 +181,7 @@ class TestHttpServerService:
             time.sleep(0.1)
             with lock:
                 in_flight -= 1
-            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
@@ -216,7 +216,7 @@ class TestHttpServerService:
             except RequestCancelled:
                 handler_cancelled.set()
                 raise
-            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
@@ -333,7 +333,7 @@ class TestServiceRobustness:
             gate.wait(timeout=5.0)
             with lock:
                 in_flight -= 1
-            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=3) as lt:
@@ -394,7 +394,7 @@ class TestServiceRobustness:
         """
 
         def handler(ctx: HTTPReqCtx):
-            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
@@ -416,7 +416,7 @@ class TestDispatchLoad:
         def handler(ctx: HTTPReqCtx):
             tid = str(threading.get_ident()).encode()
             ctx.complete(
-                h11.Response(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
+                NativeResponse(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
                 tid,
             )
 
@@ -465,7 +465,7 @@ class TestRequestCancellation:
                 handler_cancelled.set()
                 raise
             # Should not be reached
-            ctx.complete(h11.Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:

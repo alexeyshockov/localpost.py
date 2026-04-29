@@ -1,6 +1,8 @@
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import thread_pool_handler
-from localpost.http._service import http_server, wsgi_server
+from localpost.http._service import http_server, httptools_server, wsgi_server
+from localpost.http._types import BodyTooLarge, InformationalResponse, Request
+from localpost.http._types import Response as NativeResponse
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
     RequestCtx,
@@ -16,6 +18,9 @@ from localpost.http.router import (
 from localpost.http.server import HTTPReqCtx, RequestHandler, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
+# ``Response`` (the public name) is the high-level router response.
+# ``NativeResponse`` is the low-level wire-format response used directly
+# with ``HTTPReqCtx.complete`` / ``start_response``.
 __all__ = [
     # config
     "ServerConfig",
@@ -24,6 +29,13 @@ __all__ = [
     "start_http_server",
     "HTTPReqCtx",
     "RequestHandler",
+    # backend selection
+    "httptools_server",
+    # neutral wire types (used directly with HTTPReqCtx)
+    "Request",
+    "NativeResponse",
+    "InformationalResponse",
+    "BodyTooLarge",
     # router
     "Router",
     "Routes",

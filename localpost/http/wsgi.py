@@ -6,8 +6,7 @@ from io import RawIOBase
 from typing import Any, final, override
 from wsgiref.types import WSGIApplication
 
-import h11
-
+from localpost.http._types import Response as _NativeResponse
 from localpost.http.server import HTTPReqCtx, RequestHandler
 
 __all__ = ["wrap_wsgi"]
@@ -90,12 +89,12 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
                     exc_info = None
             status_code = int(status.split(" ", 1)[0])
             reason = status.split(" ", 1)[1] if " " in status else ""
-            h11_headers = [
+            wire_headers = [
                 (name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in headers
             ]
-            response_state["response"] = h11.Response(
+            response_state["response"] = _NativeResponse(
                 status_code=status_code,
-                headers=h11_headers,
+                headers=wire_headers,
                 reason=reason.encode("iso-8859-1") if reason else b"",
             )
             return _wsgi_write_deprecated

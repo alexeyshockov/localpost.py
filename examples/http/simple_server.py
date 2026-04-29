@@ -1,14 +1,17 @@
 import logging
 
-import h11
-
-from localpost.http.config import ServerConfig
-from localpost.http.server import HTTPReqCtx, start_http_server
+from localpost.http import HTTPReqCtx, NativeResponse, ServerConfig, start_http_server
 
 
 def _main():
     def simple_app(ctx: HTTPReqCtx):
-        ctx.complete(h11.Response(status_code=200, headers=[(b"Content-Type", b"text/plain")]), b"Hello, World!\n")
+        ctx.complete(
+            NativeResponse(
+                status_code=200,
+                headers=[(b"Content-Type", b"text/plain"), (b"Content-Length", b"14")],
+            ),
+            b"Hello, World!\n",
+        )
 
     with start_http_server(ServerConfig(), simple_app) as server:
         while True:

@@ -9,9 +9,8 @@ from http.client import responses as _http_phrases
 from typing import Self, final
 from urllib.parse import parse_qs
 
-import h11
-
 from localpost._utils import NOT_SET
+from localpost.http._types import Response as _NativeResponse
 from localpost.http.config import DEFAULT_BUFFER_SIZE
 from localpost.http.server import HTTPReqCtx
 from localpost.http.server import RequestHandler as NativeRequestHandler
@@ -350,11 +349,11 @@ class Router:
                 )
                 response = match.handler(ctx)
 
-            h11_headers = [(k.encode("iso-8859-1"), v.encode("iso-8859-1")) for k, v in response.headers.items()]
+            wire_headers = [(k.encode("iso-8859-1"), v.encode("iso-8859-1")) for k, v in response.headers.items()]
             http_ctx.start_response(
-                h11.Response(
+                _NativeResponse(
                     status_code=response.status_code,
-                    headers=h11_headers,
+                    headers=wire_headers,
                     reason=_http_phrases.get(response.status_code, "Unknown").encode("iso-8859-1"),
                 )
             )
@@ -446,7 +445,7 @@ def _send_plain(
     if extra_headers:
         headers.extend(extra_headers)
     ctx.complete(
-        h11.Response(
+        _NativeResponse(
             status_code=status_code,
             headers=headers,
             reason=_http_phrases.get(status_code, "Unknown").encode("iso-8859-1"),

@@ -17,9 +17,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (including a `Router`'s 404/405 path) stay on the selector thread.
 - `just deadcode` — vulture-based dead-code finder, configured in
   `pyproject.toml` (`[tool.vulture]`).
+- **Optional `httptools` HTTP server backend** under the `[http-fast]`
+  extra. New entry points `localpost.http.start_httptools_server` and
+  `localpost.http.httptools_server` (hosted-service form) drive a
+  C-based llhttp parser as a peer of the existing h11 server. Same
+  selector / accept loop / connection bookkeeping (lifted into a shared
+  `BaseServer`); each backend uses its parser's natural idioms — no
+  internal `next_event/send_response` Protocol forced over both.
+  h11 stays the default. Initial scope: `Content-Length` responses
+  only (chunked transfer-encoding on the httptools side is a follow-up;
+  matches what `Router` and `wrap_wsgi` produce today).
+- Neutral wire types `Request`, `NativeResponse`, `InformationalResponse`
+  (re-exported from `localpost.http`) — backend-agnostic shapes both
+  servers populate. User code no longer imports `h11` or `httptools`
+  directly.
 
 ### Changed
 
+- **`localpost.http` no longer leaks h11 types into the public API.**
+  `HTTPReqCtx.request` is now `localpost.http.Request` (was
+  `h11.Request`); `HTTPReqCtx.start_response` and `complete` accept
+  `localpost.http.NativeResponse` / `InformationalResponse` (was
+  `h11.Response` / `h11.InformationalResponse`). Field shapes are
+  identical (lowercased header-name bytes, byte values), so the
+  migration is mechanical: replace `import h11` /
+  `h11.Response(status_code=…, headers=…)` with
+  `from localpost.http import NativeResponse` /
+  `NativeResponse(status_code=…, headers=…)`. The `http` module is
+  marked stable, but absorbing this cost once enables the
+  alternative-backend support above.
 - `localpost.http._service.http_server` no longer accepts `max_concurrency`
   and no longer owns a worker pool. Wrap your handler with
   `thread_pool_handler` to opt back into worker dispatch.

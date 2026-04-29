@@ -59,6 +59,10 @@ http-server = [
 #    "werkzeug ~=3.1",
 #    "multipart",
 ]
+http-fast = [
+    # C-based HTTP/1.1 parser (llhttp); enables ``start_httptools_server``.
+    "httptools >=0.6,<0.8",
+]
 http-openapi = [
     "msgspec ~=0.19",
 ]

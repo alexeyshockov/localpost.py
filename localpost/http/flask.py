@@ -18,10 +18,10 @@ Trade-off: this couples to Flask/Werkzeug internals
 
 from __future__ import annotations
 
-import h11
 from flask import Flask
 
 from localpost.http._service import http_server
+from localpost.http._types import Response as _NativeResponse
 from localpost.http.config import ServerConfig
 from localpost.http.server import HTTPReqCtx, RequestHandler
 from localpost.http.wsgi import _build_environ
@@ -57,11 +57,11 @@ def flask_handler(app: Flask) -> RequestHandler:
 def _write_response(http_ctx: HTTPReqCtx, response) -> None:
     # response is a werkzeug.Response (Flask's Response subclasses it)
     reason = (response.status.split(" ", 1)[1] if " " in response.status else "").encode("iso-8859-1")
-    h11_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in response.headers.items()]
+    wire_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in response.headers.items()]
     http_ctx.start_response(
-        h11.Response(
+        _NativeResponse(
             status_code=response.status_code,
-            headers=h11_headers,
+            headers=wire_headers,
             reason=reason,
         )
     )

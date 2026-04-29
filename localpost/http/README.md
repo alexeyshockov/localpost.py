@@ -13,7 +13,8 @@ For OpenAPI / content negotiation / validation, see
 ## Install
 
 ```bash
-pip install localpost[http-server]
+pip install localpost[http-server]            # h11 backend (default, pure Python)
+pip install localpost[http-server,http-fast]  # also adds the httptools backend
 ```
 
 ## Quick start
@@ -291,19 +292,36 @@ worked but introduced a 3-way state machine with cross-thread races. The
 pull-based variant collapses to two states and one syscall per
 `check_cancelled()` call.
 
-## Roadmap
+## Server backends
 
-Items that are not currently bugs but where there's a known better
-implementation worth tackling later.
+Two implementations live side-by-side. They share the listening socket,
+selector loop, op queue, stale-conn sweep, and shutdown coordination
+(everything in `_base.py`). They differ in how they drive the parser:
 
-### Faster HTTP/1.1 parsing
+| Entry point                  | Parser      | Extra        | Notes                           |
+| ---------------------------- | ----------- | ------------ | ------------------------------- |
+| `start_http_server`          | h11         | `[http-server]` | default; pure Python, readable |
+| `start_httptools_server`     | httptools   | `[http-fast]`   | C-based llhttp; faster header parsing |
 
-The selector thread is CPU-bound on `h11` (pure Python). Switching to a C
-parser (`httptools` or similar) is the largest realistic single-step
-perf win — a 30-50% RPS uplift would be plausible. Trade-off: adds a C
-dependency and weakens the "minimal, readable, in-Python" pitch. See
-[`benchmarks/http/PERF_FINDINGS.md`](../../benchmarks/http/PERF_FINDINGS.md)
-for the analysis behind the current bench numbers.
+Hosted-service equivalents: `http_server(...)` / `httptools_server(...)`
+(both decorated with `@hosting.service`).
+
+Pick whichever fits — handler code is identical. Both populate the same
+neutral `Request` / `NativeResponse` types from `localpost.http`. The
+two implementations are intentionally **not** unified behind a parser
+Protocol: h11 is pull-events + parse/serialize, httptools is
+push-callbacks + parse-only, and forcing one shape over both restricts
+the faster backend without buying anything.
+
+httptools backend caveats (initial scope):
+- `Content-Length` response bodies only (chunked transfer-encoding is a
+  follow-up). `Router` and `wrap_wsgi` already set `Content-Length`,
+  so this matches today's behaviour.
+- HTTP Upgrade negotiation surfaces as 400 Bad Request — revisit if/when
+  WebSockets come back on the roadmap.
+
+For perf context, see
+[`benchmarks/http/PERF_FINDINGS.md`](../../benchmarks/http/PERF_FINDINGS.md).
 
 ## How is it different from…
 
