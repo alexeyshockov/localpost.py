@@ -122,6 +122,22 @@ class HTTPConnHttptools(BaseHTTPConn):
     addr: tuple[str, int]
     fd: int = field(init=False)
     parser: httptools.HttpRequestParser = field(init=False)
+    """The httptools (llhttp) parser — parse-only on our side; the
+    response wire bytes are hand-built via ``_serialize_response``
+    plus ``_send_all`` (no parser involved on the response path).
+
+    **Single-thread invariant.** The selector owns the parser during
+    ``parser.feed_data`` (and the callbacks it fires) for the
+    request-headers phase; on streaming routes (``buffer_body=False``)
+    the worker also calls ``parser.feed_data`` from inside
+    ``ctx.receive`` to drain remaining body bytes. The op-queue /
+    wakeup-pipe handoff in
+    :class:`localpost.http._base.BaseServer` is the synchronisation
+    edge — `os.write` to the wakeup pipe is a full memory barrier.
+    The parser is **never** touched concurrently from two threads;
+    ownership is strict (selector → worker on ``stop_tracking``;
+    worker → selector on ``track``).
+    """
     close_at: float | None = None
     tracked: bool = False
     idle: bool = True
@@ -141,6 +157,17 @@ class HTTPConnHttptools(BaseHTTPConn):
     _body_buf: bytearray = field(default_factory=bytearray)
     _message_complete: bool = False
     _body_too_large: int | None = None
+
+    # Streaming mode (``buffer_body=False``): the pre-body handler borrowed
+    # the conn before the body was buffered. Selector + worker both feed
+    # bytes through ``parser.feed_data``; ``on_body`` populates
+    # ``_streaming_body_buf`` regardless of which thread is feeding. The
+    # worker drains the buffer via ``ctx.receive``. Same model as h11
+    # (``next_event``-driven), just emulated with httptools' push
+    # callbacks.
+    _streaming_active: bool = False
+    _streaming_body_buf: bytearray = field(default_factory=bytearray)
+    _streaming_eom: bool = False
 
     # Set when the response indicates ``Connection: close`` or the request lacked
     # keep-alive support — the conn is closed once finish_response returns.
@@ -224,7 +251,14 @@ class HTTPConnHttptools(BaseHTTPConn):
             result = None
 
         if result is None:
-            return  # done — body bytes (if any) are drained silently below
+            # Either the handler completed inline OR a streaming
+            # pool dispatched and borrowed the conn. Detect the latter
+            # so on_body / on_message_complete know to populate the
+            # streaming body buffer (drained by the worker via
+            # ``ctx.receive``) instead of dropping bytes.
+            if not self.tracked:
+                self._streaming_active = True
+            return
 
         # Continuation returned: we'll buffer the body and invoke it on
         # ``on_message_complete``. If the client sent ``Expect: 100-continue``,
@@ -239,6 +273,16 @@ class HTTPConnHttptools(BaseHTTPConn):
                 pass
 
     def on_body(self, data: bytes) -> None:
+        if self._streaming_active:
+            # Streaming mode: append to the worker-drained buffer regardless
+            # of which thread is currently inside ``feed_data``. ``ctx.receive``
+            # drains it (and pulls more bytes from the socket if needed).
+            new_total = len(self._streaming_body_buf) + len(data)
+            if new_total > self.server.config.max_body_size:
+                self._body_too_large = new_total
+                return
+            self._streaming_body_buf += data
+            return
         if self._continuation is None or self._cur_oversize:
             return  # no body wanted (handler done) or already oversize
         new_total = len(self._body_buf) + len(data)
@@ -248,6 +292,10 @@ class HTTPConnHttptools(BaseHTTPConn):
         self._body_buf += data
 
     def on_message_complete(self) -> None:
+        if self._streaming_active:
+            self._streaming_eom = True
+            self._message_complete = True
+            return
         if self._continuation is not None:
             cont = self._continuation
             self._continuation = None
@@ -337,6 +385,9 @@ class HTTPConnHttptools(BaseHTTPConn):
         self._message_complete = False
         self._response_started = False
         self._close_after_response = False
+        self._streaming_active = False
+        self._streaming_body_buf = bytearray()
+        self._streaming_eom = False
         self.idle = True
         self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
@@ -425,30 +476,61 @@ class HTTPReqCtxHttptools:
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        """Streaming-read API. Rare under the JSON-API contract — typical
-        callers receive the buffered body via ``ctx.body``. After the
-        :data:`BodyHandler` continuation runs, the body has been fully
-        consumed and this returns ``b""``."""
-        # 100-continue: caller is opting to read more bytes; tell the client
-        # to actually send body if we haven't already.
+        """Streaming-read API.
+
+        Two paths:
+
+        - **Streaming route** (``buffer_body=False``, ``conn._streaming_active``):
+          parser-driven, same shape as h11. ``on_body`` callbacks (fired
+          from ``parser.feed_data`` calls on either thread) populate
+          ``conn._streaming_body_buf``; this method drains it. Pulls more
+          bytes from the socket and feeds them through the parser if the
+          buffer is empty and EOM hasn't fired.
+        - **Buffered route**: the body has already been buffered into
+          ``ctx.body`` before this body handler ran. ``ctx.receive`` is
+          the legacy fallback path (rare); it just calls ``sock.recv``
+          for callers that did a hand-rolled ``borrow()``.
+        """
         if self._expect_100_continue and not self._continue_sent:
             self._send_continue()
-        # The continuation-style flow buffers the body in ``self.body`` before
-        # dispatch — there's nothing left to stream when this is called from
-        # a body handler. For non-standard pre-body callers (e.g. handlers
-        # that called ``borrow()`` and read their own body on a worker), fall
-        # through to a blocking-with-timeout recv.
-        sock = self._conn.sock
+
+        conn = self._conn
         rw = self._server.config.rw_timeout
+
+        if conn._streaming_active:
+            while not conn._streaming_body_buf and not conn._streaming_eom:
+                try:
+                    data = conn.sock.recv(DEFAULT_BUFFER_SIZE)
+                except BlockingIOError:
+                    conn.sock.settimeout(rw)
+                    try:
+                        data = conn.sock.recv(DEFAULT_BUFFER_SIZE)
+                    finally:
+                        conn.sock.settimeout(0)
+                if not data:
+                    break  # peer FIN mid-body
+                # Feed through the parser; ``on_body`` populates the
+                # streaming buffer, ``on_message_complete`` flips EOM.
+                # Errors (BodyTooLarge / _ProtocolError) propagate to the
+                # caller; the worker pool's exception handler emits a 500.
+                conn._feed(data)
+            if conn._streaming_body_buf:
+                n = min(size, len(conn._streaming_body_buf))
+                chunk = bytes(conn._streaming_body_buf[:n])
+                del conn._streaming_body_buf[:n]
+                return chunk
+            return b""
+
+        # Buffered route fallback (hand-rolled borrow): raw recv.
         try:
-            return sock.recv(size)
+            return conn.sock.recv(size)
         except BlockingIOError:
-            sock.settimeout(rw)
+            conn.sock.settimeout(rw)
             try:
-                return sock.recv(size)
+                return conn.sock.recv(size)
             finally:
-                if self._conn.tracked:
-                    sock.settimeout(0)
+                if conn.tracked:
+                    conn.sock.settimeout(0)
 
     def _send_continue(self) -> None:
         _send_all(

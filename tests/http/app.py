@@ -523,6 +523,163 @@ class TestStreamingRoutes:
         # Streaming handler runs on a worker thread, not the main thread.
         assert captured["thread"] != threading.get_ident()
 
+    async def test_streaming_route_reads_body_httptools(self, free_port):
+        """Streaming under httptools: the body reaches the worker even
+        when the client piggybacks body bytes with the request line in a
+        single TCP segment (the common case without ``Expect: 100-continue``).
+
+        The parser is the single source of truth: ``on_body`` populates
+        ``conn._streaming_body_buf``, which the worker drains via
+        ``ctx.receive``."""
+        captured: dict = {}
+
+        app = HttpApp()
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):
+            chunks: list[bytes] = []
+            while True:
+                chunk = ctx.receive(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            captured["body"] = b"".join(chunks)
+            return f"got {len(captured['body'])} bytes"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(app.service(cfg, backend="httptools")) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+            payload = b"a" * 1024
+            r = await _post(f"http://127.0.0.1:{free_port}/upload", content=payload, timeout=3.0)
+            assert r.status_code == 200
+            assert r.text == f"got {len(payload)} bytes"
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured["body"] == payload
+
+    async def test_streaming_route_body_across_multiple_recvs_httptools(self, free_port):
+        """The client sends headers in one TCP write, body in subsequent
+        writes (so the parser only sees headers in the selector's first
+        feed). The worker must pull the rest through the parser via
+        ``ctx.receive`` → ``sock.recv`` → ``feed_data`` → ``on_body``."""
+        captured: dict = {}
+
+        app = HttpApp()
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):
+            chunks: list[bytes] = []
+            while True:
+                chunk = ctx.receive(8192)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            captured["body"] = b"".join(chunks)
+            return f"got {len(captured['body'])} bytes"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(app.service(cfg, backend="httptools")) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            def hit() -> bytes:
+                payload = b"a" * 4096
+                with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
+                    s.sendall(
+                        b"POST /upload HTTP/1.1\r\n"
+                        b"Host: x\r\n"
+                        b"Content-Length: 4096\r\n"
+                        b"\r\n"
+                    )
+                    # Send body in three smaller writes with brief pauses;
+                    # the parser will see only headers in its first feed.
+                    for i in (0, 1024, 2048):
+                        time.sleep(0.05)
+                        s.sendall(payload[i : i + 1024])
+                    time.sleep(0.05)
+                    s.sendall(payload[3072:4096])
+                    buf = b""
+                    while b"got 4096 bytes" not in buf:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    return buf
+
+            response = await to_thread.run_sync(hit)
+            assert b"HTTP/1.1 200" in response
+            assert b"got 4096 bytes" in response
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured["body"] == b"a" * 4096
+
+    async def test_streaming_then_keep_alive_request_httptools(self, free_port):
+        """After a streaming POST, the same connection serves a regular
+        GET. Verifies parser state is consistent after streaming — the
+        next request parses cleanly without any reset / replace."""
+        captured: list[str] = []
+
+        app = HttpApp()
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):
+            total = 0
+            while True:
+                chunk = ctx.receive(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+            captured.append(f"upload:{total}")
+            return f"got {total} bytes"
+
+        @app.get("/ping")
+        def ping():
+            captured.append("ping")
+            return "pong"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(app.service(cfg, backend="httptools")) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            def hit() -> bytes:
+                with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
+                    # Streaming POST.
+                    s.sendall(
+                        b"POST /upload HTTP/1.1\r\n"
+                        b"Host: x\r\n"
+                        b"Content-Length: 1024\r\n"
+                        b"\r\n"
+                        + b"a" * 1024
+                    )
+                    buf1 = b""
+                    while b"got 1024 bytes" not in buf1:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf1 += chunk
+                    # Now reuse the same conn for a regular GET — would fail
+                    # if streaming had left the parser in a stale state.
+                    s.sendall(b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\n")
+                    buf2 = b""
+                    while b"pong" not in buf2:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf2 += chunk
+                    return buf1 + buf2
+
+            response = await to_thread.run_sync(hit)
+            assert b"got 1024 bytes" in response
+            assert b"pong" in response
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured == ["upload:1024", "ping"]
+
     def test_streaming_route_with_pool_disabled_raises(self):
         """Registering a streaming route on an HttpApp with ``max_concurrency=0``
         raises ``RuntimeError`` when the dispatcher is built."""

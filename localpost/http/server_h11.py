@@ -77,6 +77,19 @@ class HTTPConnH11(BaseHTTPConn):
     ``sock.fileno()`` returns -1)."""
     recv_closed: bool = False
     parser: h11.Connection = field(default_factory=lambda: h11.Connection(h11.SERVER))
+    """The h11 state machine — used for **both** parsing the request
+    (``parser.next_event`` / ``parser.receive_data``) and serialising
+    the response (``parser.send``).
+
+    **Single-thread invariant.** The selector owns the parser from
+    ``__call__`` entry until ``stop_tracking`` (in the
+    :data:`BodyHandler` dispatcher); the worker owns it from then until
+    ``track`` re-registers the conn. The op-queue / wakeup-pipe
+    handoff in :class:`localpost.http._base.BaseServer` is the
+    synchronisation edge — `os.write` to the wakeup pipe is a full
+    memory barrier across threads. The parser is **never** touched
+    concurrently from two threads.
+    """
     close_at: float | None = None
     tracked: bool = False
     body_bytes_received: int = 0

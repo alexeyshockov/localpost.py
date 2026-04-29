@@ -467,6 +467,13 @@ class BaseServer:
         that handles ``BlockingIOError`` with a blocking-with-timeout
         fallback. This avoids two ``settimeout`` (fcntl) calls per
         request on the borrow / re-track boundary.
+
+        **Synchronisation edge for parser ownership.** This method's
+        op-queue enqueue + wakeup-pipe ``os.write`` (in :meth:`_wake`)
+        is a full memory barrier: anything the worker did to the conn's
+        parser (``parser.send`` for h11; ``parser.feed_data`` callbacks
+        for httptools streaming) is visible to the selector after this
+        call.
         """
         if self.shutting_down:
             try:
@@ -493,6 +500,12 @@ class BaseServer:
         to blocking-with-timeout only when the kernel buffer fills.
         Client-disconnect detection while the conn is borrowed lives in
         :func:`localpost.http.check_cancelled` (pull-based ``MSG_PEEK``).
+
+        **Synchronisation edge for parser ownership.** Once this returns,
+        the selector is done with the conn's parser (h11.Connection /
+        httptools.HttpRequestParser); the worker has exclusive access
+        until :meth:`track` re-registers. See the parser field's
+        docstring on each backend for the full invariant.
         """
         try:
             self.selector.unregister(conn.sock)
