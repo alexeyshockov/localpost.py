@@ -108,6 +108,7 @@ def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool
 
 @final
 @dataclass(eq=False, slots=True)
+# TODO Rename to HTTPConn
 class HTTPConnHttptools(BaseHTTPConn):
     server: BaseServer
     sock: socket.socket

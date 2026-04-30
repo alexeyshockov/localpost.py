@@ -24,7 +24,7 @@ __all__ = [
 ]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class Request:
     """Parsed HTTP request line + headers. Body is streamed via :meth:`HTTPReqCtx.receive`."""
 
@@ -48,7 +48,7 @@ class Request:
     """HTTP version as bare bytes (``b"1.1"`` or ``b"1.0"``)."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class Response:
     """Final response (2xx-5xx) — exactly one per request."""
 
@@ -58,7 +58,7 @@ class Response:
     """Reason phrase. Empty → backend supplies a default for the status code."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class InformationalResponse:
     """1xx response (100 Continue, 102 Processing, …). Multiple may precede the final response."""
 
