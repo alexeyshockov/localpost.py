@@ -5,9 +5,8 @@
 [![Code coverage](https://img.shields.io/sonar/coverage/alexeyshockov_localpost.py?server=https%3A%2F%2Fsonarcloud.io)](https://sonarcloud.io/project/overview?id=alexeyshockov_localpost.py)
 
 A small async Python framework for long-running processes: service hosting,
-in-process task scheduling, message broker consumers, and a lightweight HTTP /
-OpenAPI stack — all built on [AnyIO](https://anyio.readthedocs.io/) (runs on
-asyncio **and** Trio).
+in-process task scheduling, and a lightweight HTTP server — all built on
+[AnyIO](https://anyio.readthedocs.io/) (runs on asyncio **and** Trio).
 
 LocalPost is not a monolith. Each module is usable on its own; pick what you
 need.
@@ -18,11 +17,7 @@ need.
   ShuttingDown → Stopped`), signal handling, and composable middleware.
 - **Scheduler** with declarative triggers (`every`, `after`, `cron`) and
   operator-based composition (`every("1m") // delay((0, 10))`).
-- **Consumers** for in-memory channels, AnyIO streams, `queue.Queue`, and
-  Google Cloud Pub/Sub — accepting both sync and async handlers.
 - **HTTP server** — sync, h11-based, ~400 LOC; wrap any WSGI app.
-- **OpenAPI layer** — type-driven; OpenAPI 3.0 spec is inferred from your
-  function signatures, with Swagger UI / ReDoc / Scalar docs.
 - **IoC container** — `.NET`-style, scoped, with Flask integration.
 
 ## Install
@@ -37,14 +32,8 @@ Optional extras:
 | ----------------- | ----------------------------------------------------------- |
 | `[cron]`          | `croniter` — cron-expression trigger                        |
 | `[scheduler]`     | `humanize`, `pytimeparse2` — string durations               |
-| `[http-server]`   | `h11` — the HTTP server                                     |
-| `[http-openapi]`  | `msgspec` — OpenAPI serialization                           |
-| `[sqs]`           | `botocore` — AWS SQS                                        |
-| `[kafka]`         | `confluent-kafka`                                           |
-| `[nats]`          | `nats-py`                                                   |
-| `[pubsub]`        | `google-cloud-pubsub`                                       |
-| `[azure-queue]`   | `azure-storage-queue` + `azure-identity`                    |
-| `[azure-servicebus]` | `azure-servicebus` + `azure-identity`                    |
+| `[http]`          | `h11` — the HTTP server                                     |
+| `[http-fast]`     | `httptools` — alternative C-based parser                    |
 
 ## Quick start — scheduler
 
@@ -75,19 +64,15 @@ parallel, and exits cleanly when they all stop.
 
 ## Modules
 
-| Module                                                                         | Status         | Purpose                                                 |
-| ------------------------------------------------------------------------------ | -------------- | ------------------------------------------------------- |
-| [`hosting`](localpost/hosting/)                                                | stable         | Service lifecycle, signals, middleware, ASGI/gRPC adapters |
-| [`scheduler`](localpost/scheduler/)                                            | stable         | Composable in-process task scheduler                    |
-| [`di`](localpost/di/)                                                          | stable         | Scoped IoC container                                    |
-| [`http`](localpost/http/)                                                      | stable         | Small h11-based HTTP/1.1 server                         |
-| [`experimental.consumers`](localpost/experimental/consumers/)                  | experimental   | Message broker consumer services                        |
-| [`experimental.openapi`](localpost/experimental/openapi/)                      | experimental   | Type-driven OpenAPI framework                           |
+| Module                              | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| [`hosting`](localpost/hosting/)     | Service lifecycle, signals, middleware, ASGI/gRPC adapters |
+| [`scheduler`](localpost/scheduler/) | Composable in-process task scheduler                       |
+| [`di`](localpost/di/)               | Scoped IoC container                                       |
+| [`http`](localpost/http/)           | Small h11-based HTTP/1.1 server                            |
 
-"Stable" means the public API is not expected to break in a patch or minor
-release. Experimental modules live under `localpost.experimental.<name>`;
-the import path itself is the marker — the API is still being shaped and
-breaking changes may land before `1.0`.
+All four modules have stable public APIs and are not expected to break in
+patch or minor releases.
 
 Each subdirectory has its own README with a quickstart, key concepts, and
 extension points.
@@ -100,8 +85,8 @@ extension points.
   operations; declarative middleware.
 - **Async-first** — built on AnyIO, so structured concurrency is the default,
   and you get Trio support for free.
-- **Handle-both** — consumers and scheduler accept sync or async callables;
-  sync ones are offloaded to a thread pool.
+- **Handle-both** — the scheduler accepts sync or async callables; sync ones
+  are offloaded to a thread pool.
 - **Small** — each module is focused and independently usable; take just the
   scheduler, just the hosting, or the full stack.
 

@@ -116,9 +116,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output. Pythonic helpers (decorators, response conversion, param
   injection) move to the new `HttpApp`. See `PERF_FINDINGS.md` Phase 9
   — restructure delivers another +35% RPS on the bench's hot path.
-- **`localpost.experimental.openapi` is paused.** It was built on the
-  old Router shape; the new lean dispatcher leaves it broken at
-  import time. To be revived against `HttpApp` in a follow-up.
 - **`localpost.http` no longer leaks h11 types into the public API.**
   `HTTPReqCtx.request` is now `localpost.http.Request` (was
   `h11.Request`); `HTTPReqCtx.start_response` and `complete` accept
@@ -138,11 +135,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drop their `max_concurrency` kwarg for the same reason — wrap with
   `thread_pool_handler` if you need a pool (typical for blocking WSGI
   / Flask apps).
-- **Experimental sub-packages moved.** `localpost.consumers` →
-  `localpost.experimental.consumers`; `localpost.openapi` →
-  `localpost.experimental.openapi`. The `experimental` segment in every
-  import path is the new stability marker — README notes alone were too
-  easy to miss. APIs themselves are unchanged.
 - Modernised typing throughout `localpost/_utils.py`,
   `localpost/scheduler/`, and `localpost/hosting/_host.py` to PEP 695
   (`class Foo[T]`, `type Foo = ...`, inline function type parameters).
@@ -152,13 +144,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside nested generic functions.
 - Dropped the `Programming Language :: Python :: 3.11` classifier
   (the project's `requires-python = ">=3.12"` since 0.6).
-- Cleaner ruff/ty footprint across stable packages and shared infra
+- Cleaner ruff/ty footprint across the package and shared infra
   (`localpost/__init__.py`, `_utils.py`, `threadtools.py`): 0 errors
-  from either tool. Remaining warnings live entirely in
-  `localpost/experimental/`.
+  from either tool.
 
 ### Removed
 
+- **`localpost.experimental` is gone.** Both `experimental.consumers`
+  (channel / stream / queue / Pub/Sub) and `experimental.openapi` are
+  removed to keep the focus on the stable surface (`hosting`, `scheduler`,
+  `http`, `di`). The corresponding extras (`[sqs]`, `[kafka]`, `[nats]`,
+  `[http-openapi]`) and `examples/consumers/`, `examples/openapi/`,
+  `tests/experimental/` are removed too. May come back as a separate
+  package once the design settles.
 - Internal helpers that were unused everywhere: `localpost._utils.NO_OP_TS`,
   `AsyncContextManagerAdapter`, `Switch`, the `send_or_drop_from_thread` /
   `send_or_drop` methods on the now-trivial `MemorySendStream` (so

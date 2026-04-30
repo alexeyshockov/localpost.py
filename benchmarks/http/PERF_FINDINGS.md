@@ -891,8 +891,6 @@ return paths are still leaner than the old Router framework.
   ``(RequestCtx) -> Response`` shape) gone. Migrate to ``HttpApp`` or
   use the lean http-level :data:`localpost.http.RequestHandler` shape
   directly.
-- ``localpost.experimental.openapi`` paused — it was built against
-  the old Router shape; revive against ``HttpApp`` in a future PR.
 
 ## Phase 10 (shipped): drop per-request settimeout (2026-04-30)
 

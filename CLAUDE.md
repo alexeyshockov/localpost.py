@@ -5,22 +5,17 @@ Guidance for Claude Code when working in this repository.
 ## Project overview
 
 LocalPost is an async Python framework (Python 3.12+) for building long-running
-processes. Five pillars:
+processes. Four pillars:
 
-- **hosting** *(stable)* — service lifecycle + orchestration (start/stop/signals).
-- **scheduler** *(stable)* — in-process, composable task scheduler.
-- **http** *(stable)* — lightweight sync HTTP/1.1 server.
-- **di** *(stable)* — small `.NET`-style IoC container with scopes.
-- **experimental.consumers** *(experimental)* — message broker consumers (channel, stream, queue, Pub/Sub; more planned).
-- **experimental.openapi** *(experimental)* — type-driven OpenAPI layer on top of `http`.
+- **hosting** — service lifecycle + orchestration (start/stop/signals).
+- **scheduler** — in-process, composable task scheduler.
+- **http** — lightweight sync HTTP/1.1 server.
+- **di** — small `.NET`-style IoC container with scopes.
 
 Built on AnyIO (runs on asyncio or Trio).
 
-**Stability note:** "stable" modules have settled public APIs — avoid
-breaking changes unless explicitly asked. Experimental modules live under
-``localpost.experimental.`` so the import path itself flags them; they're
-usable but their shape is still evolving — refactor freely, and flag
-breaking changes in the CHANGELOG.
+**Stability note:** all four modules have settled public APIs — avoid
+breaking changes unless explicitly asked.
 
 ## Development commands
 
@@ -74,29 +69,12 @@ localpost/
 │   ├── flask.py         # Flask integration (RequestContext per request)
 │   └── quart.py         # Quart integration (stub)
 │
-├── http/                # Lightweight HTTP/1.1 server (h11-based, sync I/O loop)
-│   ├── server.py        # start_http_server, HTTPReqCtx, RequestHandler
-│   ├── router.py        # URITemplate (RFC 6570 L1), Router, RequestCtx
-│   ├── wsgi.py          # wrap_wsgi()
-│   ├── config.py        # ServerConfig
-│   └── _service.py      # @hosting.service wrappers (http_server, wsgi_server)
-│
-└── experimental/        # Unstable APIs — wrapped in their own subpackage as a marker
-    ├── consumers/       # Message broker consumers
-    │   ├── channel.py       # in-memory channel
-    │   ├── stream.py        # AnyIO ObjectReceiveStream
-    │   ├── stdlib_queue.py  # queue.Queue / SimpleQueue
-    │   ├── pubsub.py        # Google Cloud Pub/Sub (in-progress; imports are broken)
-    │   └── _utils.py        # SyncHandler / AsyncHandler / AnyHandler types
-    └── openapi/         # Type-driven OpenAPI framework
-        ├── app.py           # HttpApp, FromPath/Query/Header/Body, OpResult hierarchy
-        ├── spec.py          # OpenAPI spec dataclasses
-        ├── converters.py
-        ├── pydantic.py      # Pydantic body/result converters
-        ├── msgspec.py       # msgspec converters (stub)
-        ├── sse.py           # Server-Sent Events
-        ├── _docs.py         # Swagger UI / ReDoc / Scalar HTML templates
-        └── DESIGN.md        # Deeper design notes
+└── http/                # Lightweight HTTP/1.1 server (h11-based, sync I/O loop)
+    ├── server.py        # start_http_server, HTTPReqCtx, RequestHandler
+    ├── router.py        # URITemplate (RFC 6570 L1), Router, RequestCtx
+    ├── wsgi.py          # wrap_wsgi()
+    ├── config.py        # ServerConfig
+    └── _service.py      # @hosting.service wrappers (http_server, wsgi_server)
 ```
 
 Files prefixed with `_` are internal; public API is re-exported from each
@@ -112,15 +90,14 @@ module's `__init__.py`.
 - **Errors as values** — `Result[T]` (Ok / failure) flows through scheduler tasks
   and arg resolvers.
 - **Ruff** with `line-length = 120`, `pyupgrade.keep-runtime-typing = true`.
-- **Sync + async duality** — consumers and scheduler accept both; sync callables
-  are offloaded to threads via `anyio.to_thread`.
+- **Sync + async duality** — the scheduler accepts both; sync callables are
+  offloaded to threads via `anyio.to_thread`.
 - Docstrings: Google convention (per ruff config).
 
 ## Testing
 
 - Unit tests: default `pytest` invocation, marker `not integration`.
-- Integration tests: marked `@pytest.mark.integration`, use `testcontainers`
-  (LocalStack, NATS, Google Pub/Sub emulator), run in parallel via
+- Integration tests: marked `@pytest.mark.integration`, run in parallel via
   `pytest-xdist` (`-n auto`).
 - `anyio_mode = "auto"` in `pyproject.toml` — async tests use `anyio[test]`.
 
@@ -140,5 +117,3 @@ For more detail on each module, see:
 @localpost/scheduler/README.md
 @localpost/di/README.md
 @localpost/http/README.md
-@localpost/experimental/consumers/README.md
-@localpost/experimental/openapi/README.md

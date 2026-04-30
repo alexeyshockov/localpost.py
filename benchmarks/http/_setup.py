@@ -6,9 +6,8 @@ failure; exits non-zero if any sync failed.
 
 Only the groups + extras the HTTP benchmark stacks actually import are
 installed — ``--all-groups --all-extras`` drags in native packages
-(``grpcio-tools``, ``confluent-kafka``, ``google-cloud-pubsub``,
-``opentelemetry-*``, …) that have spotty wheel coverage on free-threaded
-Python (e.g. 3.14t).
+(``grpcio``, ``opentelemetry-*``, …) that have spotty wheel coverage on
+free-threaded Python (e.g. 3.14t).
 
 Invoked by ``just bench-deps`` and ``just bench-deps-upgrade``.
 """

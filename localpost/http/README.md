@@ -406,9 +406,9 @@ For perf context, see
 
 ## How is it different from…
 
-- **Flask** — Flask is web-first (templates, Jinja, sessions) with no built-in
-  OpenAPI support. `localpost.http` is a low-level server; pair it with
-  `localpost.experimental.openapi` for type-driven OpenAPI.
+- **Flask** — Flask is web-first (templates, Jinja, sessions). `localpost.http`
+  is a low-level server with a small `HttpApp` framework on top — handy for
+  JSON APIs, but no opinions on templating or serialization.
 - **FastAPI** — FastAPI is async, Pydantic-only, OpenAPI-only, and ships a
   dependency-injection system. `localpost.http` is sync, has no opinions on
   serialization, and is small enough to read in one sitting.
@@ -416,6 +416,5 @@ For perf context, see
 ## See also
 
 - Examples: [`examples/http/`](../../examples/http/)
-- OpenAPI on top: [`../experimental/openapi/README.md`](../experimental/openapi/README.md)
 - Server source: [`server.py`](server.py)
 - Router source: [`router.py`](router.py)

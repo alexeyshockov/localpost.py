@@ -1,9 +1,8 @@
 # localpost
 
 A small async Python framework for long-running processes: service hosting,
-in-process task scheduler, message broker consumers, and a lightweight HTTP /
-OpenAPI stack. Built on [AnyIO](https://anyio.readthedocs.io/) — runs on
-asyncio **and** Trio.
+in-process task scheduler, and a lightweight HTTP server. Built on
+[AnyIO](https://anyio.readthedocs.io/) — runs on asyncio **and** Trio.
 
 Python 3.12+ required.
 
@@ -12,11 +11,7 @@ Python 3.12+ required.
 - **Hosting** — structured service lifecycle, signal handling, middleware.
 - **Scheduler** — declarative triggers (`every`, `after`, `cron`) composed with
   operators like `every("1m") // delay((0, 10))`.
-- **Consumers** — in-memory channels, AnyIO streams, `queue.Queue`, Google
-  Cloud Pub/Sub (Kafka / SQS / NATS planned).
 - **HTTP** — small h11-based sync server; wrap any WSGI app.
-- **OpenAPI** — OpenAPI 3.0 inferred from your function signatures, with
-  Swagger UI / ReDoc / Scalar docs built in.
 - **DI** — `.NET`-style scoped IoC container; optional Flask integration.
 
 ## Quick start

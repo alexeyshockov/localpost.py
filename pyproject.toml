@@ -11,7 +11,7 @@ Docs = 'https://alexeyshockov.github.io/localpost.py/'
 [project]
 name = "localpost"
 version = "0.6.0.dev0"
-description = "Consumers framework for different message brokers & simple in-process task scheduler"
+description = "Service hosting, in-process task scheduler, and a lightweight HTTP/1.1 server for long-running async Python processes"
 requires-python = ">=3.12"
 readme = "pypi_readme.md"
 license = "MIT" # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#pep-639-license-declaration
@@ -19,8 +19,8 @@ authors = [
     { name = "Alexey Shokov" },
 ]
 keywords = [
-    "scheduler", "cron",
-    "message brokers", "sqs", "kafka", "nats", "rabbitmq",
+    "hosting", "scheduler", "cron",
+    "http", "wsgi", "anyio",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -61,19 +61,6 @@ http-fast = [
     # C-based HTTP/1.1 parser (llhttp); enables ``start_httptools_server``.
     "httptools >=0.6,<0.8",
 ]
-http-openapi = [
-    "msgspec ~=0.19",
-]
-sqs = [
-    "botocore ~=1.38",  # Sync SQS client (default)
-    "boto3 ~=1.38",  # In case boto3 is available, the default session will be used
-]
-kafka = [
-    "confluent-kafka ~=2.4",
-]
-nats = [
-    "nats-py ~=2.8",
-]
 
 [dependency-groups]
 dev = [
@@ -88,18 +75,8 @@ dev-hosting-services = [
     "hypercorn ~=0.17",
     "grpcio ~=1.68",
 ]
-dev-consumers = [
-    "boto3 ~=1.38",
-    "aws-lambda-powertools ~=3.10",
-#    "aiobotocore ~=2.21",
-#    "aioboto3 >=14.1",
-    "confluent-kafka[schemaregistry,protobuf]",
-    "grpcio-tools ~=1.68",
-]
 dev-http = [
     "flask ~=3.1",
-#    "defspec ~=0.5",  # Replaced by our own implementation
-    "pydantic ~=2.12",
     "httpx",
 ]
 dev-sentry = [
@@ -107,17 +84,10 @@ dev-sentry = [
 ]
 dev-otel = [
     "opentelemetry-exporter-otlp",  # Both gRPC and HTTP
-    "opentelemetry-instrumentation-confluent-kafka >=0.60b1",
-#    "opentelemetry-instrumentation-aiokafka >=0.60b1",
-    "opentelemetry-instrumentation-botocore >=0.60b1",
-    "protobuf ~=6.29",  # See https://github.com/open-telemetry/opentelemetry-python/issues/4639#issuecomment-2997003823
 ]
 dev-types = [
     "types-croniter",
-#    "types-confluent-kafka",  # Many signatures do not match to the actual implementation
-    "types-protobuf ~=6.29",  # Must be in sync with protobuf version, see above
     "types-grpcio",  # Replaces grpc-stubs, see: https://github.com/python/typeshed/pull/11204
-    "types-boto3-lite[sqs] ~=1.38",
 ]
 examples = [
     "fastapi-slim ~=0.128",
@@ -133,10 +103,6 @@ tests-unit = [
     "pytest-cov ~=7.0",
     "coverage[toml] ~=7.6",
     "hypothesis ~=6.100",
-]
-tests-integration = [
-    "boto3 ~=1.38",
-    "testcontainers[google,localstack,nats] ~=4.10",
 ]
 bench = [
     # Macro (HTTP load): peer servers + ASGI app stack.
@@ -162,7 +128,6 @@ omit = ["tests/*"]
 # through reflection, etc.). The whitelist below names the 80+ confidence
 # false positives explicitly.
 paths = ["localpost"]
-exclude = ["localpost/experimental/"]
 min_confidence = 80
 sort_by_size = true
 ignore_names = [
@@ -175,7 +140,7 @@ ignore_names = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]
+module = ["grpc.*", "pytimeparse2.*"]
 follow_untyped_imports = true
 
 [tool.ruff]
