@@ -24,14 +24,12 @@ from benchmarks.http._pythons import PYTHONS
 # Just what the HTTP bench stacks need at runtime. See `benchmarks/http/apps/`
 # for the actual imports.
 GROUPS: tuple[str, ...] = (
-    "bench",                  # gunicorn, granian, starlette, pytest-benchmark
-    "dev-http",               # flask, cheroot, a2wsgi, pydantic, httpx
-    "dev-hosting-services",   # uvicorn (also hypercorn + grpcio — unused but light)
+    "bench",     # starlette, uvicorn, a2wsgi, cheroot, gunicorn, granian, pytest-benchmark
+    "dev-http",  # flask, pydantic, httpx
 )
 EXTRAS: tuple[str, ...] = (
-    "http-server",  # h11
-    "http-fast",    # httptools
-    "http-flask",   # localpost.http.flask handler
+    "http",       # h11
+    "http-fast",  # httptools
 )
 
 

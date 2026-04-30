@@ -58,7 +58,7 @@ bench-deps-upgrade:
 
 [doc("Run macro HTTP benchmarks (oha-driven, requires `brew install oha`)")]
 bench-http *args:
-    uv run --group bench --group dev-http --group dev-hosting-services \
+    uv run --group bench --group dev-http \
         python -m benchmarks.http.runner {{ args }}
 
 [doc("Quick PR-time HTTP bench: representative subset of stacks")]
