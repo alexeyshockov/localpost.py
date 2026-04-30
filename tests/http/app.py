@@ -29,6 +29,7 @@ from localpost.http import (
     NativeResponse,
     RequestHandler,
     ServerConfig,
+    httptools_server,
 )
 
 pytestmark = pytest.mark.anyio
@@ -587,6 +588,59 @@ class TestStreamingRoutes:
             await lt.stopped
 
         assert captured["body"] == b"a" * 4096
+
+    async def test_httptools_deferred_streaming_dispatch_sees_current_feed_body(self, free_port):
+        """httptools starts streaming work after callbacks from the current feed finish."""
+        captured: dict = {}
+
+        def handler(ctx: HTTPReqCtx):
+            def dispatch(req_ctx: HTTPReqCtx) -> None:
+                req_ctx._server.stop_tracking(req_ctx._conn)
+                conn = cast(Any, req_ctx._conn)
+                captured["buffer_before_receive"] = bytes(conn._streaming_body_buf)
+                captured["eom_before_receive"] = conn._streaming_eom
+                chunks: list[bytes] = []
+                while True:
+                    chunk = req_ctx.receive(8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                captured["body"] = b"".join(chunks)
+                req_ctx.complete(NativeResponse(200, [(b"content-length", b"2")]), b"ok")
+
+            cast(Any, ctx)._defer_streaming_dispatch(dispatch)
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(httptools_server(cfg, handler)) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            def hit() -> bytes:
+                payload = b"a" * 1024
+                with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
+                    s.sendall(
+                        b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1024\r\n\r\n"
+                        + payload
+                    )
+                    buf = b""
+                    while b"\r\n\r\nok" not in buf:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    return buf
+
+            response = await to_thread.run_sync(hit)
+            assert b"HTTP/1.1 200" in response
+            assert b"\r\n\r\nok" in response
+            lt.shutdown()
+            await lt.stopped
+
+        assert captured == {
+            "buffer_before_receive": b"a" * 1024,
+            "eom_before_receive": True,
+            "body": b"a" * 1024,
+        }
 
     async def test_streaming_then_keep_alive_request_httptools(self, free_port):
         """After a streaming POST, the same connection serves a regular

@@ -87,7 +87,11 @@ class _Pool:
         dispatcher = self._make_dispatcher(handler)
 
         def pre_body(ctx: HTTPReqCtx) -> BodyHandler | None:
-            dispatcher(ctx)
+            defer = getattr(ctx, "_defer_streaming_dispatch", None)
+            if defer is not None:
+                defer(dispatcher)
+            else:
+                dispatcher(ctx)
             return None  # we borrowed; selector free
 
         return pre_body

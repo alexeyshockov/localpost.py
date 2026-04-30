@@ -9,8 +9,9 @@ import socket
 import threading
 import time
 from collections import Counter
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
+from typing import cast
 
 import anyio
 import httpx
@@ -22,12 +23,14 @@ from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
     NativeResponse,
+    Request,
     RequestCancelled,
     Routes,
     ServerConfig,
     check_cancelled,
     http_server,
     route_match,
+    streaming_pool_handler,
     thread_pool_handler,
 )
 from localpost.http.server import RequestHandler
@@ -412,7 +415,61 @@ class TestSelectorThreadFastPath:
             await lt.stopped
 
 
+class _FakeConn:
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self.tracked = True
+
+
+class _FakeServer:
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop_tracking(self, conn: _FakeConn) -> None:
+        self.stopped = True
+        conn.tracked = False
+
+
+class _DeferringCtx:
+    def __init__(self, server: _FakeServer, conn: _FakeConn) -> None:
+        self._server = server
+        self._conn = conn
+        self.request = Request(method=b"POST", target=b"/upload", headers=[])
+        self.body = b""
+        self.response_status = None
+        self.attrs = {}
+        self.deferred: Callable[[], None] | None = None
+
+    def _defer_streaming_dispatch(self, dispatcher: Callable[[HTTPReqCtx], None]) -> None:
+        self.deferred = lambda: dispatcher(cast(HTTPReqCtx, self))
+
+
 class TestServiceRobustness:
+    async def test_streaming_pool_defers_dispatch_when_context_requests_it(self):
+        """Backends with parser callbacks can delay worker start until parsing unwinds."""
+        server = _FakeServer()
+        sock, peer = socket.socketpair()
+        ctx = _DeferringCtx(server, _FakeConn(sock))
+        ran = threading.Event()
+
+        def work(_ctx: HTTPReqCtx) -> None:
+            ran.set()
+
+        try:
+            async with streaming_pool_handler(work, max_concurrency=1) as wrapped:
+                assert wrapped(cast(HTTPReqCtx, ctx)) is None
+                assert ctx.deferred is not None
+                assert server.stopped is False
+                assert ran.wait(0.05) is False
+
+                ctx.deferred()
+                assert await to_thread.run_sync(lambda: ran.wait(2.0))
+                assert server.stopped is True
+                assert ctx._conn.tracked is False
+        finally:
+            sock.close()
+            peer.close()
+
     async def test_max_concurrency_caps_parallelism(self, free_port):
         """N+1 requests against max_concurrency=N: peak in-flight is exactly N."""
         in_flight = 0

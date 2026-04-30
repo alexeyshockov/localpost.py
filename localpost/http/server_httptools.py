@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import socket
 import time
-from collections.abc import Buffer, Iterator
+from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, final
@@ -168,6 +168,7 @@ class HTTPConnHttptools(BaseHTTPConn):
     _streaming_active: bool = False
     _streaming_body_buf: bytearray = field(default_factory=bytearray)
     _streaming_eom: bool = False
+    _deferred_streaming_dispatch: Callable[[], None] | None = None
 
     # Set when the response indicates ``Connection: close`` or the request lacked
     # keep-alive support — the conn is closed once finish_response returns.
@@ -334,13 +335,20 @@ class HTTPConnHttptools(BaseHTTPConn):
         try:
             self.parser.feed_data(data)
         except httptools.HttpParserUpgrade as e:
+            self._deferred_streaming_dispatch = None
             raise _ProtocolError(f"HTTP upgrade not supported: {e}") from e
         except httptools.HttpParserError as e:
+            self._deferred_streaming_dispatch = None
             raise _ProtocolError(str(e)) from e
         if self._body_too_large is not None:
             n = self._body_too_large
             self._body_too_large = None
+            self._deferred_streaming_dispatch = None
             raise BodyTooLarge(n)
+        if self._deferred_streaming_dispatch is not None:
+            dispatch = self._deferred_streaming_dispatch
+            self._deferred_streaming_dispatch = None
+            dispatch()
 
     def _loop(self) -> None:
         config = self.server.config
@@ -388,6 +396,7 @@ class HTTPConnHttptools(BaseHTTPConn):
         self._streaming_active = False
         self._streaming_body_buf = bytearray()
         self._streaming_eom = False
+        self._deferred_streaming_dispatch = None
         self.idle = True
         self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
@@ -456,6 +465,19 @@ class HTTPReqCtxHttptools:
             yield self
         finally:
             self._maybe_give_back()
+
+    def _defer_streaming_dispatch(self, dispatcher: Callable[[HTTPReqCtxHttptools], None]) -> None:
+        """Start a streaming worker after the current parser feed returns.
+
+        httptools fires callbacks from inside ``parser.feed_data``. Starting
+        the worker directly from ``on_headers_complete`` would let it call
+        ``ctx.receive`` and re-enter the parser while the selector thread is
+        still inside the same feed. Instead, mark streaming active now so any
+        body bytes from the current packet are buffered by ``on_body``, then
+        let ``_feed`` run the handoff once callbacks are done.
+        """
+        self._conn._streaming_active = True
+        self._conn._deferred_streaming_dispatch = lambda: dispatcher(self)
 
     def _maybe_give_back(self) -> None:
         if not self.borrowed:
