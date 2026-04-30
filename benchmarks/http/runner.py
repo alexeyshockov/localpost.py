@@ -23,7 +23,10 @@ Run from the repo root::
 
     just bench-http                                       # full matrix
     just bench-http --duration 5                          # quick sanity
-    just bench-http --stacks localpost_native,flask_gunicorn
+    just bench-http --group quick                         # ~4 stacks, fast PR check
+    just bench-http --filter app=flask                    # all Flask servers
+    just bench-http --filter 'backend=lp-*' --filter selectors=1
+    just bench-http --stacks localpost_native,flask_gunicorn  # exact list (escape hatch)
     just bench-http --pythons 3.13=.venv-bench/3.13/bin/python
 """
 
@@ -39,12 +42,14 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 from benchmarks.http._pythons import PYTHONS
+from benchmarks.http._render_html import render_html
 from benchmarks.http.scenarios import SCENARIOS, Scenario
+from benchmarks.http.stacks import GROUPS, Stack, select_stacks
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -54,26 +59,6 @@ RESULTS_DIR = Path(__file__).parent / "results"
 class PythonInterp:
     name: str
     bin: str
-
-
-STACKS: tuple[str, ...] = (
-    "localpost_native",
-    "localpost_native_s2",
-    "localpost_native_s4",
-    "localpost_httptools",
-    "localpost_httptools_s2",
-    "localpost_httptools_s4",
-    "localpost_httptools_inline",
-    "localpost_httptools_inline_s2",
-    "localpost_httptools_inline_s4",
-    "localpost_wsgi",
-    "localpost_flask",
-    "flask_cheroot",
-    "flask_gunicorn",
-    "flask_granian",
-    "starlette_uvicorn",
-    "starlette_granian",
-)
 
 
 @dataclass(slots=True)
@@ -88,6 +73,13 @@ class Cell:
     success_rate: float
     status_2xx: int
     status_other: int
+    # Dimensions copied from `Stack`, so results.json is self-describing
+    # for the HTML reporter.
+    app: str = ""
+    backend: str = ""
+    selectors: int = 1
+    pool: bool = True
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -98,6 +90,8 @@ class RunReport:
     python: str
     python_version: str
     cells: list[Cell]
+    selection: str = ""
+    """Human-readable description of the stack selection (group/filter/stacks)."""
 
 
 def _pick_port(base: int, offset: int) -> int:
@@ -188,18 +182,27 @@ def _parse_oha(raw: dict) -> dict:
     }
 
 
-def _run_cell(stack: str, scenario: Scenario, port: int, duration_s: int, python_bin: str) -> Cell | None:
-    proc = _spawn_stack(stack, port, python_bin)
+def _run_cell(stack: Stack, scenario: Scenario, port: int, duration_s: int, python_bin: str) -> Cell | None:
+    proc = _spawn_stack(stack.name, port, python_bin)
     try:
         if not _wait_ready(port):
             stderr = proc.stderr.read().decode() if proc.stderr else ""
-            print(f"  [{stack}/{scenario.name}] FAILED: not ready. stderr={stderr[-400:]!r}", file=sys.stderr)
+            print(f"  [{stack.name}/{scenario.name}] FAILED: not ready. stderr={stderr[-400:]!r}", file=sys.stderr)
             return None
         raw = _run_oha(scenario, port, duration_s)
         parsed = _parse_oha(raw)
-        return Cell(stack=stack, scenario=scenario.name, **parsed)
+        return Cell(
+            stack=stack.name,
+            scenario=scenario.name,
+            app=stack.app,
+            backend=stack.backend,
+            selectors=stack.selectors,
+            pool=stack.pool,
+            tags=sorted(stack.tags),
+            **parsed,
+        )
     except Exception as e:  # noqa: BLE001
-        print(f"  [{stack}/{scenario.name}] ERROR: {e}", file=sys.stderr)
+        print(f"  [{stack.name}/{scenario.name}] ERROR: {e}", file=sys.stderr)
         return None
     finally:
         _kill(proc)
@@ -207,8 +210,10 @@ def _run_cell(stack: str, scenario: Scenario, port: int, duration_s: int, python
 
 def _write_results(report: RunReport, target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "results.json").write_text(json.dumps(asdict(report), indent=2) + "\n")
+    payload = asdict(report)
+    (target_dir / "results.json").write_text(json.dumps(payload, indent=2) + "\n")
     (target_dir / "RESULTS.md").write_text(_render_markdown(report))
+    (target_dir / "RESULTS.html").write_text(render_html(payload))
 
 
 def _render_markdown(report: RunReport) -> str:
@@ -218,6 +223,8 @@ def _render_markdown(report: RunReport) -> str:
     out.append(f"- Host: `{report.host}`")
     out.append(f"- Python: `{report.python}` (`{report.python_version}`)")
     out.append(f"- Duration per cell: `{report.duration_s}s`")
+    if report.selection:
+        out.append(f"- Selection: {report.selection}")
     out.append("")
     out.append("> Numbers are single-process, single-host. Don't read absolute RPS as gospel —")
     out.append("> what matters is the relative ordering on the same machine in one run.")
@@ -275,10 +282,38 @@ def _timestamp_slug() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
 
 
+def _describe_selection(args: argparse.Namespace) -> str:
+    parts: list[str] = []
+    if args.stacks:
+        parts.append(f"stacks={args.stacks}")
+    if args.group:
+        parts.append(f"group={args.group}")
+    if args.filter:
+        parts.append("filter=" + ", ".join(args.filter))
+    return "; ".join(parts) if parts else "all"
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--duration", type=int, default=20, help="seconds per cell (default: 20)")
-    p.add_argument("--stacks", default="", help="comma-separated stack filter (default: all)")
+    p.add_argument(
+        "--stacks",
+        default="",
+        help="comma-separated stack name(s) — verbatim escape hatch (bypasses --group/--filter)",
+    )
+    p.add_argument(
+        "--group",
+        default="",
+        help=f"named preset; one of: {', '.join(sorted(GROUPS))}",
+    )
+    p.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        metavar="KEY=VAL",
+        help="dimension filter, e.g. 'app=flask', 'backend=lp-*', 'selectors=1', 'app!=starlette'. "
+        "Repeatable (filters AND together). Comma-separated values inside one key are OR.",
+    )
     p.add_argument("--scenarios", default="", help="comma-separated scenario filter (default: all)")
     p.add_argument(
         "--pythons",
@@ -293,10 +328,17 @@ def main() -> int:
         print("error: 'oha' not found on PATH. Install via 'brew install oha'.", file=sys.stderr)
         return 2
 
-    stacks = tuple(s for s in (args.stacks.split(",") if args.stacks else STACKS) if s)
-    unknown = [s for s in stacks if s not in STACKS]
-    if unknown:
-        print(f"error: unknown stack(s): {unknown}. Known: {list(STACKS)}", file=sys.stderr)
+    try:
+        stacks = select_stacks(
+            names=tuple(s for s in args.stacks.split(",") if s) if args.stacks else None,
+            group=args.group or None,
+            filters=args.filter,
+        )
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not stacks:
+        print("error: no stacks selected by the given group/filter.", file=sys.stderr)
         return 2
 
     scenarios = tuple(s for s in SCENARIOS if not args.scenarios or s.name in args.scenarios.split(","))
@@ -317,11 +359,13 @@ def main() -> int:
     run_dir = RESULTS_DIR / _timestamp_slug()
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
     host = f"{platform.system()} {platform.release()} {platform.machine()}"
+    selection = _describe_selection(args)
 
     print(
         f"Running {len(pythons)} python(s) x {len(stacks)} stack(s) "
         f"x {len(scenarios)} scenario(s) @ {args.duration}s each."
     )
+    print(f"Selection: {selection}")
     print(f"Results dir: {run_dir}")
 
     any_cells = False
@@ -336,7 +380,10 @@ def main() -> int:
         for stack_idx, stack in enumerate(stacks):
             for scen_idx, scenario in enumerate(scenarios):
                 port = _pick_port(args.port_base, stack_idx * len(SCENARIOS) + scen_idx)
-                print(f"  [{py.name}/{stack}/{scenario.name}] port={port} c={scenario.concurrency} ...", flush=True)
+                print(
+                    f"  [{py.name}/{stack.name}/{scenario.name}] port={port} c={scenario.concurrency} ...",
+                    flush=True,
+                )
                 cell = _run_cell(stack, scenario, port, args.duration, py.bin)
                 if cell is not None:
                     print(
@@ -352,6 +399,7 @@ def main() -> int:
             python=py.name,
             python_version=full_version,
             cells=cells,
+            selection=selection,
         )
         target_dir = run_dir / py.name
         _write_results(report, target_dir)

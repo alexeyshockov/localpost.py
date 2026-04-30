@@ -61,6 +61,18 @@ bench-http *args:
     uv run --group bench --group dev-http --group dev-hosting-services \
         python -m benchmarks.http.runner {{ args }}
 
+[doc("Quick PR-time HTTP bench: representative subset of stacks")]
+bench-http-quick *args:
+    just bench-http --group quick --duration 10 {{ args }}
+
+[doc("Compare Flask across all server backends")]
+bench-http-flask *args:
+    just bench-http --filter app=flask {{ args }}
+
+[doc("Compare LocalPost variants only (h11/httptools, selectors, inline)")]
+bench-http-localpost *args:
+    just bench-http --group localpost {{ args }}
+
 [doc("Run micro-benchmarks (router, URI template) via pytest-benchmark")]
 bench-micro *args:
     uv run --group bench pytest benchmarks/micro/ \
