@@ -4,6 +4,7 @@ import sys
 from collections.abc import Buffer, Callable
 from io import RawIOBase
 from typing import Any, final, override
+from urllib.parse import unquote_to_bytes
 from wsgiref.types import WSGIApplication
 
 from localpost.http._types import Response as _NativeResponse
@@ -128,11 +129,12 @@ def _wsgi_write_deprecated(_: bytes) -> None:
 
 def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
     request = ctx.request
-    target = request.target.decode("iso-8859-1")
-    if "?" in target:
-        path, query_string = target.split("?", 1)
+    if b"?" in request.target:
+        raw_path, raw_query_string = request.target.split(b"?", 1)
     else:
-        path, query_string = target, ""
+        raw_path, raw_query_string = request.target, b""
+    path = unquote_to_bytes(raw_path).decode("iso-8859-1")
+    query_string = raw_query_string.decode("iso-8859-1")
 
     environ: dict[str, Any] = {
         "REQUEST_METHOD": request.method.decode("ascii"),

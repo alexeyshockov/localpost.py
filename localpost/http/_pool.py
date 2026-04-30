@@ -35,8 +35,14 @@ from anyio import (
 )
 
 from localpost import threadtools
-from localpost.http._base import SERVICE_UNAVAILABLE_BODY, SERVICE_UNAVAILABLE_RESPONSE
+from localpost.http._base import (
+    PAYLOAD_TOO_LARGE_BODY,
+    PAYLOAD_TOO_LARGE_RESPONSE,
+    SERVICE_UNAVAILABLE_BODY,
+    SERVICE_UNAVAILABLE_RESPONSE,
+)
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
+from localpost.http._types import BodyTooLarge
 from localpost.http.config import LOGGER_NAME
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
 
@@ -160,6 +166,8 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
                             # Handler bailed cleanly. Connection state is uncertain — close.
                             with suppress(Exception):
                                 ctx._conn.close()
+                        except BodyTooLarge:
+                            _emit_body_too_large(ctx)
                         except Exception:
                             logger.exception(
                                 "Pool handler raised for %s %r",
@@ -197,6 +205,16 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
         finally:
             shutdown_event.set()
             tx.close()
+
+
+def _emit_body_too_large(ctx: HTTPReqCtx) -> None:
+    """Map worker-side body-limit failures to 413 instead of generic 500."""
+    if ctx.response_status is None:
+        with suppress(Exception):
+            ctx.complete(PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_BODY)
+            return
+    with suppress(Exception):
+        ctx._conn.close()
 
 
 # --- Public wrappers ----------------------------------------------------

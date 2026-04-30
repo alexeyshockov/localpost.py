@@ -31,6 +31,7 @@ from localpost.http import (
     ServerConfig,
     httptools_server,
 )
+from tests.http._helpers import drain_socket
 
 pytestmark = pytest.mark.anyio
 
@@ -536,6 +537,36 @@ class TestStreamingRoutes:
         assert captured["body"] == b"a" * 1024
         # Streaming handler runs on a worker thread, not the main thread.
         assert captured["thread"] != threading.get_ident()
+
+    async def test_streaming_route_oversized_chunked_body_returns_413(self, free_port, http_backend):
+        app = HttpApp()
+
+        @app.post("/upload", buffer_body=False)
+        def upload(ctx: HTTPReqCtx):
+            while ctx.receive(8192):
+                pass
+            return "ok"
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, max_body_size=8)
+        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
+            await lt.started
+            await _wait_ready(free_port)
+
+            def hit() -> bytes:
+                with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as sock:
+                    sock.sendall(
+                        b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        b"10\r\n"
+                        + (b"x" * 16)
+                        + b"\r\n0\r\n\r\n"
+                    )
+                    return drain_socket(sock, deadline=2.0)
+
+            response = await to_thread.run_sync(hit)
+            assert b"HTTP/1.1 413" in response
+            assert b"Payload Too Large" in response
+            lt.shutdown()
+            await lt.stopped
 
     async def test_streaming_route_body_across_multiple_recvs_httptools(self, free_port):
         """The client sends headers in one TCP write, body in subsequent

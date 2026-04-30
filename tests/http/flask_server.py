@@ -42,6 +42,21 @@ class TestFlaskHandler:
         assert resp.status_code == 200
         assert resp.text == "hi alice"
 
+    def test_percent_encoded_path_parameters(self, serve_in_thread):
+        app = Flask(__name__)
+
+        @app.route("/hello/<name>")
+        def hello(name: str):
+            return f"hi {name}"
+
+        assert hello
+
+        with serve_in_thread(flask_handler(app)) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/hello/al%20ice", timeout=5)
+
+        assert resp.status_code == 200
+        assert resp.text == "hi al ice"
+
     def test_post_body(self, serve_in_thread):
         app = Flask(__name__)
         captured: dict = {}

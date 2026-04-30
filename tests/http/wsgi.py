@@ -69,6 +69,20 @@ class TestWrapWSGI:
         assert seen["query"] == "q=1"
         assert seen["content_type"] == "application/json"
 
+    def test_environ_path_info_is_percent_decoded(self, serve_in_thread):
+        seen = {}
+
+        def app(environ, start_response):
+            seen["path"] = environ["PATH_INFO"]
+            seen["query"] = environ["QUERY_STRING"]
+            start_response("200 OK", [("Content-Type", "text/plain"), ("Content-Length", "2")])
+            return [b"ok"]
+
+        with serve_in_thread(wrap_wsgi(app)) as port:
+            httpx.get(f"http://127.0.0.1:{port}/users/al%20ice?q=a%20b", timeout=5)
+
+        assert seen == {"path": "/users/al ice", "query": "q=a%20b"}
+
     def test_request_body_streaming(self, serve_in_thread):
         received = bytearray()
 
