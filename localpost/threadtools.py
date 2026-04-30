@@ -204,6 +204,8 @@ class ChannelState[T]:
     open_send_channels: int
     open_receive_channels: int
     waiting_receivers: int
+    pending_handoffs: int
+    items_consumed: int
     _lock: CancellableLock
     not_empty: threading.Condition
     not_full: threading.Condition
@@ -215,12 +217,20 @@ class ChannelState[T]:
         self.capacity = capacity
         """
         None: unbounded
-        0: rendezvous (at most 1 item in-flight, put() blocks until a receiver consumes the item)
+        0: rendezvous — put blocks until its own item is consumed by a receiver; put_nowait succeeds
+            only if an unclaimed waiting receiver is available. With N waiting receivers, up to N
+            puts can be in flight concurrently.
         Positive int: bounded (put blocks until len(buffer) < capacity)
         """
         self.open_send_channels = 0
         self.open_receive_channels = 0
         self.waiting_receivers = 0
+        # Rendezvous bookkeeping (capacity=0 only). ``pending_handoffs`` is a budget counter for
+        # buffered items already paired with a waiting receiver; ``items_consumed`` is monotonic
+        # and lets a blocking ``put`` detect consumption of its own item even when the buffer
+        # holds other in-flight items.
+        self.pending_handoffs = 0
+        self.items_consumed = 0
         self._lock = CancellableLock(threading.RLock())
         self.not_empty = cancellable_condition(self._lock)
         self.not_full = cancellable_condition(self._lock)
@@ -229,14 +239,16 @@ class ChannelState[T]:
     def can_put(self) -> bool:
         if self.open_receive_channels == 0:  # TODO Make this state permanent
             raise ClosedResourceError("no more receivers")
-        return self.capacity is None or len(self.buffer) < max(self.capacity, 1)
+        if self.capacity == 0:
+            return self.waiting_receivers > self.pending_handoffs or len(self.buffer) == 0
+        return self.capacity is None or len(self.buffer) < self.capacity
 
     @property
     def can_put_nowait(self) -> bool:
         if self.open_receive_channels == 0:  # TODO Make this state permanent
             raise ClosedResourceError("no more receivers")
         if self.capacity == 0:
-            return len(self.buffer) == 0 and self.waiting_receivers > 0
+            return self.waiting_receivers > self.pending_handoffs
         return self.capacity is None or len(self.buffer) < self.capacity
 
     def __enter__(self) -> Self:
@@ -272,11 +284,16 @@ class SendChannel[T](BaseSendChannel[T]):
             if not state.can_put_nowait:
                 raise WouldBlock
             state.buffer.append(item)
+            if state.capacity == 0:
+                # ``can_put_nowait`` already gated on ``waiting_receivers > pending_handoffs``,
+                # so this is always a real claim.
+                state.pending_handoffs += 1
             state.not_empty.notify()
 
     @override
     def put(self, item: T, /) -> None:
         state = self._state
+        my_target = 0
         # Phase 1: wait for space in the buffer.
         # Body of ``put_nowait`` is inlined here to avoid re-entering the lock
         # and to skip the ``WouldBlock`` exception on the contended path.
@@ -287,17 +304,24 @@ class SendChannel[T](BaseSendChannel[T]):
                     raise ClosedResourceError("send channel has been closed")
                 if state.can_put:
                     state.buffer.append(item)
+                    if state.capacity == 0:
+                        if state.waiting_receivers > state.pending_handoffs:
+                            state.pending_handoffs += 1
+                        # Snapshot a target for Phase 2: consumption of *our* item bumps
+                        # ``items_consumed`` to (at least) this value, regardless of any other
+                        # in-flight items the buffer holds.
+                        my_target = state.items_consumed + len(state.buffer)
                     state.not_empty.notify()
                     break
                 state.not_full.wait()
 
-        # Phase 2 (rendezvous only): wait until the item is consumed
+        # Phase 2 (rendezvous only): wait until *our* item is consumed
         if state.capacity == 0:
             while True:
                 with state:
                     if self._closed:
                         raise ClosedResourceError("send channel has been closed")
-                    if len(state.buffer) == 0:
+                    if state.items_consumed >= my_target:
                         return  # Consumed
                     if state.open_receive_channels == 0:
                         return  # No receivers left
@@ -335,6 +359,10 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
             with state:
                 if state.buffer:
                     item = state.buffer.popleft()
+                    if state.capacity == 0:
+                        state.items_consumed += 1
+                        if state.pending_handoffs > 0:
+                            state.pending_handoffs -= 1
                     state.not_full.notify()
                     return item
                 if state.open_send_channels == 0:

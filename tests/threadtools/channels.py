@@ -1,10 +1,12 @@
 import threading
 import time
+
 import pytest
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from localpost import threadtools
 from localpost.threadtools import Channel, SendChannel
+
 
 @pytest.fixture
 def no_anyio():
@@ -14,6 +16,7 @@ def no_anyio():
         yield
     finally:
         threadtools.check_cancelled = original_check_cancelled
+
 
 def test_basic_send_receive(no_anyio):
     """Test basic send and receive operations."""
@@ -267,6 +270,190 @@ def test_rendezvous_put_blocks_until_receiver_consumes(no_anyio):
         receiver.close()
 
 
+def _wait_for(predicate, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.001)
+    return predicate()
+
+
+def test_rendezvous_put_nowait_with_multiple_receivers(no_anyio):
+    """N concurrent put_nowait calls succeed when N receivers are waiting."""
+    n = 4
+    sender, receiver = Channel.create(capacity=0)
+    receivers = [receiver] + [receiver.clone() for _ in range(n - 1)]
+    received: list[int] = []
+    received_lock = threading.Lock()
+
+    def receive(r):
+        try:
+            value = r.get()
+        finally:
+            r.close()
+        with received_lock:
+            received.append(value)
+
+    threads = [threading.Thread(target=receive, args=(r,)) for r in receivers]
+    for t in threads:
+        t.start()
+
+    try:
+        assert _wait_for(lambda: sender._state.waiting_receivers == n), (
+            f"only {sender._state.waiting_receivers} receivers waiting"
+        )
+
+        for i in range(n):
+            sender.put_nowait(i)
+
+        with pytest.raises(WouldBlock):
+            sender.put_nowait(n)
+
+        for t in threads:
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+        assert sorted(received) == list(range(n))
+    finally:
+        sender.close()
+
+
+def test_rendezvous_put_nowait_decrements_after_consume(no_anyio):
+    """pending_handoffs returns to 0 after each successful handoff."""
+    sender, receiver = Channel.create(capacity=0)
+
+    def receive_one(r, sink: list[str]) -> None:
+        sink.append(r.get())
+
+    try:
+        for round_idx in range(2):
+            received: list[str] = []
+            t = threading.Thread(target=receive_one, args=(receiver, received))
+            t.start()
+            assert _wait_for(lambda: sender._state.waiting_receivers == 1)
+
+            sender.put_nowait(f"msg-{round_idx}")
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+            assert received == [f"msg-{round_idx}"]
+            assert sender._state.pending_handoffs == 0
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_rendezvous_concurrent_blocking_puts_pair_with_receivers(no_anyio):
+    """N concurrent put() calls all return when N receivers are waiting."""
+    n = 4
+    sender, receiver = Channel.create(capacity=0)
+    senders = [sender] + [sender.clone() for _ in range(n - 1)]
+    receivers = [receiver] + [receiver.clone() for _ in range(n - 1)]
+
+    received: list[int] = []
+    received_lock = threading.Lock()
+    sends_done = threading.Event()
+    sends_completed = 0
+    sends_lock = threading.Lock()
+
+    def receive(r):
+        try:
+            value = r.get()
+            with received_lock:
+                received.append(value)
+        finally:
+            r.close()
+
+    def send(s, value: int):
+        try:
+            s.put(value)
+        finally:
+            s.close()
+        nonlocal sends_completed
+        with sends_lock:
+            sends_completed += 1
+            if sends_completed == n:
+                sends_done.set()
+
+    receiver_threads = [threading.Thread(target=receive, args=(r,)) for r in receivers]
+    for t in receiver_threads:
+        t.start()
+
+    try:
+        assert _wait_for(lambda: sender._state.waiting_receivers == n)
+
+        sender_threads = [threading.Thread(target=send, args=(s, i)) for i, s in enumerate(senders)]
+        for t in sender_threads:
+            t.start()
+
+        assert sends_done.wait(timeout=2.0), "blocking puts did not all return"
+        for t in sender_threads:
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+        for t in receiver_threads:
+            t.join(timeout=1.0)
+            assert not t.is_alive()
+
+        assert sorted(received) == list(range(n))
+    finally:
+        for s in senders:
+            try:
+                s.close()
+            except ClosedResourceError:
+                pass
+
+
+def test_rendezvous_put_returns_when_its_own_item_consumed(no_anyio):
+    """Blocking put waits for *its* item, not just any buffer drain."""
+    sender, receiver = Channel.create(capacity=0)
+    sender_b = sender.clone()
+    received: list[str] = []
+    b_returned = threading.Event()
+
+    def receive_one():
+        received.append(receiver.get())
+
+    receiver_thread = threading.Thread(target=receive_one)
+    receiver_thread.start()
+
+    try:
+        assert _wait_for(lambda: sender._state.waiting_receivers == 1)
+
+        # "a" claims the only waiting receiver.
+        sender.put_nowait("a")
+
+        def send_b():
+            sender_b.put("b")
+            b_returned.set()
+
+        sender_b_thread = threading.Thread(target=send_b)
+        sender_b_thread.start()
+
+        # Receiver pops "a" first (FIFO). Sender B should still be in Phase 2
+        # because its own item ("b") has not been consumed yet.
+        receiver_thread.join(timeout=1.0)
+        assert not receiver_thread.is_alive()
+        assert received == ["a"]
+
+        time.sleep(0.05)
+        assert not b_returned.is_set(), "put('b') returned before 'b' was consumed"
+
+        # New receiver consumes "b" — now B can return.
+        received_b: list[str] = []
+        receiver_b_thread = threading.Thread(target=lambda: received_b.append(receiver.get()))
+        receiver_b_thread.start()
+        receiver_b_thread.join(timeout=1.0)
+        assert not receiver_b_thread.is_alive()
+        assert received_b == ["b"]
+
+        assert b_returned.wait(timeout=1.0), "put('b') did not return after 'b' was consumed"
+        sender_b_thread.join(timeout=1.0)
+        assert not sender_b_thread.is_alive()
+    finally:
+        sender.close()
+        sender_b.close()
+        receiver.close()
+
+
 def test_concurrent_stress(no_anyio):
     """Stress test with many concurrent senders and receivers."""
     num_senders = 5
@@ -327,10 +514,7 @@ def test_concurrent_stress(no_anyio):
     assert len(received) == num_senders * messages_per_sender
 
     # Verify all messages are unique and accounted for
-    expected = []
-    for sender_id in range(num_senders):
-        for i in range(messages_per_sender):
-            expected.append(sender_id * 1000 + i)
+    expected = [sender_id * 1000 + i for sender_id in range(num_senders) for i in range(messages_per_sender)]
 
     assert sorted(received) == sorted(expected)
 
