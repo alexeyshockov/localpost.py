@@ -1,21 +1,30 @@
 """Macro HTTP benchmark runner.
 
-For each (stack, scenario) cell:
-  1. Boot the stack as a subprocess (``python -m benchmarks.http.apps.<stack>``).
+For each (python, stack, scenario) cell:
+  1. Boot the stack as a subprocess (``<python> -m benchmarks.http.apps.<stack>``).
   2. Poll ``/ping`` until ready (or fail fast).
   3. Run ``oha --json -z <duration>s -c <conc> ...``.
   4. Parse JSON; record RPS + p50/p90/p99 + status histogram.
   5. SIGTERM the stack, wait, move on.
 
 Output:
-  results/latest.json — raw cells.
-  results/RESULTS.md  — markdown summary, one table per scenario.
+  results/<UTC-timestamp>/<python-label>/results.json — raw cells.
+  results/<UTC-timestamp>/<python-label>/RESULTS.md  — markdown summary, one
+                                                        table per scenario.
+
+Each Python interpreter gets its own subdirectory; cross-interpreter numbers
+are intentionally not merged (different runtimes are not directly comparable).
+
+By default the runner targets every interpreter declared in
+``benchmarks.http._pythons.PYTHONS``. Override with ``--pythons`` for ad-hoc
+runs against a custom interpreter.
 
 Run from the repo root::
 
-    just bench-http                              # full matrix
-    just bench-http --duration 5                 # quick sanity
+    just bench-http                                       # full matrix
+    just bench-http --duration 5                          # quick sanity
     just bench-http --stacks localpost_native,flask_gunicorn
+    just bench-http --pythons 3.13=.venv-bench/3.13/bin/python
 """
 
 from __future__ import annotations
@@ -34,10 +43,18 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from benchmarks.http._pythons import PYTHONS
 from benchmarks.http.scenarios import SCENARIOS, Scenario
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = Path(__file__).parent / "results"
+
+
+@dataclass(frozen=True, slots=True)
+class PythonInterp:
+    name: str
+    bin: str
+
 
 STACKS: tuple[str, ...] = (
     "localpost_native",
@@ -79,6 +96,7 @@ class RunReport:
     duration_s: int
     host: str
     python: str
+    python_version: str
     cells: list[Cell]
 
 
@@ -99,9 +117,9 @@ def _wait_ready(port: int, deadline_s: float = 10.0) -> bool:
     return False
 
 
-def _spawn_stack(stack: str, port: int) -> subprocess.Popen:
+def _spawn_stack(stack: str, port: int, python_bin: str) -> subprocess.Popen:
     return subprocess.Popen(  # noqa: S603
-        [sys.executable, "-m", f"benchmarks.http.apps.{stack}", "--port", str(port)],
+        [python_bin, "-m", f"benchmarks.http.apps.{stack}", "--port", str(port)],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -170,8 +188,8 @@ def _parse_oha(raw: dict) -> dict:
     }
 
 
-def _run_cell(stack: str, scenario: Scenario, port: int, duration_s: int) -> Cell | None:
-    proc = _spawn_stack(stack, port)
+def _run_cell(stack: str, scenario: Scenario, port: int, duration_s: int, python_bin: str) -> Cell | None:
+    proc = _spawn_stack(stack, port, python_bin)
     try:
         if not _wait_ready(port):
             stderr = proc.stderr.read().decode() if proc.stderr else ""
@@ -187,18 +205,18 @@ def _run_cell(stack: str, scenario: Scenario, port: int, duration_s: int) -> Cel
         _kill(proc)
 
 
-def _write_results(report: RunReport) -> None:
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (RESULTS_DIR / "latest.json").write_text(json.dumps(asdict(report), indent=2) + "\n")
-    (RESULTS_DIR / "RESULTS.md").write_text(_render_markdown(report))
+def _write_results(report: RunReport, target_dir: Path) -> None:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "results.json").write_text(json.dumps(asdict(report), indent=2) + "\n")
+    (target_dir / "RESULTS.md").write_text(_render_markdown(report))
 
 
 def _render_markdown(report: RunReport) -> str:
     out: list[str] = []
-    out.append("# HTTP benchmark results\n")
+    out.append(f"# HTTP benchmark results — Python {report.python}\n")
     out.append(f"- Run at: `{report.started_at}`")
     out.append(f"- Host: `{report.host}`")
-    out.append(f"- Python: `{report.python}`")
+    out.append(f"- Python: `{report.python}` (`{report.python_version}`)")
     out.append(f"- Duration per cell: `{report.duration_s}s`")
     out.append("")
     out.append("> Numbers are single-process, single-host. Don't read absolute RPS as gospel —")
@@ -223,11 +241,51 @@ def _render_markdown(report: RunReport) -> str:
     return "\n".join(out)
 
 
+_PROBE_CODE = (
+    "import sys;"
+    "gil=getattr(sys,'_is_gil_enabled',lambda:True)();"
+    "print(f'{sys.version_info.major}.{sys.version_info.minor}{\"\" if gil else \"t\"}');"
+    "print(sys.version.split()[0])"
+)
+
+
+def _probe_python(python_bin: str) -> tuple[str, str]:
+    """Return (short label like ``3.14t``, full ``X.Y.Z`` version)."""
+    out = subprocess.check_output([python_bin, "-c", _PROBE_CODE], text=True).strip().splitlines()  # noqa: S603
+    return out[0], out[1]
+
+
+def _parse_pythons(arg: str) -> list[PythonInterp]:
+    """Parse ``name=path,name=path`` (or fall back to the bench matrix)."""
+    if not arg:
+        return [PythonInterp(name=p.name, bin=p.bin) for p in PYTHONS]
+    pythons: list[PythonInterp] = []
+    for spec in arg.split(","):
+        spec = spec.strip()
+        if not spec:
+            continue
+        if "=" not in spec:
+            raise ValueError(f"--pythons entry must be name=path, got: {spec!r}")
+        name, _, path = spec.partition("=")
+        pythons.append(PythonInterp(name=name.strip(), bin=path.strip()))
+    return pythons
+
+
+def _timestamp_slug() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%S")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--duration", type=int, default=20, help="seconds per cell (default: 20)")
     p.add_argument("--stacks", default="", help="comma-separated stack filter (default: all)")
     p.add_argument("--scenarios", default="", help="comma-separated scenario filter (default: all)")
+    p.add_argument(
+        "--pythons",
+        default="",
+        help="comma-separated name=path pairs to override the bench matrix, e.g. "
+        "'3.13=.venv-bench/3.13/bin/python' (default: every entry in benchmarks.http._pythons.PYTHONS)",
+    )
     p.add_argument("--port-base", type=int, default=18800)
     args = p.parse_args()
 
@@ -246,31 +304,62 @@ def main() -> int:
         print("error: no scenarios selected.", file=sys.stderr)
         return 2
 
-    cells: list[Cell] = []
-    started_at = datetime.now(UTC).isoformat(timespec="seconds")
-    print(f"Running {len(stacks)} stack(s) x {len(scenarios)} scenario(s) @ {args.duration}s each.")
-    for stack_idx, stack in enumerate(stacks):
-        for scen_idx, scenario in enumerate(scenarios):
-            port = _pick_port(args.port_base, stack_idx * len(SCENARIOS) + scen_idx)
-            print(f"  [{stack}/{scenario.name}] port={port} c={scenario.concurrency} ...", flush=True)
-            cell = _run_cell(stack, scenario, port, args.duration)
-            if cell is not None:
-                print(
-                    f"    rps={cell.rps:,.0f}  p50={cell.p50_ms:.2f}ms  p99={cell.p99_ms:.2f}ms  "
-                    f"({cell.status_2xx} 2xx / {cell.status_other} other)"
-                )
-                cells.append(cell)
+    try:
+        pythons = _parse_pythons(args.pythons)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    for py in pythons:
+        if not Path(py.bin).exists():
+            print(f"error: interpreter not found: {py.bin}", file=sys.stderr)
+            return 2
 
-    report = RunReport(
-        started_at=started_at,
-        duration_s=args.duration,
-        host=f"{platform.system()} {platform.release()} {platform.machine()}",
-        python=sys.version.split()[0],
-        cells=cells,
+    run_dir = RESULTS_DIR / _timestamp_slug()
+    started_at = datetime.now(UTC).isoformat(timespec="seconds")
+    host = f"{platform.system()} {platform.release()} {platform.machine()}"
+
+    print(
+        f"Running {len(pythons)} python(s) x {len(stacks)} stack(s) "
+        f"x {len(scenarios)} scenario(s) @ {args.duration}s each."
     )
-    _write_results(report)
-    print(f"\nWrote {RESULTS_DIR / 'RESULTS.md'} and {RESULTS_DIR / 'latest.json'}.")
-    return 0 if cells else 1
+    print(f"Results dir: {run_dir}")
+
+    any_cells = False
+    for py in pythons:
+        try:
+            _, full_version = _probe_python(py.bin)
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"error: cannot probe {py.bin}: {e}", file=sys.stderr)
+            continue
+        print(f"\n=== python={py.name} ({full_version}) ===")
+        cells: list[Cell] = []
+        for stack_idx, stack in enumerate(stacks):
+            for scen_idx, scenario in enumerate(scenarios):
+                port = _pick_port(args.port_base, stack_idx * len(SCENARIOS) + scen_idx)
+                print(f"  [{py.name}/{stack}/{scenario.name}] port={port} c={scenario.concurrency} ...", flush=True)
+                cell = _run_cell(stack, scenario, port, args.duration, py.bin)
+                if cell is not None:
+                    print(
+                        f"    rps={cell.rps:,.0f}  p50={cell.p50_ms:.2f}ms  p99={cell.p99_ms:.2f}ms  "
+                        f"({cell.status_2xx} 2xx / {cell.status_other} other)"
+                    )
+                    cells.append(cell)
+
+        report = RunReport(
+            started_at=started_at,
+            duration_s=args.duration,
+            host=host,
+            python=py.name,
+            python_version=full_version,
+            cells=cells,
+        )
+        target_dir = run_dir / py.name
+        _write_results(report, target_dir)
+        print(f"  wrote {target_dir / 'RESULTS.md'}")
+        if cells:
+            any_cells = True
+
+    return 0 if any_cells else 1
 
 
 if __name__ == "__main__":

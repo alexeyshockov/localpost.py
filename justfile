@@ -47,6 +47,15 @@ unit-tests:
 integration-tests:
     pytest -m "integration" -n auto -v
 
+[doc("Set up all venvs in the bench matrix (.venv-bench/<name>)")]
+bench-deps:
+    uv run python -m benchmarks.http._setup
+
+[doc("Refresh lock and re-sync all bench-matrix venvs")]
+bench-deps-upgrade:
+    uv lock --upgrade
+    uv run python -m benchmarks.http._setup
+
 [doc("Run macro HTTP benchmarks (oha-driven, requires `brew install oha`)")]
 bench-http *args:
     uv run --group bench --group dev-http --group dev-hosting-services \
