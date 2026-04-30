@@ -15,7 +15,7 @@ from contextlib import (
 from dataclasses import dataclass, field
 from dataclasses import dataclass as define
 from functools import cached_property, wraps
-from typing import Any, ClassVar, Literal, final, overload
+from typing import Any, ClassVar, Literal, final, get_type_hints, overload
 
 from anyio import CancelScope, CapacityLimiter, create_task_group, get_cancelled_exc_class, to_thread
 from anyio.abc import TaskGroup
@@ -303,6 +303,11 @@ def service[**P]() -> Callable[[Callable[P, Any]], Callable[P, _ResolvedService]
 
 def service(target: Callable[..., Any] | None = None):
     def decorator(func: Callable[..., Any]) -> Callable[..., _ResolvedService]:
+        if inspect.isasyncgenfunction(func):
+            return _service_cm(func)
+        if _is_direct_service(func):
+            return _service_direct(func)
+
         @wraps(func)
         def wrapper(*args, **kwargs):
             raw_svc_f = func(*args, **kwargs)
@@ -315,11 +320,56 @@ def service(target: Callable[..., Any] | None = None):
                     await to_thread.run_sync(raw_svc_f, lt, limiter=limiter)
             return _ResolvedService(svc_f)
 
-        if inspect.isasyncgenfunction(func):
-            return _service_cm(func)
         return wrapper
 
     return decorator(target) if callable(target) else decorator
+
+
+def _is_direct_service(func: Callable[..., Any]) -> bool:
+    """Return True for ``@service`` applied directly to ``svc(lt)``."""
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.kind
+        in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+    ]
+    if len(params) != 1 or params[0].default is not inspect.Parameter.empty:
+        return False
+
+    annotation = params[0].annotation
+    if annotation is ServiceLifetime:
+        return True
+
+    try:
+        return get_type_hints(func).get(params[0].name) is ServiceLifetime
+    except (NameError, TypeError, AttributeError):
+        return False
+
+
+def _service_direct(func: Callable[[ServiceLifetime], Any]) -> Callable[[], _ResolvedService]:
+    """Decorator adapter for direct async/sync service functions."""
+
+    @wraps(func)
+    def wrapper() -> _ResolvedService:
+        if is_async_callable(func):
+            return _ResolvedService(func)
+
+        limiter = CapacityLimiter(1)
+
+        async def svc_f(lt: ServiceLifetime) -> None:
+            await to_thread.run_sync(func, lt, limiter=limiter)
+
+        return _ResolvedService(svc_f)
+
+    return wrapper
 
 
 def _service_cm(func: Callable[..., AsyncGenerator]):

@@ -1,4 +1,5 @@
-import anyio
+import threading
+
 import pytest
 
 from localpost.hosting import ServiceLifetime, service, serve
@@ -24,6 +25,26 @@ async def test_service_decorator_async():
     assert lt.exit_code == 0
 
 
+async def test_service_decorator_direct_async():
+    stopped = False
+
+    @service
+    async def direct(lt: ServiceLifetime):
+        nonlocal stopped
+        lt.set_started()
+        await lt.shutting_down.wait()
+        stopped = True
+
+    resolved = direct()
+    async with serve(resolved) as lt:
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert stopped
+    assert lt.exit_code == 0
+
+
 async def test_service_decorator_sync():
     work_done = False
 
@@ -44,6 +65,27 @@ async def test_service_decorator_sync():
         await lt.stopped
 
     assert work_done
+
+
+async def test_service_decorator_direct_sync():
+    worker_thread_id = None
+
+    @service
+    def direct_sync(lt: ServiceLifetime):
+        nonlocal worker_thread_id
+        worker_thread_id = threading.get_ident()
+        lt.set_started()
+        lt.view.wait_shutting_down()
+
+    resolved = direct_sync()
+    async with serve(resolved) as lt:
+        host_thread_id = threading.get_ident()
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert worker_thread_id is not None
+    assert worker_thread_id != host_thread_id
 
 
 async def test_service_decorator_context_manager():

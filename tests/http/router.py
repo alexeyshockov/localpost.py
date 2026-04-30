@@ -227,6 +227,42 @@ class TestMethodDispatch:
             resp = httpx.request("PATCH", f"http://127.0.0.1:{port}/r", timeout=5)
         assert resp.status_code == 405
 
+    def test_overlapping_templates_scan_for_matching_method(self, serve_in_thread):
+        routes = Routes()
+        routes.get("/users/{id}")(_ok_handler(b"get"))
+        routes.post("/users/{name}")(_ok_handler(b"post"))
+        router = routes.build()
+
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.post(f"http://127.0.0.1:{port}/users/42", timeout=5)
+
+        assert resp.status_code == 200
+        assert resp.text == "post"
+
+    def test_overlapping_templates_no_matching_method_returns_405(self, serve_in_thread):
+        routes = Routes()
+        routes.get("/users/{id}")(_ok_handler(b"get"))
+        routes.post("/users/{name}")(_ok_handler(b"post"))
+        router = routes.build()
+
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.patch(f"http://127.0.0.1:{port}/users/42", timeout=5)
+
+        assert resp.status_code == 405
+
+    def test_overlapping_templates_405_allow_header_is_sorted_union(self, serve_in_thread):
+        routes = Routes()
+        routes.post("/users/{name}")(_ok_handler(b"post"))
+        routes.delete("/users/{id}")(_ok_handler(b"delete"))
+        routes.get("/users/{slug}")(_ok_handler(b"get"))
+        router = routes.build()
+
+        with serve_in_thread(router.as_handler()) as port:
+            resp = httpx.patch(f"http://127.0.0.1:{port}/users/42", timeout=5)
+
+        assert resp.status_code == 405
+        assert resp.headers.get("allow") == "DELETE, GET, POST"
+
 
 class TestPathVariableEncoding:
     def test_url_encoded_path_arg_passed_through(self, serve_in_thread):

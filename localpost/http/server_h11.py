@@ -66,6 +66,10 @@ def _content_length(headers) -> int | None:
     return None
 
 
+def _has_response_framing(headers) -> bool:
+    return any(name.lower() in {b"content-length", b"transfer-encoding"} for name, _ in headers)
+
+
 @final
 @dataclass(eq=False, slots=True)
 # TODO Rename to just HTTPConn
@@ -399,6 +403,12 @@ class HTTPReqCtxH11:
     def start_response(self, response: Response | InformationalResponse, /) -> None:
         if isinstance(response, Response):
             self.response_status = response.status_code
+            if self.request.method == b"HEAD" and not _has_response_framing(response.headers):
+                response = Response(
+                    status_code=response.status_code,
+                    headers=[*response.headers, (b"content-length", b"0")],
+                    reason=response.reason,
+                )
             # Drive the h11 state machine, but buffer the bytes for a
             # coalesced ``sendall`` with the first body chunk.
             payload = self.conn.parser.send(_to_h11_response(response))

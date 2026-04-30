@@ -106,6 +106,10 @@ def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool
     return has_close, has_framing
 
 
+def _response_allows_body(request_method: bytes, status_code: int) -> bool:
+    return request_method != b"HEAD" and not (100 <= status_code < 200 or status_code in {204, 304})
+
+
 @final
 @dataclass(eq=False, slots=True)
 # TODO Rename to HTTPConn
@@ -486,6 +490,9 @@ class HTTPReqCtxHttptools:
     _pending_header_bytes: bytes | None = None
     """Buffered status line + headers, awaiting flush on first body chunk
     or ``finish_response``. ``None`` once flushed."""
+    _body_allowed: bool = True
+    """False for HEAD / 1xx / 204 / 304 responses, where response body bytes
+    must not be written even if the handler passes a body to ``complete``."""
 
     @property
     def borrowed(self) -> bool:
@@ -611,10 +618,11 @@ class HTTPReqCtxHttptools:
         if isinstance(response, Response):
             self.response_status = response.status_code
             self.conn._response_started = True
+            self._body_allowed = _response_allows_body(self.request.method, response.status_code)
             has_close, has_framing = _scan_response_headers(response.headers)
             if has_close or not self._keep_alive:
                 self.conn._close_after_response = True
-            if not has_framing:
+            if not has_framing and self._body_allowed:
                 # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
                 # Without framing, an HTTP/1.1 client would wait for the
                 # connection to close before considering the response done.
@@ -632,6 +640,11 @@ class HTTPReqCtxHttptools:
     def send(self, chunk: Buffer, /) -> None:
         if not isinstance(chunk, bytes):
             chunk = bytes(chunk)
+        if not self._body_allowed:
+            if self._pending_header_bytes is not None:
+                _send_all(self.conn, self._pending_header_bytes)
+                self._pending_header_bytes = None
+            return
         if not chunk and self._pending_header_bytes is None:
             return
         framed = (f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n") if self._chunked and chunk else chunk

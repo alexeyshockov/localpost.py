@@ -217,7 +217,7 @@ class Router:
 
         for i, (tmpl, method_map) in enumerate(ordered):
             prefix = f"r{i}"
-            allow_header = ", ".join(m.value for m in sorted(method_map, key=lambda hm: hm.value))
+            allow_header = _format_allow_header(method_map)
             compiled_routes.append(
                 Route(
                     template=tmpl,
@@ -243,21 +243,31 @@ class Router:
         if m is None:
             return _MATCH_NOT_FOUND
 
+        try:
+            method = HTTPMethod(method_str)
+        except ValueError:
+            method = None
+
+        allowed_methods: set[HTTPMethod] = set()
+        matched_routes = 0
+        single_route_405: tuple[_NativeResponse, bytes] | None = None
+
         for route in self.routes:
-            if m.group(route._group_prefix) is None:
+            path_args = route.template.match(path)
+            if path_args is None:
                 continue
+            matched_routes += 1
+            allowed_methods.update(route.methods)
+            single_route_405 = route.method_not_allowed
+
             tmpl = route.template
             method_map = route.methods
-            path_args = {v: m.group(f"{route._group_prefix}_{v}") or "" for v in tmpl.variable_names}
-
-            try:
-                method = HTTPMethod(method_str)
-            except ValueError:
-                return _MatchMethodNotAllowed(route=route)
+            if method is None:
+                continue
 
             handler = method_map.get(method)
             if handler is None:
-                return _MatchMethodNotAllowed(route=route)
+                continue
 
             return _MatchOk(
                 handler=handler,
@@ -268,7 +278,13 @@ class Router:
                 ),
             )
 
-        raise AssertionError("unreachable: regex matched but no outer group set")
+        if matched_routes == 1:
+            assert single_route_405 is not None
+            return _MatchMethodNotAllowed(*single_route_405)
+        if allowed_methods:
+            return _MatchMethodNotAllowed(*_build_method_not_allowed(_format_allow_header(allowed_methods)))
+
+        raise AssertionError("unreachable: regex matched but no route template matched")
 
     def as_handler(self) -> NativeRequestHandler:
         """Return a :data:`localpost.http.RequestHandler` that dispatches via this router.
@@ -293,8 +309,7 @@ class Router:
                 ctx.complete(_NOT_FOUND_RESPONSE, _NOT_FOUND_BODY)
                 return None
             if isinstance(match, _MatchMethodNotAllowed):
-                response, body = match.route.method_not_allowed
-                ctx.complete(response, body)
+                ctx.complete(match.response, match.body)
                 return None
 
             ctx.attrs[RouteMatch] = match.match
@@ -322,7 +337,8 @@ class _MatchNotFound:
 @final
 @dataclass(frozen=True, slots=True)
 class _MatchMethodNotAllowed:
-    route: Route
+    response: _NativeResponse
+    body: bytes
 
 
 _MatchResult = _MatchOk | _MatchNotFound | _MatchMethodNotAllowed
@@ -359,6 +375,10 @@ def _find_template(
         if t.template == template_str:
             return t
     return None
+
+
+def _format_allow_header(methods: Mapping[HTTPMethod, object] | set[HTTPMethod]) -> str:
+    return ", ".join(m.value for m in sorted(methods, key=lambda hm: hm.value))
 
 
 def _build_plain_response(

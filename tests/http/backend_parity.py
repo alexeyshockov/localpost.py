@@ -189,3 +189,52 @@ def test_streaming_response_chunks(serve_backend_in_thread):
 
     assert r.status_code == 200
     assert r.content == b"chunk1chunk2"
+
+
+def test_unframed_204_response_has_no_transfer_encoding(serve_backend_in_thread):
+    def handler(ctx: HTTPReqCtx) -> None:
+        ctx.start_response(NativeResponse(status_code=204, headers=[]))
+        ctx.finish_response()
+
+    with serve_backend_in_thread(handler) as port:
+        r = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+
+    assert r.status_code == 204
+    assert "transfer-encoding" not in r.headers
+    assert r.content == b""
+
+
+def test_unframed_304_response_has_no_transfer_encoding(serve_backend_in_thread):
+    def handler(ctx: HTTPReqCtx) -> None:
+        ctx.start_response(NativeResponse(status_code=304, headers=[]))
+        ctx.finish_response()
+
+    with serve_backend_in_thread(handler) as port:
+        r = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
+
+    assert r.status_code == 304
+    assert "transfer-encoding" not in r.headers
+    assert r.content == b""
+
+
+def test_unframed_head_response_has_no_body_or_transfer_encoding(serve_backend_in_thread):
+    def handler(ctx: HTTPReqCtx) -> None:
+        ctx.start_response(NativeResponse(status_code=200, headers=[]))
+        ctx.finish_response()
+
+    with serve_backend_in_thread(handler) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+            sock.sendall(b"HEAD / HTTP/1.1\r\nHost: x\r\n\r\n")
+            data = read_until(sock, b"\r\n\r\n", deadline=2)
+            headers, _, body = data.partition(b"\r\n\r\n")
+
+            sock.settimeout(0.2)
+            try:
+                extra = sock.recv(16)
+            except TimeoutError:
+                extra = b""
+
+    assert b"HTTP/1.1 200" in headers
+    assert b"transfer-encoding:" not in headers.lower()
+    assert body == b""
+    assert extra == b""
