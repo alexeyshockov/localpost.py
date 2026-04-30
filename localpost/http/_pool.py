@@ -26,10 +26,8 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppres
 
 from anyio import (
     BrokenResourceError,
-    CapacityLimiter,
     ClosedResourceError,
     EndOfStream,
-    WouldBlock,
     create_task_group,
     to_thread,
 )
@@ -54,24 +52,27 @@ _WorkItem = tuple[HTTPReqCtx, RequestCancel, _WorkFn]
 
 
 class _Pool:
-    """Shared channel + workers, plus dispatch helpers.
+    """Shared channel + workers + admission semaphore, plus dispatch helpers.
 
     Created/torn-down by :func:`_pool_context`. Two ``dispatch_*`` methods
     let callers wire either a post-body :data:`BodyHandler` or a
     pre-body streaming handler onto the same worker pool. Admission is
-    non-blocking from the selector thread: if the bounded pending queue is
-    full, the request receives 503 and the connection is closed.
+    non-blocking from the selector thread: the semaphore caps the number
+    of in-flight + buffered requests at ``max_concurrency + backlog``; if
+    the cap is hit, the request receives 503 and the connection is closed.
     """
 
-    __slots__ = ("_shutdown_event", "_tx")
+    __slots__ = ("_admission", "_shutdown_event", "_tx")
 
     def __init__(
         self,
         tx: threadtools.SendChannel[_WorkItem],
         shutdown_event: threading.Event,
+        admission: threading.Semaphore,
     ) -> None:
         self._tx = tx
         self._shutdown_event = shutdown_event
+        self._admission = admission
 
     def dispatch_buffered(self, body_handler: BodyHandler) -> BodyHandler:
         """Wrap a :data:`BodyHandler` so when it's invoked post-body it
@@ -101,16 +102,21 @@ class _Pool:
 
     def _make_dispatcher(self, fn: _WorkFn) -> _WorkFn:
         tx = self._tx
+        admission = self._admission
         shutdown_event = self._shutdown_event
 
         def dispatched(ctx: HTTPReqCtx) -> None:
             ctx.server.stop_tracking(ctx.conn)
+            if not admission.acquire(blocking=False):
+                _reject_overloaded(ctx)
+                return
             cancel = RequestCancel(_sock=ctx.conn.sock, _shutdown_event=shutdown_event)
             try:
                 tx.put_nowait((ctx, cancel, fn))
-            except WouldBlock:
-                _reject_overloaded(ctx)
             except (ClosedResourceError, BrokenResourceError):
+                # Pool shutting down; semaphore release happens here since the
+                # worker won't run.
+                admission.release()
                 with suppress(Exception):
                     ctx.conn.close()
 
@@ -131,22 +137,30 @@ def _reject_overloaded(ctx: HTTPReqCtx) -> None:
 
 
 @asynccontextmanager
-async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
-    """Open a worker pool for ``max_concurrency`` concurrent requests.
+async def _pool_context(max_concurrency: int, backlog: int) -> AsyncGenerator[_Pool]:
+    """Open a worker pool for ``max_concurrency`` concurrent requests with an
+    optional ``backlog`` of additional buffered requests.
 
     Yields a :class:`_Pool` whose ``dispatch_*`` helpers can be used to
     wire handlers onto the shared channel. On exit, signals in-flight
     handlers via the cancel event and waits for workers to drain.
+
+    Admission is gated by a :class:`threading.Semaphore` of size
+    ``max_concurrency + backlog``: the selector acquires a permit on
+    dispatch, the worker releases it when the handler finishes. The
+    channel itself is unbounded — it's only the conduit; the semaphore
+    is the budget. ``backlog=0`` makes the budget exactly
+    ``max_concurrency``: only an idle worker can pick up a new request.
     """
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be >= 1")
+    if backlog < 0:
+        raise ValueError("backlog must be >= 0")
 
     logger = logging.getLogger(LOGGER_NAME)
-    tx, rx = threadtools.Channel[_WorkItem].create(capacity=max_concurrency)
+    tx, rx = threadtools.Channel[_WorkItem].create(capacity=None)
     shutdown_event = threading.Event()
-    # Dedicated limiter so workers don't consume slots from AnyIO's global
-    # default thread pool. Each worker holds a slot for its full lifetime.
-    workers_limiter = CapacityLimiter(max_concurrency)
+    admission = threading.Semaphore(max_concurrency + backlog)
 
     def worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
         with my_rx:
@@ -189,16 +203,17 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
                     if cancel.fired:
                         with suppress(Exception):
                             ctx.conn.close()
+                    admission.release()
 
     async def run_worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
-        await to_thread.run_sync(worker, my_rx, limiter=workers_limiter)
+        await to_thread.run_sync(worker, my_rx)
 
     async with create_task_group() as tg:
         for _ in range(max_concurrency):
             tg.start_soon(run_worker, rx.clone())
         rx.close()
         try:
-            yield _Pool(tx, shutdown_event)
+            yield _Pool(tx, shutdown_event, admission)
         finally:
             shutdown_event.set()
             tx.close()
@@ -217,13 +232,12 @@ def _emit_body_too_large(ctx: HTTPReqCtx) -> None:
 # --- Public wrappers ----------------------------------------------------
 
 
-# TODO Make sure we can configure 1) max_concurrency and 2) backlog. By default backlog should be 0,
-# so we block when max_concurrency is reached.
 def thread_pool_handler(
     inner: RequestHandler,
     /,
     *,
     max_concurrency: int,
+    backlog: int = 0,
 ) -> AbstractAsyncContextManager[RequestHandler]:
     """Async context manager: yields a ``RequestHandler`` that offloads
     body-handler continuations to a worker thread.
@@ -237,10 +251,16 @@ def thread_pool_handler(
     - :data:`BodyHandler` — the wrapper returns a *new* continuation
       that, when invoked by the selector after the body has been
       buffered, ``stop_tracking`` s the conn and queues the work for a
-      worker. If all workers and the bounded pending queue are full, the
+      worker. If neither a worker nor a backlog slot is available, the
       request is rejected with 503 instead of blocking the selector.
       ``max_concurrency`` workers pull from the channel and run the
       continuation under a per-request cancel scope.
+
+    ``backlog`` controls the channel buffer between selector and workers.
+    The default ``0`` is rendezvous — a request is dispatched only when a
+    worker is currently idle on ``Channel.get()``. ``backlog=K`` lets up
+    to K extra requests sit in the channel before 503s start. Total
+    system capacity = ``max_concurrency + backlog``.
 
     Per-request cancellation surfaces through
     :func:`localpost.http.check_cancelled` (client disconnect via
@@ -255,12 +275,16 @@ def thread_pool_handler(
     """
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be >= 1")
-    return _thread_pool_handler(inner, max_concurrency)
+    if backlog < 0:
+        raise ValueError("backlog must be >= 0")
+    return _thread_pool_handler(inner, max_concurrency, backlog)
 
 
 @asynccontextmanager
-async def _thread_pool_handler(inner: RequestHandler, max_concurrency: int) -> AsyncGenerator[RequestHandler]:
-    async with _pool_context(max_concurrency) as pool:
+async def _thread_pool_handler(
+    inner: RequestHandler, max_concurrency: int, backlog: int
+) -> AsyncGenerator[RequestHandler]:
+    async with _pool_context(max_concurrency, backlog) as pool:
 
         def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
             result = inner(ctx)
@@ -276,6 +300,7 @@ def streaming_pool_handler(
     /,
     *,
     max_concurrency: int,
+    backlog: int = 0,
 ) -> AbstractAsyncContextManager[RequestHandler]:
     """Async context manager: yields a ``RequestHandler`` that runs
     ``inner`` on a worker thread with a *borrowed* conn — body **not**
@@ -287,6 +312,10 @@ def streaming_pool_handler(
 
     ``inner`` shape: ``(ctx) -> None``. Must complete the response or
     close the conn.
+
+    ``backlog`` has the same meaning as in :func:`thread_pool_handler`:
+    default ``0`` is rendezvous; ``backlog=K`` allows K extra queued
+    requests before 503s start.
 
     Per-request cancellation surfaces through
     :func:`localpost.http.check_cancelled` — same triggers as
@@ -307,10 +336,14 @@ def streaming_pool_handler(
     """
     if max_concurrency < 1:
         raise ValueError("max_concurrency must be >= 1")
-    return _streaming_pool_handler(inner, max_concurrency)
+    if backlog < 0:
+        raise ValueError("backlog must be >= 0")
+    return _streaming_pool_handler(inner, max_concurrency, backlog)
 
 
 @asynccontextmanager
-async def _streaming_pool_handler(inner: _WorkFn, max_concurrency: int) -> AsyncGenerator[RequestHandler]:
-    async with _pool_context(max_concurrency) as pool:
+async def _streaming_pool_handler(
+    inner: _WorkFn, max_concurrency: int, backlog: int
+) -> AsyncGenerator[RequestHandler]:
+    async with _pool_context(max_concurrency, backlog) as pool:
         yield pool.dispatch_streaming(inner)

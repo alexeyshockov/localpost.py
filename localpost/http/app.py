@@ -190,6 +190,12 @@ class HttpApp:
             and non-blocking). Streaming routes (``buffer_body=False``)
             require a pool — registering one with ``max_concurrency=0``
             raises at service-startup time.
+        backlog: Additional channel buffer between selector and workers.
+            Default ``0`` = rendezvous: a request is dispatched only when
+            a worker is currently waiting; otherwise the selector replies
+            503 immediately. ``backlog=K`` allows up to K extra requests
+            to sit in the channel before 503s start. Total system capacity
+            is ``max_concurrency + backlog``.
         middleware: App-level middlewares wrapping the entire dispatcher
             (after Router). Outermost-first.
     """
@@ -198,11 +204,15 @@ class HttpApp:
         self,
         *,
         max_concurrency: int = 32,
+        backlog: int = 0,
         middleware: Sequence[Middleware] = (),
     ) -> None:
         if max_concurrency < 0:
             raise ValueError("max_concurrency must be >= 0")
+        if backlog < 0:
+            raise ValueError("backlog must be >= 0")
         self.max_concurrency = max_concurrency
+        self.backlog = backlog
         self._middleware = tuple(middleware)
         self._routes: list[_Route] = []
 
@@ -360,6 +370,7 @@ class HttpApp:
             raise ValueError(f"unknown backend {backend!r} (expected 'h11' or 'httptools')")
         server_fn = _BACKEND_FACTORIES[backend]
         max_concurrency = self.max_concurrency
+        backlog = self.backlog
 
         @hosting.service
         async def _app_service():
@@ -368,7 +379,7 @@ class HttpApp:
                 async with server_fn(config, inner, selectors=selectors):
                     yield
                 return
-            async with _pool_context(max_concurrency) as pool:
+            async with _pool_context(max_concurrency, backlog) as pool:
                 inner = self._build_router_handler(pool)
                 async with server_fn(config, inner, selectors=selectors):
                     yield

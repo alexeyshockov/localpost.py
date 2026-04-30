@@ -258,7 +258,7 @@ on the documented public Flask API.
 | `http_server(config, handler)`                    | `localpost.http._service`    | `@hosting.service` — runs the server loop with `handler`. No thread pool.           |
 | `wsgi_server(config, app)`                        | `localpost.http._service`    | Same, for a generic WSGI app.                                                       |
 | `flask_server(config, app)`                       | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`.                                          |
-| `thread_pool_handler(inner, *, max_concurrency)`  | `localpost.http._pool`       | Async CM. Yields a `RequestHandler` that runs `inner` on a worker thread.           |
+| `thread_pool_handler(inner, *, max_concurrency, backlog=0)` | `localpost.http._pool` | Async CM. Yields a `RequestHandler` that runs `inner` on a worker thread. Admission cap = `max_concurrency + backlog`; default `backlog=0` means exactly `max_concurrency` in flight. |
 
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
 is driven by `lt.shutting_down` via `threadtools.check_cancelled()`. The
@@ -305,6 +305,12 @@ What this gives you:
   there is no per-route pool API).
 - **No max\_concurrency on `http_server`.** The pool is the wrapper's
   concern; `http_server` has one job and one job only.
+- **Admission is the pool's concern, not the server's.** The pool admits up to
+  `max_concurrency + backlog` requests at once (a `threading.Semaphore`
+  acquired by the selector on dispatch, released by the worker on completion).
+  The default `backlog=0` is the strict-N case: every dispatch needs a free
+  worker, otherwise it 503s. Bump `backlog` to let bursts queue briefly
+  instead of bouncing.
 
 ## Design
 
