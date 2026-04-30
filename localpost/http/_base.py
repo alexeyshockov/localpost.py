@@ -73,57 +73,66 @@ _Op = _OpTrack | _OpClose
 
 # Canned protocol-error responses, expressed as neutral types. Each backend
 # serialises them with its own writer (h11.Connection.send for the h11 impl,
-# the hand-written serialiser for the httptools impl).
+# the hand-written serialiser for the httptools impl). The httptools backend
+# also has access to a fully pre-serialised wire form per canned response —
+# see ``_PRESERIALIZED`` below — so error paths skip ``_serialize_response``
+# entirely.
+
+# Reason phrases used by the pre-serialised wire form below. Kept here (not
+# in the httptools backend) so it stays parser-agnostic and the constants
+# below resolve at module import time even when httptools isn't installed.
+_CANNED_REASONS: dict[int, bytes] = {
+    400: b"Bad Request",
+    408: b"Request Timeout",
+    413: b"Payload Too Large",
+    500: b"Internal Server Error",
+    503: b"Service Unavailable",
+}
+
+
+def _build_canned(status_code: int, body: bytes) -> tuple[Response, bytes]:
+    """Build a canned ``(Response, wire_bytes)`` pair.
+
+    ``wire_bytes`` is the full status-line + headers + body, ready to send
+    via :func:`_send_all`. Used by the httptools backend for the protocol
+    error paths to skip per-error serialisation.
+    """
+    response = Response(
+        status_code=status_code,
+        headers=[
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"connection", b"close"),
+        ],
+    )
+    prelude = bytearray(b"HTTP/1.1 ")
+    prelude += str(status_code).encode("ascii")
+    prelude += b" "
+    prelude += _CANNED_REASONS[status_code]
+    prelude += b"\r\n"
+    for name, value in response.headers:
+        prelude += name
+        prelude += b": "
+        prelude += value
+        prelude += b"\r\n"
+    prelude += b"\r\n"
+    return response, bytes(prelude + body)
+
 
 INTERNAL_ERROR_BODY = b"Internal Server Error"
-INTERNAL_ERROR_RESPONSE = Response(
-    status_code=500,
-    headers=[
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(INTERNAL_ERROR_BODY)).encode("ascii")),
-        (b"connection", b"close"),
-    ],
-)
+INTERNAL_ERROR_RESPONSE, INTERNAL_ERROR_WIRE = _build_canned(500, INTERNAL_ERROR_BODY)
 
 BAD_REQUEST_BODY = b"Bad Request"
-BAD_REQUEST_RESPONSE = Response(
-    status_code=400,
-    headers=[
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(BAD_REQUEST_BODY)).encode("ascii")),
-        (b"connection", b"close"),
-    ],
-)
+BAD_REQUEST_RESPONSE, BAD_REQUEST_WIRE = _build_canned(400, BAD_REQUEST_BODY)
 
 PAYLOAD_TOO_LARGE_BODY = b"Payload Too Large"
-PAYLOAD_TOO_LARGE_RESPONSE = Response(
-    status_code=413,
-    headers=[
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(PAYLOAD_TOO_LARGE_BODY)).encode("ascii")),
-        (b"connection", b"close"),
-    ],
-)
+PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_WIRE = _build_canned(413, PAYLOAD_TOO_LARGE_BODY)
 
 REQUEST_TIMEOUT_BODY = b"Request Timeout"
-REQUEST_TIMEOUT_RESPONSE = Response(
-    status_code=408,
-    headers=[
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(REQUEST_TIMEOUT_BODY)).encode("ascii")),
-        (b"connection", b"close"),
-    ],
-)
+REQUEST_TIMEOUT_RESPONSE, REQUEST_TIMEOUT_WIRE = _build_canned(408, REQUEST_TIMEOUT_BODY)
 
 SERVICE_UNAVAILABLE_BODY = b"Service Unavailable"
-SERVICE_UNAVAILABLE_RESPONSE = Response(
-    status_code=503,
-    headers=[
-        (b"content-type", b"text/plain; charset=utf-8"),
-        (b"content-length", str(len(SERVICE_UNAVAILABLE_BODY)).encode("ascii")),
-        (b"connection", b"close"),
-    ],
-)
+SERVICE_UNAVAILABLE_RESPONSE, SERVICE_UNAVAILABLE_WIRE = _build_canned(503, SERVICE_UNAVAILABLE_BODY)
 
 
 class HTTPReqCtx(Protocol):

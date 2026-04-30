@@ -39,12 +39,9 @@ except ImportError as _e:  # pragma: no cover
     ) from _e
 
 from localpost.http._base import (
-    BAD_REQUEST_BODY,
-    BAD_REQUEST_RESPONSE,
-    PAYLOAD_TOO_LARGE_BODY,
-    PAYLOAD_TOO_LARGE_RESPONSE,
-    REQUEST_TIMEOUT_BODY,
-    REQUEST_TIMEOUT_RESPONSE,
+    BAD_REQUEST_WIRE,
+    PAYLOAD_TOO_LARGE_WIRE,
+    REQUEST_TIMEOUT_WIRE,
     BaseHTTPConn,
     BaseServer,
     BodyHandler,
@@ -343,13 +340,13 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._loop()
         except _ProtocolError as e:
             self.server.logger.warning("Bad client input from %s: %s", self.addr, e)
-            self._try_send_status(BAD_REQUEST_RESPONSE, BAD_REQUEST_BODY)
+            self._try_send_wire(BAD_REQUEST_WIRE)
             self.close()
         except BodyTooLarge:
             self.server.logger.warning(
                 "Request body from %s exceeds max_body_size=%d", self.addr, self.server.config.max_body_size
             )
-            self._try_send_status(PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_BODY)
+            self._try_send_wire(PAYLOAD_TOO_LARGE_WIRE)
             self.close()
 
     def _feed(self, data: bytes) -> None:
@@ -421,12 +418,17 @@ class HTTPConnHttptools(BaseHTTPConn):
         self.idle = True
         self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
 
-    def _try_send_status(self, response: Response, body: bytes) -> None:
-        """Best-effort: write a status line + body if we haven't started a response yet."""
+    def _try_send_wire(self, wire: bytes) -> None:
+        """Best-effort: write a pre-serialised status+headers+body block.
+
+        Used for canned protocol-error responses (400 / 408 / 413). The wire
+        bytes are pre-built at module import time (see ``_base.py``) so this
+        path skips ``_serialize_response`` entirely.
+        """
         if self._response_started:
             return
         try:
-            _send_all(self, _serialize_response(response) + body)
+            _send_all(self, wire)
         except Exception:  # noqa: BLE001, S110 — connection is being closed anyway
             pass
 
@@ -435,7 +437,7 @@ class HTTPConnHttptools(BaseHTTPConn):
         if self.idle or self._response_started:
             return
         try:
-            _send_all(self, _serialize_response(REQUEST_TIMEOUT_RESPONSE) + REQUEST_TIMEOUT_BODY)
+            _send_all(self, REQUEST_TIMEOUT_WIRE)
         except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
             pass
 
