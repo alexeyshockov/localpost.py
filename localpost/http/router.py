@@ -17,7 +17,7 @@ see :class:`localpost.http.app.HttpApp`.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPMethod
 from http.client import responses as _http_phrases
@@ -105,6 +105,11 @@ class Route:
 
     allow_header: str
     """Pre-rendered ``Allow`` header value (e.g. ``"GET, POST"``)."""
+
+    method_not_allowed: tuple[_NativeResponse, bytes]
+    """Pre-built ``(Response, body)`` for the 405 path on this route. Avoids
+    rebuilding the response (status, headers list, ``content-length`` ASCII
+    encode) on every method-mismatch."""
 
     _group_prefix: str
     """Internal: the named-group prefix this route uses inside the combined regex."""
@@ -218,6 +223,7 @@ class Router:
                     template=tmpl,
                     methods=dict(method_map),
                     allow_header=allow_header,
+                    method_not_allowed=_build_method_not_allowed(allow_header),
                     _group_prefix=prefix,
                 )
             )
@@ -247,11 +253,11 @@ class Router:
             try:
                 method = HTTPMethod(method_str)
             except ValueError:
-                return _MatchMethodNotAllowed(allow_header=route.allow_header)
+                return _MatchMethodNotAllowed(route=route)
 
             handler = method_map.get(method)
             if handler is None:
-                return _MatchMethodNotAllowed(allow_header=route.allow_header)
+                return _MatchMethodNotAllowed(route=route)
 
             return _MatchOk(
                 handler=handler,
@@ -269,8 +275,8 @@ class Router:
 
         On a match, attaches :class:`RouteMatch` to ``ctx.attrs["route_match"]``
         and delegates to the registered per-route handler. 404 / 405 are
-        answered inline (via ``ctx.complete``); the body bytes (if any)
-        are silently drained by the http layer.
+        answered inline (via ``ctx.complete``) using pre-built responses;
+        the body bytes (if any) are silently drained by the http layer.
         """
 
         def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
@@ -285,15 +291,11 @@ class Router:
             match = self._match(path, method_str)
 
             if isinstance(match, _MatchNotFound):
-                _send_plain(ctx, 404, b"Not Found")
+                ctx.complete(_NOT_FOUND_RESPONSE, _NOT_FOUND_BODY)
                 return None
             if isinstance(match, _MatchMethodNotAllowed):
-                _send_plain(
-                    ctx,
-                    405,
-                    b"Method Not Allowed",
-                    extra_headers=[(b"Allow", match.allow_header.encode("ascii"))],
-                )
+                response, body = match.route.method_not_allowed
+                ctx.complete(response, body)
                 return None
 
             ctx.attrs["route_match"] = match.match
@@ -321,7 +323,7 @@ class _MatchNotFound:
 @final
 @dataclass(frozen=True, slots=True)
 class _MatchMethodNotAllowed:
-    allow_header: str
+    route: Route
 
 
 _MatchResult = _MatchOk | _MatchNotFound | _MatchMethodNotAllowed
@@ -360,25 +362,36 @@ def _find_template(
     return None
 
 
-def _send_plain(
-    ctx: HTTPReqCtx,
+def _build_plain_response(
     status_code: int,
     body: bytes,
     *,
-    extra_headers: Iterable[tuple[bytes, bytes]] = (),
-) -> None:
-    headers: list[tuple[bytes, bytes]] = [
-        (b"content-type", b"text/plain"),
-        (b"content-length", str(len(body)).encode("ascii")),
-        *extra_headers,
-    ]
-    ctx.complete(
-        _NativeResponse(
-            status_code=status_code,
-            headers=headers,
-            reason=_http_phrases.get(status_code, "Unknown").encode("iso-8859-1"),
-        ),
-        body,
+    extra_headers: tuple[tuple[bytes, bytes], ...] = (),
+) -> _NativeResponse:
+    return _NativeResponse(
+        status_code=status_code,
+        headers=[
+            (b"content-type", b"text/plain"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            *extra_headers,
+        ],
+        reason=_http_phrases.get(status_code, "Unknown").encode("iso-8859-1"),
     )
+
+
+_NOT_FOUND_BODY = b"Not Found"
+_NOT_FOUND_RESPONSE = _build_plain_response(404, _NOT_FOUND_BODY)
+_METHOD_NOT_ALLOWED_BODY = b"Method Not Allowed"
+
+
+def _build_method_not_allowed(allow_header: str) -> tuple[_NativeResponse, bytes]:
+    """Pre-build the 405 response for a route. Called once at ``Routes.build()``
+    time so the dispatch hot path skips the list / encode / Response build."""
+    response = _build_plain_response(
+        405,
+        _METHOD_NOT_ALLOWED_BODY,
+        extra_headers=((b"Allow", allow_header.encode("ascii")),),
+    )
+    return response, _METHOD_NOT_ALLOWED_BODY
 
 
