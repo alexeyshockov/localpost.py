@@ -21,7 +21,7 @@ import time
 from collections.abc import Buffer, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, final
+from typing import Any, cast, final
 
 import h11
 
@@ -49,7 +49,7 @@ __all__ = ["start_http_server", "HTTPConnH11", "HTTPReqCtxH11"]
 
 
 def _to_h11_response(r: Response | InformationalResponse) -> h11.Response | h11.InformationalResponse:
-    headers: list[tuple[bytes, bytes]] = list(r.headers)
+    headers = cast(list, r.headers)
     if isinstance(r, Response):
         return h11.Response(status_code=r.status_code, headers=headers, reason=r.reason)
     return h11.InformationalResponse(status_code=r.status_code, headers=headers, reason=r.reason)
@@ -68,6 +68,7 @@ def _content_length(headers) -> int | None:
 
 @final
 @dataclass(eq=False, slots=True)
+# TODO Rename to just HTTPConn
 class HTTPConnH11(BaseHTTPConn):
     server: BaseServer
     sock: socket.socket

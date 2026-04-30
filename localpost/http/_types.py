@@ -53,7 +53,7 @@ class Response:
     """Final response (2xx-5xx) — exactly one per request."""
 
     status_code: int
-    headers: Sequence[tuple[bytes, bytes]]
+    headers: Sequence[tuple[bytes, bytes]] = field(default_factory=list)
     reason: bytes = b""
     """Reason phrase. Empty → backend supplies a default for the status code."""
 
@@ -63,8 +63,9 @@ class InformationalResponse:
     """1xx response (100 Continue, 102 Processing, …). Multiple may precede the final response."""
 
     status_code: int
-    headers: list[tuple[bytes, bytes]] = field(default_factory=list)
+    headers: Sequence[tuple[bytes, bytes]] = field(default_factory=list)
     reason: bytes = b""
+    """Reason phrase. Empty → backend supplies a default for the status code."""
 
 
 class BodyTooLarge(Exception):
