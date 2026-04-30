@@ -235,22 +235,18 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._cur_oversize = True
             return
 
-        # Pre-split the URL once — C-level parser, beats Python ``find`` /
-        # ``split``. ``parse_url`` returns ``None`` components for absent
-        # parts; default each to ``b""``. Malformed targets that fail
-        # parsing fall back to a manual split.
-        try:
-            url = httptools.parse_url(self._cur_target)
-            path = url.path or b""
-            query_string = url.query or b""
-        except httptools.HttpParserInvalidURLError:
-            qix = self._cur_target.find(b"?")
-            if qix >= 0:
-                path = self._cur_target[:qix]
-                query_string = self._cur_target[qix + 1 :]
-            else:
-                path = self._cur_target
-                query_string = b""
+        # Pre-split the URL once. Manually find/slice — measured ~2x faster
+        # than ``httptools.parse_url`` (which is C-level but pays Python
+        # object-construction overhead per parse). The split is moved into
+        # the backend so consumers (Router / wsgi) skip per-dispatch work.
+        target = self._cur_target
+        qix = target.find(b"?")
+        if qix >= 0:
+            path = target[:qix]
+            query_string = target[qix + 1 :]
+        else:
+            path = target
+            query_string = b""
 
         # ``method`` and ``self._cur_target`` are already ``bytes`` (httptools
         # callbacks deliver real ``bytes``, not memoryview/bytearray); no copy.
