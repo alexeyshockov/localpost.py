@@ -214,16 +214,19 @@ def compose(*middlewares: Middleware) -> Middleware:
     return wrap
 
 
-def _send_all(sock: socket.socket, payload: bytes | bytearray | memoryview, rw_timeout: float) -> None:
-    """Send all of ``payload`` to ``sock``.
+def _send_all(conn: BaseHTTPConn, payload: bytes | bytearray | memoryview) -> None:
+    """Send all of ``payload`` to ``conn.sock``.
 
     Optimised for the JSON-API common case: a small response that fits in
     the kernel send buffer. Tries non-blocking ``send`` first; on
-    :exc:`BlockingIOError` (kernel buffer full mid-response) transitions
-    to blocking-with-timeout for the remainder, then restores
-    non-blocking on the way out. Saves the two ``settimeout`` (fcntl)
-    calls per request that the prior borrow-with-blocking design paid.
+    :exc:`BlockingIOError` (kernel buffer full mid-response) flips to
+    blocking-with-timeout and drains via ``sendall``. The blocking-mode
+    fallback **stays sticky** for the rest of the request when the conn
+    is borrowed — :meth:`HTTPReqCtx._maybe_give_back` resets the socket
+    to non-blocking on hand-back. On the selector thread the socket is
+    restored inline; the selector loop assumes non-blocking I/O.
     """
+    sock = conn.sock
     view = payload if isinstance(payload, memoryview) else memoryview(payload)
     total = len(view)
     sent = 0
@@ -231,13 +234,18 @@ def _send_all(sock: socket.socket, payload: bytes | bytearray | memoryview, rw_t
         try:
             n = sock.send(view[sent:])
         except BlockingIOError:
-            # Kernel send buffer full; finish the rest in blocking-with-timeout
-            # mode, then restore non-blocking.
-            sock.settimeout(rw_timeout)
+            # Kernel send buffer full; drain the rest with a blocking
+            # sendall under ``rw_timeout``. On a borrowed conn we leave
+            # the socket blocking-with-timeout so subsequent send/recv
+            # calls in the same request skip the BlockingIOError dance;
+            # the give-back path resets it. On the selector thread we
+            # must restore non-blocking before returning.
+            sock.settimeout(conn.server.config.rw_timeout)
             try:
                 sock.sendall(view[sent:])
             finally:
-                sock.settimeout(0)
+                if conn.tracked:
+                    sock.settimeout(0)
             return
         if n == 0:
             raise ConnectionAbortedError("socket is broken")
@@ -462,11 +470,14 @@ class BaseServer:
         is flipped optimistically so concurrent readers see the intended
         state.
 
-        The socket is kept non-blocking throughout the connection's
-        lifetime — see :func:`_send_all` for the worker-side send path
-        that handles ``BlockingIOError`` with a blocking-with-timeout
-        fallback. This avoids two ``settimeout`` (fcntl) calls per
-        request on the borrow / re-track boundary.
+        The socket is non-blocking whenever a conn is tracked. The send /
+        recv paths (see :func:`_send_all` and the receive helpers in each
+        backend) lazily flip the socket to blocking-with-timeout on the
+        first ``BlockingIOError`` and leave it sticky for the rest of
+        the request on a borrowed conn; ``_maybe_give_back`` resets the
+        socket to non-blocking before re-tracking. The common case
+        (response fits in the kernel buffer) pays zero ``settimeout``
+        calls per request.
 
         **Synchronisation edge for parser ownership.** This method's
         op-queue enqueue + wakeup-pipe ``os.write`` (in :meth:`_wake`)
@@ -653,10 +664,12 @@ class BaseServer:
             if key.fileobj is server_sock:
                 client_sock, client_addr = server_sock.accept()
                 # Linux 2.6.28+ inherits ``O_NONBLOCK`` from the listening
-                # socket; macOS / BSD do not. Set explicitly — once per
-                # connection, never again. The conn stays non-blocking for
-                # its lifetime; the send path (``_send_all``) handles
-                # blocking-with-timeout fallback on ``BlockingIOError``.
+                # socket; macOS / BSD do not. Set explicitly. While the
+                # conn is tracked the socket is non-blocking; the send /
+                # recv paths may flip it to blocking-with-timeout on a
+                # borrowed conn (``_send_all`` and the per-backend
+                # receive helpers) and the give-back path resets it
+                # before re-tracking.
                 client_sock.setblocking(False)
                 conn = self._conn_factory(self, client_sock, client_addr)
                 self.track(conn)

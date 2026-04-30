@@ -123,7 +123,7 @@ class HTTPConnH11(BaseHTTPConn):
         payload = self.parser.send(event)
         if payload is None:
             return
-        _send_all(self.sock, payload, self.server.config.rw_timeout)
+        _send_all(self, payload)
 
     def __call__(self, h: RequestHandler, /) -> None:
         try:
@@ -265,16 +265,15 @@ class HTTPConnH11(BaseHTTPConn):
         if self.idle or self.parser.our_state is not h11.IDLE:
             return
         try:
-            rw = self.server.config.rw_timeout
             payload = self.parser.send(_to_h11_response(REQUEST_TIMEOUT_RESPONSE))
             if payload:
-                _send_all(self.sock, payload, rw)
+                _send_all(self, payload)
             payload = self.parser.send(h11.Data(data=REQUEST_TIMEOUT_BODY))
             if payload:
-                _send_all(self.sock, payload, rw)
+                _send_all(self, payload)
             payload = self.parser.send(h11.EndOfMessage())
             if payload:
-                _send_all(self.sock, payload, rw)
+                _send_all(self, payload)
         except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
             pass
 
@@ -315,8 +314,22 @@ class HTTPReqCtxH11:
             self._maybe_give_back()
 
     def _maybe_give_back(self) -> None:
-        if self.borrowed:
-            self._server.track(self._conn)
+        if not self.borrowed:
+            return
+        # If a fallback path inside this request flipped the socket to
+        # blocking-with-timeout, reset to non-blocking before handing the
+        # conn back to the selector — the selector loop assumes a
+        # non-blocking socket and a stray BlockingIOError is its only
+        # "no more data" signal. ``gettimeout`` reads cached state on the
+        # socket object (no syscall), so the no-fallback common case
+        # pays nothing.
+        sock = self._conn.sock
+        if sock.gettimeout() != 0:
+            try:
+                sock.settimeout(0)
+            except OSError:
+                pass
+        self._server.track(self._conn)
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         self.start_response(response)
@@ -338,15 +351,16 @@ class HTTPReqCtxH11:
             event = parser.next_event()
             if event is h11.NEED_DATA:
                 # Sync handlers can't tolerate BlockingIOError on a non-blocking
-                # socket: switch to a brief blocking read bounded by rw_timeout,
-                # then restore. Borrowed connections are already blocking, so
-                # the settimeout calls are no-ops on the rw_timeout value there.
+                # socket: switch to a blocking read bounded by ``rw_timeout``.
+                # On a borrowed conn we leave the socket blocking-with-timeout
+                # so the next iteration's ``recv`` skips the BlockingIOError
+                # path entirely; the give-back path resets it on hand-back.
+                # On the selector thread we restore non-blocking inline.
                 sock = self._conn.sock
-                rw = self._server.config.rw_timeout
                 try:
                     self._conn.receive(size)
                 except BlockingIOError:
-                    sock.settimeout(rw)
+                    sock.settimeout(self._server.config.rw_timeout)
                     try:
                         self._conn.receive(size)
                     finally:
@@ -418,7 +432,7 @@ class HTTPReqCtxH11:
         self._maybe_give_back()
 
     def _sock_sendall(self, payload: bytes) -> None:
-        _send_all(self._conn.sock, payload, self._server.config.rw_timeout)
+        _send_all(self._conn, payload)
 
 
 def start_http_server(config: ServerConfig, handler: RequestHandler, /):
