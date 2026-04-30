@@ -946,6 +946,115 @@ considered and dropped — synchronisation against pipelined clients
 needs *something*, and the unregister is the cheapest correct
 mechanism (~1 µs each on macOS kqueue).
 
+## Phase 11 (shipped): Tier-3 allocation diet + Request enrichment (2026-04-30)
+
+Mechanical follow-up to Phase 10, plus one one-time API tightening on
+``Request``. Numbers are within run-to-run noise on the macOS bench
+because we're already at the C-parser ceiling (Phase 6 / 10 closed the
+big gaps); the wins land mostly on smaller paths and on the API
+shape.
+
+### What shipped
+
+1. **No-op ``bytes()`` wraps removed.** httptools and h11 hand back real
+   ``bytes`` objects from their callbacks / events; ``bytes(b)`` for a
+   ``bytes`` argument returns the same object, so the wraps were dead
+   weight. The h11 backend's per-request ``[(bytes(n), bytes(v)) for n, v
+   in event.headers]`` is replaced by ``list(event.headers)`` — a
+   shallow copy that skips the per-tuple alloc but stays insulated from
+   h11's per-event ``Headers`` subclass. Multi-fragment URL accumulation
+   in httptools' ``on_url`` switched to a lazy ``bytearray`` so the rare
+   fragmented case doesn't pay quadratic ``bytes`` concat.
+2. **Pre-serialised canned protocol-error responses.** Each
+   ``*_RESPONSE`` constant in ``_base.py`` now ships with a sibling
+   ``*_WIRE: bytes`` — full status line + headers + body, built once at
+   module import time. The httptools backend's ``_try_send_status`` and
+   ``emit_stale_408`` use the pre-built bytes via ``_send_all`` and skip
+   ``_serialize_response`` on the error path entirely.
+3. **Cached 404 / 405 responses in Router.** The 404 ``NativeResponse``
+   + body is a module-level constant; the per-route 405 pair is
+   pre-built at ``Routes.build()`` time and stored on ``Route`` next to
+   the existing ``allow_header``. ``Router.dispatch`` uses
+   ``ctx.complete(*cached)`` directly; the per-miss list / encode /
+   ``Response`` build is gone.
+4. **``Request.path`` and ``Request.query_string``.** New pre-split
+   fields populated by the backend at parse time. Each consumer
+   (``Router``, ``wsgi._build_environ``, ``router_sentry``) now reads
+   them directly instead of doing the same ``target.decode + split``
+   per dispatch. The h11 backend also normalises ``method`` to
+   uppercase here (h11 is lenient on method case; httptools rejects
+   lowercase at parse time, so it's already uppercase).
+
+### One implementation surprise: skip ``httptools.parse_url``
+
+The first cut of #4 used ``httptools.parse_url(target)`` in the
+httptools backend, on the assumption that a C-level URL parser would
+beat a Python ``find`` / ``split``. **It didn't** — bench showed
+plaintext regressed ~8 % on the httptools backend, and a
+``timeit`` micro-bench confirmed ``parse_url`` is ~2× slower than the
+manual split for typical short JSON-API targets (it builds a
+``URL`` object with multiple bytes attributes — Python
+object-construction overhead per parse, on top of the C parsing).
+Both backends now use ``target.find(b'?')`` + slice; the API is the
+same, and the implementation is consistent across backends.
+
+### Bench (10 s/cell, standard CPython 3.13 on Darwin arm64)
+
+| Scenario          | Phase 10 RPS / p50     | Phase 11 RPS / p50     | Δ RPS    |
+| ----------------- | ---------------------: | ---------------------: | -------: |
+| `httptools` plaintext      | 25,230 / 2.50 ms |  25,438 / 2.49 ms |  +1%   |
+| `httptools` path_param     | 25,247 / 2.51 ms |  25,408 / 2.49 ms |  +1%   |
+| `httptools` json_post      | 24,712 / 1.28 ms |  24,342 / 1.29 ms |  -1%   |
+| `httptools` profile_update |  6,311 / 5.08 ms |   6,315 / 5.08 ms |   0%   |
+| `h11` plaintext            | 13,225 / 4.81 ms |  13,332 / 4.77 ms |  +1%   |
+| `h11` path_param           |   ~13 k / ~4.8 ms |  13,324 / 4.77 ms |  +2%   |
+| `h11` json_post            | 12,432 / 2.55 ms |  12,420 / 2.56 ms |   0%   |
+
+All within run-to-run noise (~±3 %) on the bench's hot scenarios.
+That matches the prediction: the bench is parser-bound at the
+selector for httptools and selector-bound at h11 parsing for h11;
+the per-request work we trimmed is real but small relative to those
+floors. **The wins are on paths the bench doesn't stress hard**:
+
+- 404 / 405 dispatch is now per-miss-allocation-free (matters under
+  scanner / probing traffic)
+- consumer-side decode + split removed (smaller benefit at 25 k RPS,
+  larger at higher concurrency where consumers stack up)
+- error-path serialisation is gone for the protocol-error responses
+- the API shape is now right for httptools' speed: the backend
+  produces ``path`` / ``query_string`` natively, with the same
+  cost on h11
+
+192 / 192 ``tests/http/`` green. ``just check`` clean on all
+touched files.
+
+### One-time API break
+
+``Request`` gained two non-default fields (``path``, ``query_string``).
+Code constructing ``Request`` by hand needs both. All in-tree
+backends and the one test fixture (``tests/http/service.py``) that
+built a ``Request`` directly are updated. User code using
+``HTTPReqCtx.request.target`` is unaffected — ``target`` is preserved.
+
+### What we didn't ship
+
+- **Reusing ``_cur_headers`` across requests on a conn (httptools).**
+  Investigated and dropped: the previous Request holds the list, so
+  reuse requires a fresh copy at Request construction (O(N)),
+  replacing a per-request ``[]`` allocation that's already O(1) via
+  CPython's list freelist. Net loss, plus it weakens Request's
+  effective immutability.
+- **Caching header-presence flags on ``Response``.** Per-response
+  scan in ``_scan_response_headers`` is real but tiny (2-4 headers
+  on typical JSON responses). The clean fix needs mutable cache
+  slots on a frozen dataclass; not worth the structural change for
+  the measured impact. The static error responses bypass the scan
+  entirely now via the pre-serialised path (see above).
+- **Lowercasing common header names via an intern table** in the
+  httptools ``on_header`` callback. Profile evidence didn't push us
+  there; revisit if a future profile shows ``name.lower()``
+  alloc cost climbing.
+
 ## What's left for future perf work
 
 Within the [Optimisation boundaries](#optimisation-boundaries) at the top of
@@ -969,10 +1078,6 @@ this doc:
 - **Pre-baked common headers** (Date, Server) cached per-second on the
   ``BaseServer``, written by both backends — only if we ever auto-emit
   them.
-- **Per-request allocation diet.** Drop redundant ``bytes()`` copies in
-  the httptools callbacks; cache header-presence flags so we stop scanning
-  ``_has_connection_close`` / ``_has_content_length_or_te`` linearly per
-  response.
 
 Explicit non-goals (per [Optimisation boundaries](#optimisation-boundaries)):
 multi-process, async/ASGI on the server side, thread-per-connection rewrite
