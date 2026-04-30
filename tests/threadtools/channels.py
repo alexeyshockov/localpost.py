@@ -1,7 +1,7 @@
 import threading
 import time
 import pytest
-from anyio import EndOfStream, ClosedResourceError
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from localpost import threadtools
 from localpost.threadtools import Channel, SendChannel
@@ -200,6 +200,71 @@ def test_blocking_receive(no_anyio):
     sender_thread.join(timeout=1.0)
 
     assert result == ["delayed message"]
+
+
+def test_negative_capacity_rejected(no_anyio):
+    """Channel capacities are None, 0, or a positive integer."""
+    with pytest.raises(ValueError, match="capacity"):
+        Channel.create(capacity=-1)
+
+
+def test_rendezvous_put_nowait_requires_waiting_receiver(no_anyio):
+    """A capacity=0 channel has no spare buffer slot for put_nowait."""
+    sender, receiver = Channel.create(capacity=0)
+    try:
+        with pytest.raises(WouldBlock):
+            sender.put_nowait("not-yet")
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_rendezvous_put_nowait_hands_off_to_waiting_receiver(no_anyio):
+    sender, receiver = Channel.create(capacity=0)
+    received: list[str] = []
+
+    def receive() -> None:
+        received.append(receiver.get())
+
+    receiver_thread = threading.Thread(target=receive)
+    receiver_thread.start()
+
+    deadline = time.monotonic() + 1.0
+    while sender._state.waiting_receivers == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+
+    try:
+        assert sender._state.waiting_receivers == 1
+        sender.put_nowait("ready")
+        receiver_thread.join(timeout=1.0)
+        assert not receiver_thread.is_alive()
+        assert received == ["ready"]
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_rendezvous_put_blocks_until_receiver_consumes(no_anyio):
+    sender, receiver = Channel.create(capacity=0)
+    sent = threading.Event()
+
+    def send() -> None:
+        sender.put("value")
+        sent.set()
+
+    sender_thread = threading.Thread(target=send)
+    sender_thread.start()
+
+    try:
+        time.sleep(0.05)
+        assert not sent.is_set()
+        assert receiver.get() == "value"
+        sender_thread.join(timeout=1.0)
+        assert not sender_thread.is_alive()
+        assert sent.is_set()
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_concurrent_stress(no_anyio):

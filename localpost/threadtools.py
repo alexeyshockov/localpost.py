@@ -203,11 +203,14 @@ class ChannelState[T]:
     capacity: int | None
     open_send_channels: int
     open_receive_channels: int
+    waiting_receivers: int
     _lock: CancellableLock
     not_empty: threading.Condition
     not_full: threading.Condition
 
     def __init__(self, capacity: int | None = None):
+        if capacity is not None and capacity < 0:
+            raise ValueError("capacity must be >= 0 or None")
         self.buffer = deque()
         self.capacity = capacity
         """
@@ -217,6 +220,7 @@ class ChannelState[T]:
         """
         self.open_send_channels = 0
         self.open_receive_channels = 0
+        self.waiting_receivers = 0
         self._lock = CancellableLock(threading.RLock())
         self.not_empty = cancellable_condition(self._lock)
         self.not_full = cancellable_condition(self._lock)
@@ -226,6 +230,14 @@ class ChannelState[T]:
         if self.open_receive_channels == 0:  # TODO Make this state permanent
             raise ClosedResourceError("no more receivers")
         return self.capacity is None or len(self.buffer) < max(self.capacity, 1)
+
+    @property
+    def can_put_nowait(self) -> bool:
+        if self.open_receive_channels == 0:  # TODO Make this state permanent
+            raise ClosedResourceError("no more receivers")
+        if self.capacity == 0:
+            return len(self.buffer) == 0 and self.waiting_receivers > 0
+        return self.capacity is None or len(self.buffer) < self.capacity
 
     def __enter__(self) -> Self:
         self._lock.acquire()
@@ -257,7 +269,7 @@ class SendChannel[T](BaseSendChannel[T]):
         with self._state as state:
             if self._closed:
                 raise ClosedResourceError("send channel has been closed")
-            if not state.can_put:
+            if not state.can_put_nowait:
                 raise WouldBlock
             state.buffer.append(item)
             state.not_empty.notify()
@@ -327,7 +339,11 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
                     return item
                 if state.open_send_channels == 0:
                     raise EndOfStream("no more senders")
-                state.not_empty.wait()
+                state.waiting_receivers += 1
+                try:
+                    state.not_empty.wait()
+                finally:
+                    state.waiting_receivers -= 1
         raise ClosedResourceError("receive channel has been closed")
 
     @override
