@@ -556,9 +556,7 @@ class TestStreamingRoutes:
                 with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as sock:
                     sock.sendall(
                         b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
-                        b"10\r\n"
-                        + (b"x" * 16)
-                        + b"\r\n0\r\n\r\n"
+                        b"10\r\n" + (b"x" * 16) + b"\r\n0\r\n\r\n"
                     )
                     return drain_socket(sock, deadline=2.0)
 
@@ -626,8 +624,8 @@ class TestStreamingRoutes:
 
         def handler(ctx: HTTPReqCtx):
             def dispatch(req_ctx: HTTPReqCtx) -> None:
-                req_ctx._server.stop_tracking(req_ctx._conn)
-                conn = cast(Any, req_ctx._conn)
+                req_ctx.server.stop_tracking(req_ctx.conn)
+                conn = cast(Any, req_ctx.conn)
                 captured["buffer_before_receive"] = bytes(conn._streaming_body_buf)
                 captured["eom_before_receive"] = conn._streaming_eom
                 chunks: list[bytes] = []
@@ -649,10 +647,7 @@ class TestStreamingRoutes:
             def hit() -> bytes:
                 payload = b"a" * 1024
                 with socket.create_connection(("127.0.0.1", free_port), timeout=3.0) as s:
-                    s.sendall(
-                        b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1024\r\n\r\n"
-                        + payload
-                    )
+                    s.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 1024\r\n\r\n" + payload)
                     buf = b""
                     while b"\r\n\r\nok" not in buf:
                         chunk = s.recv(4096)

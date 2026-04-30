@@ -1,7 +1,7 @@
 """URI-template router for LocalPost HTTP — a thin dispatcher middleware.
 
 Matches the request URI against a table of compiled :class:`URITemplate` s,
-attaches the :class:`RouteMatch` to ``ctx.attrs["route_match"]``, and
+attaches the :class:`RouteMatch` to ``ctx.attrs[RouteMatch]``, and
 delegates to the matched route's :data:`localpost.http.RequestHandler`.
 
 404 / 405 are answered inline on the selector. The :class:`Router`
@@ -75,7 +75,7 @@ class URITemplate:
 @final
 @dataclass(frozen=True, slots=True)
 class RouteMatch:
-    """Attached to ``ctx.attrs["route_match"]`` by :class:`Router` on a successful match.
+    """Attached to ``ctx.attrs[RouteMatch]`` by :class:`Router` on a successful match.
 
     Read via :func:`route_match` from inside a route handler or middleware.
     """
@@ -91,7 +91,7 @@ def route_match(ctx: HTTPReqCtx) -> RouteMatch:
     Raises :exc:`KeyError` if called outside a route handler (or before
     the Router has run).
     """
-    return ctx.attrs["route_match"]
+    return ctx.attrs[RouteMatch]
 
 
 @final
@@ -130,11 +130,13 @@ class Routes:
 
         routes = Routes()
 
+
         @routes.get("/hello/{name}")
         def hello(ctx: HTTPReqCtx) -> BodyHandler | None:
             match = route_match(ctx)
             ctx.complete(NativeResponse(...), b"hi " + match.path_args["name"].encode())
             return None
+
 
         router = routes.build()
     """
@@ -151,9 +153,7 @@ class Routes:
         key = _find_template(self.paths, template) or URITemplate.parse(template)
         self.paths.setdefault(key, {})[m] = handler
 
-    def _decorator(
-        self, method: HTTPMethod, template: str
-    ) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
+    def _decorator(self, method: HTTPMethod, template: str) -> Callable[[NativeRequestHandler], NativeRequestHandler]:
         def deco(handler: NativeRequestHandler) -> NativeRequestHandler:
             self.add(method, template, handler)
             return handler
@@ -273,7 +273,7 @@ class Router:
     def as_handler(self) -> NativeRequestHandler:
         """Return a :data:`localpost.http.RequestHandler` that dispatches via this router.
 
-        On a match, attaches :class:`RouteMatch` to ``ctx.attrs["route_match"]``
+        On a match, attaches :class:`RouteMatch` to ``ctx.attrs[RouteMatch]``
         and delegates to the registered per-route handler. 404 / 405 are
         answered inline (via ``ctx.complete``) using pre-built responses;
         the body bytes (if any) are silently drained by the http layer.
@@ -297,7 +297,7 @@ class Router:
                 ctx.complete(response, body)
                 return None
 
-            ctx.attrs["route_match"] = match.match
+            ctx.attrs[RouteMatch] = match.match
             return match.handler(ctx)
 
         return dispatch
@@ -392,5 +392,3 @@ def _build_method_not_allowed(allow_header: str) -> tuple[_NativeResponse, bytes
         extra_headers=((b"Allow", allow_header.encode("ascii")),),
     )
     return response, _METHOD_NOT_ALLOWED_BODY
-
-

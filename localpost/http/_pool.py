@@ -46,9 +46,6 @@ from localpost.http._types import BodyTooLarge
 from localpost.http.config import LOGGER_NAME
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
 
-__all__ = ["thread_pool_handler", "streaming_pool_handler"]
-
-
 # --- Internal pool primitive --------------------------------------------
 
 
@@ -107,15 +104,15 @@ class _Pool:
         shutdown_event = self._shutdown_event
 
         def dispatched(ctx: HTTPReqCtx) -> None:
-            ctx._server.stop_tracking(ctx._conn)
-            cancel = RequestCancel(_sock=ctx._conn.sock, _shutdown_event=shutdown_event)
+            ctx.server.stop_tracking(ctx.conn)
+            cancel = RequestCancel(_sock=ctx.conn.sock, _shutdown_event=shutdown_event)
             try:
                 tx.put_nowait((ctx, cancel, fn))
             except WouldBlock:
                 _reject_overloaded(ctx)
             except (ClosedResourceError, BrokenResourceError):
                 with suppress(Exception):
-                    ctx._conn.close()
+                    ctx.conn.close()
 
         return dispatched
 
@@ -130,7 +127,7 @@ def _reject_overloaded(ctx: HTTPReqCtx) -> None:
     with suppress(Exception):
         ctx.complete(SERVICE_UNAVAILABLE_RESPONSE, SERVICE_UNAVAILABLE_BODY)
     with suppress(Exception):
-        ctx._conn.close()
+        ctx.conn.close()
 
 
 @asynccontextmanager
@@ -165,7 +162,7 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
                         except RequestCancelled:
                             # Handler bailed cleanly. Connection state is uncertain — close.
                             with suppress(Exception):
-                                ctx._conn.close()
+                                ctx.conn.close()
                         except BodyTooLarge:
                             _emit_body_too_large(ctx)
                         except Exception:
@@ -181,7 +178,7 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
                     # On the success path the handler's ``finish_response``
                     # already re-tracked the conn via ``_maybe_give_back`` —
                     # we MUST NOT touch it here. We can't read
-                    # ``ctx._conn.tracked`` either: that field is shared
+                    # ``ctx.conn.tracked`` either: that field is shared
                     # with the next request's dispatcher, which clears it
                     # via ``stop_tracking`` before this finally runs.
                     #
@@ -191,7 +188,7 @@ async def _pool_context(max_concurrency: int) -> AsyncGenerator[_Pool]:
                     # ``cancel.fired`` is the cheap (no-syscall) check.
                     if cancel.fired:
                         with suppress(Exception):
-                            ctx._conn.close()
+                            ctx.conn.close()
 
     async def run_worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
         await to_thread.run_sync(worker, my_rx, limiter=workers_limiter)
@@ -214,12 +211,14 @@ def _emit_body_too_large(ctx: HTTPReqCtx) -> None:
             ctx.complete(PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_BODY)
             return
     with suppress(Exception):
-        ctx._conn.close()
+        ctx.conn.close()
 
 
 # --- Public wrappers ----------------------------------------------------
 
 
+# TODO Make sure we can configure 1) max_concurrency and 2) backlog. By default backlog should be 0,
+# so we block when max_concurrency is reached.
 def thread_pool_handler(
     inner: RequestHandler,
     /,
@@ -260,9 +259,7 @@ def thread_pool_handler(
 
 
 @asynccontextmanager
-async def _thread_pool_handler(
-    inner: RequestHandler, max_concurrency: int
-) -> AsyncGenerator[RequestHandler]:
+async def _thread_pool_handler(inner: RequestHandler, max_concurrency: int) -> AsyncGenerator[RequestHandler]:
     async with _pool_context(max_concurrency) as pool:
 
         def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
@@ -303,6 +300,7 @@ def streaming_pool_handler(
                     f.write(chunk)
             ctx.complete(NativeResponse(204, [(b"content-length", b"0")]), b"")
 
+
         async with streaming_pool_handler(upload, max_concurrency=4) as h:
             async with http_server(config, h):
                 ...
@@ -313,8 +311,6 @@ def streaming_pool_handler(
 
 
 @asynccontextmanager
-async def _streaming_pool_handler(
-    inner: _WorkFn, max_concurrency: int
-) -> AsyncGenerator[RequestHandler]:
+async def _streaming_pool_handler(inner: _WorkFn, max_concurrency: int) -> AsyncGenerator[RequestHandler]:
     async with _pool_context(max_concurrency) as pool:
         yield pool.dispatch_streaming(inner)

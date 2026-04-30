@@ -28,14 +28,17 @@ Example::
 
     app = HttpApp()
 
+
     @app.get("/{name}")
     def hello(name: str):
         return f"Hello, {name}!"
+
 
     @app.post("/{name}/profile")
     def update_profile(ctx: HTTPReqCtx, name: str):
         profile = json.loads(ctx.body)
         return {"updated": name, "profile": profile}
+
 
     @app.post("/{name}/avatar", buffer_body=False)
     def upload_avatar(ctx: HTTPReqCtx, name: str):
@@ -45,6 +48,7 @@ Example::
                 f.write(chunk)
         return NativeResponse(status_code=204, headers=[(b"content-length", b"0")])
 
+
     sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
 """
 
@@ -52,7 +56,6 @@ from __future__ import annotations
 
 import inspect
 import json
-import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
@@ -93,9 +96,7 @@ def _build_resolvers(fn: Callable[..., Any], path: str) -> dict[str, _ParamResol
     resolvers: dict[str, _ParamResolver] = {}
     for name, param in sig.parameters.items():
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            raise ValueError(
-                f"handler {fn_name!r}: *args / **kwargs not supported in handler signatures"
-            )
+            raise ValueError(f"handler {fn_name!r}: *args / **kwargs not supported in handler signatures")
         if name in template_vars:
             resolvers[name] = _make_path_arg_resolver(name)
             continue
@@ -278,9 +279,7 @@ class HttpApp:
 
     # ----- Building -----
 
-    def _build_buffered_handler(
-        self, route: _Route, pool: _Pool | None
-    ) -> RequestHandler:
+    def _build_buffered_handler(self, route: _Route, pool: _Pool | None) -> RequestHandler:
         """Buffered route: pre-body returns BodyHandler that, if pooled,
         dispatches to a worker; otherwise runs inline on selector."""
         resolvers = _build_resolvers(route.fn, route.path)
@@ -305,9 +304,7 @@ class HttpApp:
 
         return self._with_route_middleware(pre_body_inline, route.middleware)
 
-    def _build_streaming_handler(
-        self, route: _Route, pool: _Pool
-    ) -> RequestHandler:
+    def _build_streaming_handler(self, route: _Route, pool: _Pool) -> RequestHandler:
         """Streaming route: pre-body borrows + queues for a worker,
         which runs the user fn on a blocking conn (body not buffered).
         """
@@ -320,13 +317,9 @@ class HttpApp:
             response, body = _wrap_response(result)
             ctx.complete(response, body)
 
-        return self._with_route_middleware(
-            pool.dispatch_streaming(streaming_inner), route.middleware
-        )
+        return self._with_route_middleware(pool.dispatch_streaming(streaming_inner), route.middleware)
 
-    def _with_route_middleware(
-        self, handler: RequestHandler, middleware: tuple[Middleware, ...]
-    ) -> RequestHandler:
+    def _with_route_middleware(self, handler: RequestHandler, middleware: tuple[Middleware, ...]) -> RequestHandler:
         if not middleware:
             return handler
         return compose(*middleware)(handler)
@@ -381,20 +374,3 @@ class HttpApp:
                     yield
 
         return _app_service()
-
-
-# ---- Example usage ----------------------------------------------------
-
-if __name__ == "__main__":
-    app = HttpApp()
-
-    @app.get("/{name}")
-    def hello(name: str):
-        return f"Hello, {name}!"
-
-    @app.post("/{name}/profile")
-    def update_user_profile(ctx: HTTPReqCtx, name: str):
-        profile = json.loads(ctx.body)
-        return {"updated_for": name, "profile": profile}
-
-    sys.exit(hosting.run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))

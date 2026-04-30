@@ -49,9 +49,10 @@ __all__ = ["start_http_server", "HTTPConnH11", "HTTPReqCtxH11"]
 
 
 def _to_h11_response(r: Response | InformationalResponse) -> h11.Response | h11.InformationalResponse:
+    headers: list[tuple[bytes, bytes]] = list(r.headers)
     if isinstance(r, Response):
-        return h11.Response(status_code=r.status_code, headers=r.headers, reason=r.reason)
-    return h11.InformationalResponse(status_code=r.status_code, headers=r.headers, reason=r.reason)
+        return h11.Response(status_code=r.status_code, headers=headers, reason=r.reason)
+    return h11.InformationalResponse(status_code=r.status_code, headers=headers, reason=r.reason)
 
 
 def _content_length(headers) -> int | None:
@@ -167,11 +168,7 @@ class HTTPConnH11(BaseHTTPConn):
                     if self._continuation is not None:
                         # Body is wanted (handler returned a continuation) —
                         # tell the client to send it. Fall through to recv.
-                        self.send(
-                            h11.InformationalResponse(
-                                status_code=100, headers=[], reason="Continue"
-                            )
-                        )
+                        self.send(h11.InformationalResponse(status_code=100, headers=[], reason="Continue"))
                     else:
                         # No body needed — short-circuit with 417.
                         self.send(h11.Response(status_code=417, headers=[], reason="Expectation Failed"))
@@ -312,24 +309,24 @@ class HTTPReqCtxH11:
     chunk in a single ``sendall``.
     """
 
-    _server: BaseServer
-    _conn: HTTPConnH11
+    server: BaseServer
+    conn: HTTPConnH11
     request: Request
 
     body: bytes = b""
     response_status: int | None = None
-    attrs: dict[str, Any] = field(default_factory=dict)
+    attrs: dict[Any, Any] = field(default_factory=dict)
     _pending_header_bytes: bytes | None = None
 
     @property
     def borrowed(self) -> bool:
-        return not self._conn.tracked
+        return not self.conn.tracked
 
     @contextmanager
     def borrow(self) -> Iterator[HTTPReqCtxH11]:
         """Switch the conn out of selector tracking for the duration of the block."""
         assert not self.borrowed
-        self._server.stop_tracking(self._conn)
+        self.server.stop_tracking(self.conn)
         try:
             yield self
         finally:
@@ -345,13 +342,13 @@ class HTTPReqCtxH11:
         # "no more data" signal. ``gettimeout`` reads cached state on the
         # socket object (no syscall), so the no-fallback common case
         # pays nothing.
-        sock = self._conn.sock
+        sock = self.conn.sock
         if sock.gettimeout() != 0:
             try:
                 sock.settimeout(0)
             except OSError:
                 pass
-        self._server.track(self._conn)
+        self.server.track(self.conn)
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         self.start_response(response)
@@ -364,11 +361,11 @@ class HTTPReqCtxH11:
         callers receive the buffered body via ``ctx.body``. After the
         :data:`BodyHandler` continuation runs, the body has been fully
         consumed and the parser's state side reads ``b""``."""
-        parser = self._conn.parser
+        parser = self.conn.parser
         if parser.their_state is h11.DONE:
             return b""
         if parser.they_are_waiting_for_100_continue:
-            self._conn.send(h11.InformationalResponse(status_code=100, headers=[], reason="Continue"))
+            self.conn.send(h11.InformationalResponse(status_code=100, headers=[], reason="Continue"))
         while True:
             event = parser.next_event()
             if event is h11.NEED_DATA:
@@ -378,20 +375,20 @@ class HTTPReqCtxH11:
                 # so the next iteration's ``recv`` skips the BlockingIOError
                 # path entirely; the give-back path resets it on hand-back.
                 # On the selector thread we restore non-blocking inline.
-                sock = self._conn.sock
+                sock = self.conn.sock
                 try:
-                    self._conn.receive(size)
+                    self.conn.receive(size)
                 except BlockingIOError:
-                    sock.settimeout(self._server.config.rw_timeout)
+                    sock.settimeout(self.server.config.rw_timeout)
                     try:
-                        self._conn.receive(size)
+                        self.conn.receive(size)
                     finally:
-                        if self._conn.tracked:
+                        if self.conn.tracked:
                             sock.settimeout(0)
             elif isinstance(event, h11.Data):
-                self._conn.body_bytes_received += len(event.data)
-                if self._conn.body_bytes_received > self._server.config.max_body_size:
-                    raise BodyTooLarge(self._conn.body_bytes_received)
+                self.conn.body_bytes_received += len(event.data)
+                if self.conn.body_bytes_received > self.server.config.max_body_size:
+                    raise BodyTooLarge(self.conn.body_bytes_received)
                 return bytes(event.data)
             elif isinstance(event, h11.EndOfMessage):
                 return b""
@@ -403,17 +400,17 @@ class HTTPReqCtxH11:
             self.response_status = response.status_code
             # Drive the h11 state machine, but buffer the bytes for a
             # coalesced ``sendall`` with the first body chunk.
-            payload = self._conn.parser.send(_to_h11_response(response))
+            payload = self.conn.parser.send(_to_h11_response(response))
             self._pending_header_bytes = bytes(payload) if payload else b""
         else:
             # Informational responses (100 Continue, etc.) flush immediately.
-            self._conn.send(_to_h11_response(response))
+            self.conn.send(_to_h11_response(response))
 
     def send(self, chunk: Buffer, /) -> None:
         # h11 wants bytes; widen the public API to any Buffer (memoryview,
         # bytearray, …) so callers can avoid an explicit copy.
         chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
-        payload = self._conn.parser.send(h11.Data(data=chunk_bytes))
+        payload = self.conn.parser.send(h11.Data(data=chunk_bytes))
         if payload is None:
             return
         if self._pending_header_bytes is not None:
@@ -427,7 +424,7 @@ class HTTPReqCtxH11:
         # Coalesce: ``EndOfMessage`` payload (chunked terminator or nothing)
         # plus any still-pending header bytes (empty-body case) emit in one
         # ``sendall``.
-        eom_payload = self._conn.parser.send(h11.EndOfMessage())
+        eom_payload = self.conn.parser.send(h11.EndOfMessage())
         eom_bytes = bytes(eom_payload) if eom_payload else b""
         if self._pending_header_bytes is not None:
             combined = self._pending_header_bytes + eom_bytes
@@ -445,16 +442,16 @@ class HTTPReqCtxH11:
         #
         # If h11 needs more bytes (handler didn't read a non-empty body),
         # close the conn — keep-alive isn't safe with un-drained body bytes.
-        parser = self._conn.parser
+        parser = self.conn.parser
         while parser.their_state is not h11.DONE:
             event = parser.next_event()
             if event is h11.NEED_DATA or event is h11.PAUSED or isinstance(event, h11.ConnectionClosed):
-                self._conn.close()
+                self.conn.close()
                 return
         self._maybe_give_back()
 
     def _sock_sendall(self, payload: bytes) -> None:
-        _send_all(self._conn, payload)
+        _send_all(self.conn, payload)
 
 
 def start_http_server(config: ServerConfig, handler: RequestHandler, /):

@@ -82,9 +82,7 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
                     exc_info = None
             status_code = int(status.split(" ", 1)[0])
             reason = status.split(" ", 1)[1] if " " in status else ""
-            wire_headers = [
-                (name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in headers
-            ]
+            wire_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in headers]
             response_state["response"] = _NativeResponse(
                 status_code=status_code,
                 headers=wire_headers,
@@ -141,8 +139,8 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
         "QUERY_STRING": query_string,
         "CONTENT_TYPE": "",
         "CONTENT_LENGTH": "",
-        "SERVER_NAME": ctx._server.config.host,
-        "SERVER_PORT": str(ctx._server.port),
+        "SERVER_NAME": ctx.server.config.host,
+        "SERVER_PORT": str(ctx.server.port),
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": "http",

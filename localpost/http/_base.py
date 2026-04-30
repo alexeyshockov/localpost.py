@@ -139,11 +139,12 @@ class HTTPReqCtx(Protocol):
     """Per-request context handed to a :data:`RequestHandler`.
 
     Both server backends populate concrete implementations of this Protocol
-    with the same observable surface. ``_server`` and ``_conn`` are not
-    public API but are documented here because :func:`thread_pool_handler`
-    reaches into them to borrow the connection for a worker. They're
-    declared as read-only properties so covariant subtypes (concrete
-    ``HTTPConnH11`` / ``HTTPConnHttptools``) satisfy the Protocol.
+    with the same observable surface. ``server`` and ``conn`` give access
+    to the underlying server / connection for advanced use cases — e.g.
+    :func:`thread_pool_handler` reaches into them to borrow the connection
+    for a worker. They're declared as read-only properties so covariant
+    subtypes (concrete ``HTTPConnH11`` / ``HTTPConnHttptools``) satisfy
+    the Protocol.
 
     The ``body`` attribute is empty when a :data:`RequestHandler` runs
     (pre-body phase). It is populated by the selector with the fully
@@ -158,12 +159,12 @@ class HTTPReqCtx(Protocol):
     request: Request
     body: bytes
     response_status: int | None
-    attrs: dict[str, Any]
+    attrs: dict[Any, Any]
 
     @property
-    def _server(self) -> BaseServer: ...
+    def server(self) -> BaseServer: ...
     @property
-    def _conn(self) -> BaseHTTPConn: ...
+    def conn(self) -> BaseHTTPConn: ...
     @property
     def borrowed(self) -> bool: ...
     def borrow(self) -> AbstractContextManager[HTTPReqCtx]: ...
@@ -287,7 +288,7 @@ def emit_handler_error(ctx: HTTPReqCtx) -> None:
             logger.exception("Failed to send 500 after handler error; closing")
         else:
             return
-    ctx._conn.close()
+    ctx.conn.close()
 
 
 class BaseHTTPConn(ABC):
@@ -341,12 +342,10 @@ class BaseHTTPConn(ABC):
         if not was_tracked:
             return
         if threading.get_ident() == self.server._selector_thread_id:
-            sel = self.server.selector
-            if self.fd in sel.get_map():
-                try:
-                    sel.unregister(self.fd)
-                except (KeyError, ValueError):
-                    pass
+            try:
+                self.server.selector.unregister(self.fd)
+            except (KeyError, ValueError):
+                pass
         else:
             self.server._ops.append(_OpClose(self.fd))
             self.server._wake()

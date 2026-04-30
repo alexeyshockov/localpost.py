@@ -1,6 +1,6 @@
 """Tests for localpost.http.router — the lean dispatcher.
 
-The Router attaches a :class:`RouteMatch` to ``ctx.attrs["route_match"]``
+The Router attaches a :class:`RouteMatch` to ``ctx.attrs[RouteMatch]``
 and delegates to the registered :class:`localpost.http.RequestHandler`.
 404 / 405 are answered inline. Pythonic helpers (response converters,
 param injection, etc.) live in ``HttpApp``; tests for those live elsewhere.
@@ -136,7 +136,7 @@ class TestRouteMatchAttached:
         assert captured["path_args"] == {"book_id": "xyz-123"}
 
     def test_route_match_outside_router_raises(self):
-        # ``route_match`` reads ``ctx.attrs["route_match"]``; outside a router
+        # ``route_match`` reads ``ctx.attrs[RouteMatch]``; outside a router
         # the key is missing and we get the natural KeyError. Documented.
         ctx = Mock()
         ctx.attrs = {}

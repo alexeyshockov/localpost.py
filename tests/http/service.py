@@ -432,11 +432,9 @@ class _FakeServer:
 
 class _DeferringCtx:
     def __init__(self, server: _FakeServer, conn: _FakeConn) -> None:
-        self._server = server
-        self._conn = conn
-        self.request = Request(
-            method=b"POST", target=b"/upload", path=b"/upload", query_string=b"", headers=[]
-        )
+        self.server = server
+        self.conn = conn
+        self.request = Request(method=b"POST", target=b"/upload", path=b"/upload", query_string=b"", headers=[])
         self.body = b""
         self.response_status = None
         self.attrs = {}
@@ -467,7 +465,7 @@ class TestServiceRobustness:
                 ctx.deferred()
                 assert await to_thread.run_sync(lambda: ran.wait(2.0))
                 assert server.stopped is True
-                assert ctx._conn.tracked is False
+                assert ctx.conn.tracked is False
         finally:
             sock.close()
             peer.close()

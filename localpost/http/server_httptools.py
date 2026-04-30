@@ -26,17 +26,12 @@ from __future__ import annotations
 
 import socket
 import time
-from collections.abc import Buffer, Callable, Iterator
+from collections.abc import Buffer, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, final
 
-try:
-    import httptools
-except ImportError as _e:  # pragma: no cover
-    raise ImportError(
-        "httptools is not installed. Install with: pip install localpost[http-fast]"
-    ) from _e
+import httptools
 
 from localpost.http._base import (
     BAD_REQUEST_WIRE,
@@ -95,7 +90,7 @@ def _serialize_response(r: Response | InformationalResponse) -> bytes:
     return bytes(out)
 
 
-def _scan_response_headers(headers: list[tuple[bytes, bytes]]) -> tuple[bool, bool]:
+def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool, bool]:
     """One-pass scan: ``(has_connection_close, has_content_length_or_te)``.
 
     Combined to avoid two walks per response.
@@ -343,9 +338,7 @@ class HTTPConnHttptools(BaseHTTPConn):
             except BodyTooLarge:
                 raise
             except Exception:
-                self.server.logger.exception(
-                    "Body handler raised for %s %r", ctx.request.method, ctx.request.target
-                )
+                self.server.logger.exception("Body handler raised for %s %r", ctx.request.method, ctx.request.target)
                 emit_handler_error(ctx)
         self._message_complete = True
 
@@ -475,15 +468,15 @@ class HTTPReqCtxHttptools:
     chunk together; one per subsequent chunk).
     """
 
-    _server: BaseServer
-    _conn: HTTPConnHttptools
+    server: BaseServer
+    conn: HTTPConnHttptools
     request: Request
     _expect_100_continue: bool = False
     _keep_alive: bool = True
 
     body: bytes = b""
     response_status: int | None = None
-    attrs: dict[str, Any] = field(default_factory=dict)
+    attrs: dict[Any, Any] = field(default_factory=dict)
     _continue_sent: bool = False
     _chunked: bool = False
     """``True`` if the backend auto-added ``Transfer-Encoding: chunked`` because
@@ -495,12 +488,12 @@ class HTTPReqCtxHttptools:
 
     @property
     def borrowed(self) -> bool:
-        return not self._conn.tracked
+        return not self.conn.tracked
 
     @contextmanager
     def borrow(self) -> Iterator[HTTPReqCtxHttptools]:
         assert not self.borrowed
-        self._server.stop_tracking(self._conn)
+        self.server.stop_tracking(self.conn)
         try:
             yield self
         finally:
@@ -516,8 +509,8 @@ class HTTPReqCtxHttptools:
         body bytes from the current packet are buffered by ``on_body``, then
         let ``_feed`` run the handoff once callbacks are done.
         """
-        self._conn._streaming_active = True
-        self._conn._deferred_streaming_dispatch = lambda: dispatcher(self)
+        self.conn._streaming_active = True
+        self.conn._deferred_streaming_dispatch = lambda: dispatcher(self)
 
     def _maybe_give_back(self) -> None:
         if not self.borrowed:
@@ -528,13 +521,13 @@ class HTTPReqCtxHttptools:
         # non-blocking socket. ``gettimeout`` reads cached state on the
         # socket object (no syscall), so the no-fallback common case
         # pays nothing.
-        sock = self._conn.sock
+        sock = self.conn.sock
         if sock.gettimeout() != 0:
             try:
                 sock.settimeout(0)
             except OSError:
                 pass
-        self._server.track(self._conn)
+        self.server.track(self.conn)
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         self.start_response(response)
@@ -561,8 +554,8 @@ class HTTPReqCtxHttptools:
         if self._expect_100_continue and not self._continue_sent:
             self._send_continue()
 
-        conn = self._conn
-        rw = self._server.config.rw_timeout
+        conn = self.conn
+        rw = self.server.config.rw_timeout
 
         if conn._streaming_active:
             while not conn._streaming_body_buf and not conn._streaming_eom:
@@ -607,7 +600,7 @@ class HTTPReqCtxHttptools:
                     conn.sock.settimeout(0)
 
     def _send_continue(self) -> None:
-        _send_all(self._conn, b"HTTP/1.1 100 Continue\r\n\r\n")
+        _send_all(self.conn, b"HTTP/1.1 100 Continue\r\n\r\n")
         self._continue_sent = True
 
     def start_response(self, response: Response | InformationalResponse, /) -> None:
@@ -616,10 +609,10 @@ class HTTPReqCtxHttptools:
         # bytes without buffering (rare path).
         if isinstance(response, Response):
             self.response_status = response.status_code
-            self._conn._response_started = True
+            self.conn._response_started = True
             has_close, has_framing = _scan_response_headers(response.headers)
             if has_close or not self._keep_alive:
-                self._conn._close_after_response = True
+                self.conn._close_after_response = True
             if not has_framing:
                 # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
                 # Without framing, an HTTP/1.1 client would wait for the
@@ -633,7 +626,7 @@ class HTTPReqCtxHttptools:
             self._pending_header_bytes = _serialize_response(response)
         else:
             # Informational responses (e.g., 100 Continue) flush immediately.
-            _send_all(self._conn, _serialize_response(response))
+            _send_all(self.conn, _serialize_response(response))
 
     def send(self, chunk: Buffer, /) -> None:
         if not isinstance(chunk, bytes):
@@ -643,20 +636,20 @@ class HTTPReqCtxHttptools:
         framed = (f"{len(chunk):x}\r\n".encode("ascii") + chunk + b"\r\n") if self._chunked and chunk else chunk
         if self._pending_header_bytes is not None:
             # Headers + first body chunk in one syscall.
-            _send_all(self._conn, self._pending_header_bytes + framed)
+            _send_all(self.conn, self._pending_header_bytes + framed)
             self._pending_header_bytes = None
         elif framed:
-            _send_all(self._conn, framed)
+            _send_all(self.conn, framed)
 
     def finish_response(self) -> None:
         # Flush any still-buffered headers (empty-body case) plus the
         # chunked terminator, in one sendall.
         terminator = b"0\r\n\r\n" if self._chunked else b""
         if self._pending_header_bytes is not None:
-            _send_all(self._conn, self._pending_header_bytes + terminator)
+            _send_all(self.conn, self._pending_header_bytes + terminator)
             self._pending_header_bytes = None
         elif terminator:
-            _send_all(self._conn, terminator)
+            _send_all(self.conn, terminator)
         self._maybe_give_back()
 
 

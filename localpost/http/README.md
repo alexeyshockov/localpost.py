@@ -10,7 +10,7 @@ plus a URI-template router, a WSGI bridge, and a small framework
   (httptools) accept connections, parse HTTP, dispatch to a
   `RequestHandler`. ~540 lines of sync code.
 - **Router**: thin URI-template dispatcher. Matches the request,
-  attaches a `RouteMatch` to `ctx.attrs["route_match"]`, delegates to
+  attaches a `RouteMatch` to `ctx.attrs[RouteMatch]`, delegates to
   the registered handler. 404 / 405 inline.
 - **HttpApp**: decorator-driven framework — parameter injection,
   response conversion, worker-pool dispatch, middleware.

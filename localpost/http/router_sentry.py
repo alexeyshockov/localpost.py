@@ -12,8 +12,12 @@ Install::
 Usage::
 
     routes = Routes()
+
+
     @routes.get("/books/{id}")
     def get_book(ctx): ...
+
+
     router = routes.build()
 
     sentry_sdk.init(dsn=..., traces_sample_rate=1.0)

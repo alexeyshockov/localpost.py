@@ -48,7 +48,7 @@ def _spawn(port: int, *, backend: str = "asyncio", mode: str = "router", **extra
         "LP_TEST_MODE": mode,
         **extra_env,
     }
-    return subprocess.Popen(  # noqa: S603
+    return subprocess.Popen(
         [sys.executable, "-u", "-m", "tests.http._integration_app"],
         env=env,
         stdout=subprocess.PIPE,
@@ -68,8 +68,7 @@ def app_process(request) -> Iterator[tuple[int, subprocess.Popen]]:
             if proc.poll() is not None:
                 stdout, stderr = proc.communicate(timeout=1)
             pytest.fail(
-                f"Server did not become ready on port {port} (params={params}).\n"
-                f"stdout: {stdout!r}\nstderr: {stderr!r}"
+                f"Server did not become ready on port {port} (params={params}).\nstdout: {stdout!r}\nstderr: {stderr!r}"
             )
         yield port, proc
     finally:
@@ -108,9 +107,7 @@ class TestRouterIntegration:
         port, _ = app_process
         n = 8
         with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
-            futures = [
-                ex.submit(lambda: httpx.get(f"http://127.0.0.1:{port}/slow", timeout=5)) for _ in range(n)
-            ]
+            futures = [ex.submit(lambda: httpx.get(f"http://127.0.0.1:{port}/slow", timeout=5)) for _ in range(n)]
             responses = [f.result() for f in futures]
 
         assert all(r.status_code == 200 for r in responses)

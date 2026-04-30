@@ -44,6 +44,7 @@ def _serve(
         raise ValueError(f"selectors must be >= 1 (got {selectors})")
 
     if selectors == 1:
+
         def run_single(lt: ServiceLifetime) -> Awaitable[None]:
             def run_server() -> None:
                 with start(config, handler) as server:
@@ -64,9 +65,7 @@ def _serve(
     # with ``thread_pool_handler`` the underlying channel naturally accepts
     # multiple producers.
     actual_config = (
-        dataclasses.replace(config, port=_resolve_ephemeral_port(config.host))
-        if config.port == 0
-        else config
+        dataclasses.replace(config, port=_resolve_ephemeral_port(config.host)) if config.port == 0 else config
     )
 
     async def run_multi(lt: ServiceLifetime) -> None:

@@ -13,6 +13,7 @@ Field shapes intentionally match h11's wire-level conventions:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 __all__ = [
@@ -41,7 +42,7 @@ class Request:
     query_string: bytes
     """Query string of ``target`` (everything after the first ``?``), or ``b""``
     if absent. Pre-split alongside :attr:`path`."""
-    headers: list[tuple[bytes, bytes]]
+    headers: Sequence[tuple[bytes, bytes]]
     """Header pairs in arrival order. Names are lowercased; values are as-sent."""
     http_version: bytes = b"1.1"
     """HTTP version as bare bytes (``b"1.1"`` or ``b"1.0"``)."""
@@ -52,7 +53,7 @@ class Response:
     """Final response (2xx-5xx) — exactly one per request."""
 
     status_code: int
-    headers: list[tuple[bytes, bytes]]
+    headers: Sequence[tuple[bytes, bytes]]
     reason: bytes = b""
     """Reason phrase. Empty → backend supplies a default for the status code."""
 
