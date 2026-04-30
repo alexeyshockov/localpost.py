@@ -144,6 +144,12 @@ class HTTPConnHttptools(BaseHTTPConn):
 
     # Per-request scratch state populated by the parser callbacks.
     _cur_target: bytes = b""
+    """Request target. Most requests fit in one ``on_url`` call; for the rare
+    fragmented case we accumulate via ``_cur_target_buf`` and flatten in
+    ``on_headers_complete``."""
+    _cur_target_buf: bytearray | None = None
+    """Allocated lazily on the second ``on_url`` callback to merge fragments
+    without creating a new ``bytes`` per fragment."""
     _cur_headers: list[tuple[bytes, bytes]] = field(default_factory=list)
     _cur_expect_100: bool = False
     _cur_oversize: bool = False  # set by on_headers_complete if Content-Length exceeds cap
@@ -186,12 +192,20 @@ class HTTPConnHttptools(BaseHTTPConn):
 
     def on_message_begin(self) -> None:
         self._cur_target = b""
+        self._cur_target_buf = None
         self._cur_headers = []
         self._cur_expect_100 = False
         self._cur_oversize = False
 
     def on_url(self, url: bytes) -> None:
-        self._cur_target = self._cur_target + url if self._cur_target else url
+        if not self._cur_target:
+            self._cur_target = url
+            return
+        # Second+ fragment: keep a bytearray so we don't allocate a new bytes
+        # per fragment. Common case (single fragment) never enters this branch.
+        if self._cur_target_buf is None:
+            self._cur_target_buf = bytearray(self._cur_target)
+        self._cur_target_buf += url
 
     def on_header(self, name: bytes, value: bytes) -> None:
         n = name.lower()
@@ -204,6 +218,11 @@ class HTTPConnHttptools(BaseHTTPConn):
         method = self.parser.get_method()
         version = self.parser.get_http_version().encode("ascii")
         keep_alive = self.parser.should_keep_alive()
+
+        # Flatten the multi-fragment target if the rare path was hit.
+        if self._cur_target_buf is not None:
+            self._cur_target = bytes(self._cur_target_buf)
+            self._cur_target_buf = None
 
         # Eager content-length cap check.
         cl: int | None = None
@@ -219,9 +238,11 @@ class HTTPConnHttptools(BaseHTTPConn):
             self._cur_oversize = True
             return
 
+        # ``method`` and ``self._cur_target`` are already ``bytes`` (httptools
+        # callbacks deliver real ``bytes``, not memoryview/bytearray); no copy.
         req = Request(
-            method=bytes(method),
-            target=bytes(self._cur_target),
+            method=method,
+            target=self._cur_target,
             headers=self._cur_headers,
             http_version=version,
         )

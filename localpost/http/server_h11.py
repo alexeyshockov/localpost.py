@@ -213,11 +213,17 @@ class HTTPConnH11(BaseHTTPConn):
                 cl = _content_length(event.headers)
                 if cl is not None and cl > self.server.config.max_body_size:
                     raise BodyTooLarge(cl)
+                # h11 hands us ``bytes`` for method/target/version and a list
+                # of ``(bytes, bytes)`` tuples for headers. ``bytes(b)`` for an
+                # already-``bytes`` argument returns the same object, so the
+                # wraps were no-ops; the per-tuple comprehension was the only
+                # real cost. ``list(event.headers)`` is a shallow copy that
+                # insulates Request from h11's per-event Headers subclass.
                 req = Request(
-                    method=bytes(event.method),
-                    target=bytes(event.target),
-                    headers=[(bytes(n), bytes(v)) for n, v in event.headers],
-                    http_version=bytes(event.http_version),
+                    method=event.method,
+                    target=event.target,
+                    headers=list(event.headers),
+                    http_version=event.http_version,
                 )
                 ctx = HTTPReqCtxH11(self.server, self, req)
                 self._ctx = ctx
