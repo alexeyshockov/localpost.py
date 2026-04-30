@@ -163,6 +163,13 @@ def _run_oha(scenario: Scenario, port: int, duration_s: int) -> dict:
     return json.loads(result.stdout)
 
 
+def _as_float(v: float | int | str | None, default: float = 0.0) -> float:
+    # oha emits explicit JSON null for percentiles when no responses fit the
+    # bucket (e.g. flooded server, near-zero successful requests). dict.get's
+    # default kicks in only for missing keys, not present-but-null, so coerce.
+    return default if v is None else float(v)
+
+
 def _parse_oha(raw: dict) -> dict:
     summary = raw.get("summary", {})
     pct = raw.get("latencyPercentiles", {})
@@ -171,12 +178,12 @@ def _parse_oha(raw: dict) -> dict:
     sother = sum(v for k, v in status.items() if not k.startswith("2"))
     total = s2xx + sother
     return {
-        "rps": float(summary.get("requestsPerSec", 0.0)),
-        "p50_ms": float(pct.get("p50", 0.0)) * 1000,
-        "p90_ms": float(pct.get("p90", 0.0)) * 1000,
-        "p99_ms": float(pct.get("p99", 0.0)) * 1000,
+        "rps": _as_float(summary.get("requestsPerSec")),
+        "p50_ms": _as_float(pct.get("p50")) * 1000,
+        "p90_ms": _as_float(pct.get("p90")) * 1000,
+        "p99_ms": _as_float(pct.get("p99")) * 1000,
         "total_requests": total,
-        "success_rate": float(summary.get("successRate", 0.0)),
+        "success_rate": _as_float(summary.get("successRate")),
         "status_2xx": s2xx,
         "status_other": sother,
     }
