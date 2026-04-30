@@ -29,11 +29,13 @@ from anyio import (
     CapacityLimiter,
     ClosedResourceError,
     EndOfStream,
+    WouldBlock,
     create_task_group,
     to_thread,
 )
 
 from localpost import threadtools
+from localpost.http._base import SERVICE_UNAVAILABLE_BODY, SERVICE_UNAVAILABLE_RESPONSE
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
 from localpost.http.config import LOGGER_NAME
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
@@ -53,7 +55,9 @@ class _Pool:
 
     Created/torn-down by :func:`_pool_context`. Two ``dispatch_*`` methods
     let callers wire either a post-body :data:`BodyHandler` or a
-    pre-body streaming handler onto the same worker pool.
+    pre-body streaming handler onto the same worker pool. Admission is
+    non-blocking from the selector thread: if the bounded pending queue is
+    full, the request receives 503 and the connection is closed.
     """
 
     __slots__ = ("_shutdown_event", "_tx")
@@ -96,12 +100,27 @@ class _Pool:
             ctx._server.stop_tracking(ctx._conn)
             cancel = RequestCancel(_sock=ctx._conn.sock, _shutdown_event=shutdown_event)
             try:
-                tx.put((ctx, cancel, fn))
+                tx.put_nowait((ctx, cancel, fn))
+            except WouldBlock:
+                _reject_overloaded(ctx)
             except (ClosedResourceError, BrokenResourceError):
                 with suppress(Exception):
                     ctx._conn.close()
 
         return dispatched
+
+
+def _reject_overloaded(ctx: HTTPReqCtx) -> None:
+    """Fail fast when the worker queue is full.
+
+    This runs on the selector thread after the conn has been unregistered.
+    Keep the response tiny and close afterwards so unread request-body bytes
+    cannot poison keep-alive framing.
+    """
+    with suppress(Exception):
+        ctx.complete(SERVICE_UNAVAILABLE_RESPONSE, SERVICE_UNAVAILABLE_BODY)
+    with suppress(Exception):
+        ctx._conn.close()
 
 
 @asynccontextmanager
@@ -197,8 +216,10 @@ def thread_pool_handler(
     - :data:`BodyHandler` — the wrapper returns a *new* continuation
       that, when invoked by the selector after the body has been
       buffered, ``stop_tracking`` s the conn and queues the work for a
-      worker. ``max_concurrency`` workers pull from the channel and
-      run the continuation under a per-request cancel scope.
+      worker. If all workers and the bounded pending queue are full, the
+      request is rejected with 503 instead of blocking the selector.
+      ``max_concurrency`` workers pull from the channel and run the
+      continuation under a per-request cancel scope.
 
     Per-request cancellation surfaces through
     :func:`localpost.http.check_cancelled` (client disconnect via

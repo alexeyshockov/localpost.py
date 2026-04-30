@@ -31,6 +31,7 @@ from localpost.http import (
     thread_pool_handler,
 )
 from localpost.http.server import RequestHandler
+from tests.http._helpers import read_http_response
 
 pytestmark = pytest.mark.anyio
 
@@ -455,6 +456,74 @@ class TestServiceRobustness:
                 gate.set()
 
             assert peak == 3, f"expected peak 3, got {peak}"
+
+            lt.shutdown()
+            await lt.stopped
+
+    async def test_pool_overload_rejects_without_blocking_selector(self, free_port):
+        """A full worker pool + full queue returns 503 instead of blocking the selector."""
+        entered = threading.Event()
+        release = threading.Event()
+
+        def body_handler(ctx: HTTPReqCtx):
+            entered.set()
+            release.wait(timeout=5.0)
+            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+
+        routes = Routes()
+
+        @routes.get("/slow")
+        def slow(_ctx: HTTPReqCtx) -> BodyHandler:
+            return body_handler
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with _serve_pooled(cfg, routes.build().as_handler(), max_concurrency=1) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            sockets: list[socket.socket] = []
+
+            def open_slow() -> socket.socket:
+                sock = socket.create_connection(("127.0.0.1", free_port), timeout=2.0)
+                sock.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+                return sock
+
+            def open_slow_and_try_read() -> tuple[socket.socket, bytes]:
+                sock = open_slow()
+                try:
+                    return sock, read_http_response(sock, deadline=0.5)
+                except TimeoutError:
+                    return sock, b""
+
+            try:
+                sockets.append(await to_thread.run_sync(open_slow))
+                assert await to_thread.run_sync(lambda: entered.wait(2.0))
+
+                # This request occupies the single pending queue slot while
+                # the first request keeps the only worker busy.
+                sockets.append(await to_thread.run_sync(open_slow))
+                await anyio.sleep(0.1)
+
+                overload_response = b""
+                for _ in range(4):
+                    sock, response = await to_thread.run_sync(open_slow_and_try_read)
+                    sockets.append(sock)
+                    if b"HTTP/1.1 503" in response:
+                        overload_response = response
+                        break
+
+                assert b"HTTP/1.1 503" in overload_response, overload_response
+                assert b"Service Unavailable" in overload_response
+
+                # The selector must still be responsive while the worker and
+                # pending queue are saturated. A miss is answered inline.
+                r = await _get(f"http://127.0.0.1:{free_port}/missing", timeout=1.0)
+                assert r.status_code == 404
+            finally:
+                release.set()
+                for sock in sockets:
+                    with contextlib.suppress(OSError):
+                        sock.close()
 
             lt.shutdown()
             await lt.stopped

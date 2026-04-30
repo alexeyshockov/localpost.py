@@ -115,6 +115,16 @@ REQUEST_TIMEOUT_RESPONSE = Response(
     ],
 )
 
+SERVICE_UNAVAILABLE_BODY = b"Service Unavailable"
+SERVICE_UNAVAILABLE_RESPONSE = Response(
+    status_code=503,
+    headers=[
+        (b"content-type", b"text/plain; charset=utf-8"),
+        (b"content-length", str(len(SERVICE_UNAVAILABLE_BODY)).encode("ascii")),
+        (b"connection", b"close"),
+    ],
+)
+
 
 class HTTPReqCtx(Protocol):
     """Per-request context handed to a :data:`RequestHandler`.
