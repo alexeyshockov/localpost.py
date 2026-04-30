@@ -281,12 +281,11 @@ class Router:
 
         def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
             req = ctx.request
-            target = req.target.decode("iso-8859-1")
-            if "?" in target:
-                path, _ = target.split("?", 1)
-            else:
-                path = target
-            method_str = req.method.decode("ascii").upper()
+            # ``req.path`` and ``req.method`` are pre-split / pre-uppercased
+            # by the backend (httptools.parse_url for httptools, manual
+            # split for h11) — no per-dispatch decode + split.
+            path = req.path.decode("iso-8859-1")
+            method_str = req.method.decode("ascii")
 
             match = self._match(path, method_str)
 

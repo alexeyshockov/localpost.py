@@ -52,7 +52,7 @@ def sentry_router_handler(router: Router, *, op: str = "http.server") -> Request
         req = ctx.request
         method = req.method.decode("ascii")
         target = req.target.decode("iso-8859-1")
-        path = target.split("?", 1)[0] if "?" in target else target
+        path = req.path.decode("iso-8859-1")
 
         # Pre-match so the transaction name uses the URI template (low
         # cardinality). Router's dispatch will match again — cheap.

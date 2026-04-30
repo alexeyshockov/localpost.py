@@ -129,12 +129,10 @@ def _wsgi_write_deprecated(_: bytes) -> None:
 
 def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
     request = ctx.request
-    if b"?" in request.target:
-        raw_path, raw_query_string = request.target.split(b"?", 1)
-    else:
-        raw_path, raw_query_string = request.target, b""
-    path = unquote_to_bytes(raw_path).decode("iso-8859-1")
-    query_string = raw_query_string.decode("iso-8859-1")
+    # ``request.path`` / ``request.query_string`` are pre-split by the
+    # backend; only the percent-decode + ISO-8859-1 decode happens here.
+    path = unquote_to_bytes(request.path).decode("iso-8859-1")
+    query_string = request.query_string.decode("iso-8859-1")
 
     environ: dict[str, Any] = {
         "REQUEST_METHOD": request.method.decode("ascii"),

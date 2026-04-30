@@ -219,9 +219,25 @@ class HTTPConnH11(BaseHTTPConn):
                 # wraps were no-ops; the per-tuple comprehension was the only
                 # real cost. ``list(event.headers)`` is a shallow copy that
                 # insulates Request from h11's per-event Headers subclass.
+                # h11 is lenient on method case (per RFC the method is
+                # case-sensitive but most clients send uppercase); normalise
+                # here so consumers can rely on it.
+                target = event.target
+                qix = target.find(b"?")
+                if qix >= 0:
+                    path = target[:qix]
+                    query_string = target[qix + 1 :]
+                else:
+                    path = target
+                    query_string = b""
+                method = event.method
+                if not method.isupper():
+                    method = method.upper()
                 req = Request(
-                    method=event.method,
-                    target=event.target,
+                    method=method,
+                    target=target,
+                    path=path,
+                    query_string=query_string,
                     headers=list(event.headers),
                     http_version=event.http_version,
                 )

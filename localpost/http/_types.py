@@ -28,9 +28,19 @@ class Request:
     """Parsed HTTP request line + headers. Body is streamed via :meth:`HTTPReqCtx.receive`."""
 
     method: bytes
-    """e.g. ``b"GET"`` — uppercased ASCII as sent by the client."""
+    """Uppercased ASCII method (e.g. ``b"GET"``). Both backends normalise here
+    so consumers can compare against ``b"GET"`` / ``b"POST"`` / ... without
+    case-folding per request."""
     target: bytes
     """Raw request-URI from the request line, including query string."""
+    path: bytes
+    """Path component of ``target`` (everything before ``?``). Pre-split by the
+    backend so consumers don't redo the split on every request — the httptools
+    backend uses ``httptools.parse_url`` (C-level), the h11 backend a manual
+    ``split(b'?', 1)``."""
+    query_string: bytes
+    """Query string of ``target`` (everything after the first ``?``), or ``b""``
+    if absent. Pre-split alongside :attr:`path`."""
     headers: list[tuple[bytes, bytes]]
     """Header pairs in arrival order. Names are lowercased; values are as-sent."""
     http_version: bytes = b"1.1"

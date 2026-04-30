@@ -434,7 +434,9 @@ class _DeferringCtx:
     def __init__(self, server: _FakeServer, conn: _FakeConn) -> None:
         self._server = server
         self._conn = conn
-        self.request = Request(method=b"POST", target=b"/upload", headers=[])
+        self.request = Request(
+            method=b"POST", target=b"/upload", path=b"/upload", query_string=b"", headers=[]
+        )
         self.body = b""
         self.response_status = None
         self.attrs = {}
