@@ -2,7 +2,8 @@
 
 Each app reads a ``--port`` (default 8000) and binds 127.0.0.1. LocalPost
 apps additionally accept ``--selectors`` (default 1) for multi-selector
-mode.
+mode and ``--acceptor`` to switch to the dedicated-acceptor topology
+(1 acceptor thread + N worker selectors).
 """
 
 from __future__ import annotations
@@ -21,12 +22,14 @@ def parse_port(default: int = 8000) -> int:
 class AppArgs:
     port: int
     selectors: int
+    acceptor: bool
 
 
 def parse_args(default_port: int = 8000) -> AppArgs:
-    """Port + selectors. Used by LocalPost bench apps."""
+    """Port + selectors + acceptor. Used by LocalPost bench apps."""
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=default_port)
     p.add_argument("--selectors", type=int, default=1)
+    p.add_argument("--acceptor", action="store_true")
     a = p.parse_args()
-    return AppArgs(port=a.port, selectors=a.selectors)
+    return AppArgs(port=a.port, selectors=a.selectors, acceptor=a.acceptor)

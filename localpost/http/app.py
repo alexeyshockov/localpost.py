@@ -356,12 +356,16 @@ class HttpApp:
         config: ServerConfig,
         *,
         selectors: int = 1,
+        acceptor: bool = False,
     ):
         """Return a :func:`localpost.hosting.service` that runs the app.
 
         Composes worker pool + the HTTP server (backend selected via
         :attr:`ServerConfig.backend`). Use with
         :func:`localpost.hosting.run_app` or :func:`localpost.hosting.serve`.
+
+        ``selectors`` and ``acceptor`` forward to :func:`http_server` — see
+        its docstring for the full topology rules.
         """
         max_concurrency = self.max_concurrency
         backlog = self.backlog
@@ -370,12 +374,12 @@ class HttpApp:
         async def _app_service():
             if max_concurrency == 0:
                 inner = self._build_router_handler(None)
-                async with http_server(config, inner, selectors=selectors):
+                async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
                     yield
                 return
             async with _pool_context(max_concurrency, backlog) as pool:
                 inner = self._build_router_handler(pool)
-                async with http_server(config, inner, selectors=selectors):
+                async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
                     yield
 
         return _app_service()

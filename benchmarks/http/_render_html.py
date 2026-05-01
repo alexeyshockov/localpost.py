@@ -99,6 +99,11 @@ _TEMPLATE = """<!doctype html>
       <option value="">all</option><option value="true">on</option><option value="false">off</option>
     </select>
   </label>
+  <label>acceptor
+    <select id="filter-acceptor">
+      <option value="">all</option><option value="true">on</option><option value="false">off</option>
+    </select>
+  </label>
   <label>scenario
     <select id="filter-scenario"><option value="">all</option></select>
   </label>
@@ -142,7 +147,7 @@ _TEMPLATE = """<!doctype html>
     return cells
       .filter(c => c.scenario === scenario)
       .map(c => [
-        c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off',
+        c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off', c.acceptor ? 'on' : 'off',
         Math.round(c.rps), +c.p50_ms.toFixed(2), +c.p90_ms.toFixed(2), +c.p99_ms.toFixed(2),
         c.status_2xx, c.status_other,
       ]);
@@ -161,6 +166,7 @@ _TEMPLATE = """<!doctype html>
         {{ name: 'backend' }},
         {{ name: 'sel' }},
         {{ name: 'pool' }},
+        {{ name: 'acc' }},
         {{ name: 'RPS', sort: {{ compare: (a, b) => a - b }} }},
         {{ name: 'p50 (ms)' }},
         {{ name: 'p90 (ms)' }},
@@ -178,7 +184,7 @@ _TEMPLATE = """<!doctype html>
   }}
 
   // --- top-level filter dropdowns rebuild grids in place
-  const filterIds = ['app', 'backend', 'selectors', 'pool', 'scenario'];
+  const filterIds = ['app', 'backend', 'selectors', 'pool', 'acceptor', 'scenario'];
   function currentFilters() {{
     const f = {{}};
     for (const k of filterIds) {{
@@ -202,11 +208,12 @@ _TEMPLATE = """<!doctype html>
         if (f.backend && c.backend !== f.backend) return false;
         if (f.selectors && String(c.selectors) !== f.selectors) return false;
         if (f.pool && (c.pool ? 'true' : 'false') !== f.pool) return false;
+        if (f.acceptor && (c.acceptor ? 'true' : 'false') !== f.acceptor) return false;
         return true;
       }});
       grids[scenario].updateConfig({{
         data: filtered.map(c => [
-          c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off',
+          c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off', c.acceptor ? 'on' : 'off',
           Math.round(c.rps), +c.p50_ms.toFixed(2), +c.p90_ms.toFixed(2), +c.p99_ms.toFixed(2),
           c.status_2xx, c.status_other,
         ]),

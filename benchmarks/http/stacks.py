@@ -2,7 +2,7 @@
 
 Each stack is one row of the matrix. Rather than a flat tuple of names, each
 stack carries explicit dimension fields (``app``, ``backend``, ``selectors``,
-``pool``, ``tags``). The runner uses these to:
+``pool``, ``acceptor``, ``tags``). The runner uses these to:
 
 * select a subset for a run via ``--filter`` / ``--group`` / ``--stacks``;
 * annotate each cell in ``results.json`` so the HTML reporter can pivot.
@@ -16,7 +16,7 @@ Filter language (parsed by :func:`parse_filters`):
 * ``key=a,b`` — comma list inside a key is OR.
 * ``key=lp-*`` — glob via ``*`` / ``?`` (fnmatch).
 * ``key!=value`` — negation (combines with comma + glob).
-* Keys: ``app``, ``backend``, ``selectors``, ``pool``, ``tags``, ``name``.
+* Keys: ``app``, ``backend``, ``selectors``, ``pool``, ``acceptor``, ``tags``, ``name``.
 """
 
 from __future__ import annotations
@@ -39,10 +39,16 @@ class Stack:
     """``lp-h11`` | ``lp-httptools`` | ``cheroot`` | ``gunicorn`` | ``granian`` | ``uvicorn``."""
 
     selectors: int
-    """1 | 2 | 4. Always 1 for non-LocalPost backends."""
+    """1 (single thread) | 4 (multi). Always 1 for non-LocalPost backends."""
 
     pool: bool
     """``False`` = handlers run inline on the selector thread."""
+
+    acceptor: bool = False
+    """``True`` = LocalPost acceptor topology (1 acceptor thread + N worker
+    selectors via cross-thread op queue). Default ``False`` mirrors the
+    ``selectors=N`` ``SO_REUSEPORT`` shape and applies to non-LocalPost
+    backends as well."""
 
     tags: frozenset[str] = field(default_factory=frozenset)
     """Free-form labels, e.g. ``reference``."""
@@ -50,14 +56,35 @@ class Stack:
 
 STACKS: Final[tuple[Stack, ...]] = (
     Stack("localpost_native", app="native", backend="lp-h11", selectors=1, pool=True),
-    Stack("localpost_native_s2", app="native", backend="lp-h11", selectors=2, pool=True),
     Stack("localpost_native_s4", app="native", backend="lp-h11", selectors=4, pool=True),
+    Stack(
+        "localpost_native_acceptor_s4",
+        app="native",
+        backend="lp-h11",
+        selectors=4,
+        pool=True,
+        acceptor=True,
+    ),
     Stack("localpost_httptools", app="native", backend="lp-httptools", selectors=1, pool=True),
-    Stack("localpost_httptools_s2", app="native", backend="lp-httptools", selectors=2, pool=True),
     Stack("localpost_httptools_s4", app="native", backend="lp-httptools", selectors=4, pool=True),
+    Stack(
+        "localpost_httptools_acceptor_s4",
+        app="native",
+        backend="lp-httptools",
+        selectors=4,
+        pool=True,
+        acceptor=True,
+    ),
     Stack("localpost_httptools_inline", app="native", backend="lp-httptools", selectors=1, pool=False),
-    Stack("localpost_httptools_inline_s2", app="native", backend="lp-httptools", selectors=2, pool=False),
     Stack("localpost_httptools_inline_s4", app="native", backend="lp-httptools", selectors=4, pool=False),
+    Stack(
+        "localpost_httptools_inline_acceptor_s4",
+        app="native",
+        backend="lp-httptools",
+        selectors=4,
+        pool=False,
+        acceptor=True,
+    ),
     Stack("localpost_wsgi", app="wsgi", backend="lp-h11", selectors=1, pool=True),
     Stack("localpost_flask", app="flask", backend="lp-h11", selectors=1, pool=True),
     Stack("flask_cheroot", app="flask", backend="cheroot", selectors=1, pool=True),
@@ -95,7 +122,9 @@ GROUPS: Final[dict[str, Callable[[Stack], bool]]] = {
 }
 
 
-_VALID_KEYS: Final[frozenset[str]] = frozenset({"app", "backend", "selectors", "pool", "tags", "name"})
+_VALID_KEYS: Final[frozenset[str]] = frozenset(
+    {"app", "backend", "selectors", "pool", "acceptor", "tags", "name"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +170,8 @@ def _stack_field(stack: Stack, key: str) -> tuple[str, ...]:
         return (str(stack.selectors),)
     if key == "pool":
         return ("true" if stack.pool else "false",)
+    if key == "acceptor":
+        return ("true" if stack.acceptor else "false",)
     return (str(getattr(stack, key)),)
 
 

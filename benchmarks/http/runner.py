@@ -79,6 +79,7 @@ class Cell:
     backend: str = ""
     selectors: int = 1
     pool: bool = True
+    acceptor: bool = False
     tags: list[str] = field(default_factory=list)
 
 
@@ -205,6 +206,7 @@ def _run_cell(stack: Stack, scenario: Scenario, port: int, duration_s: int, pyth
             backend=stack.backend,
             selectors=stack.selectors,
             pool=stack.pool,
+            acceptor=stack.acceptor,
             tags=sorted(stack.tags),
             **parsed,
         )
