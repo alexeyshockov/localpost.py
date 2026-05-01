@@ -1053,6 +1053,145 @@ built a ``Request`` directly are updated. User code using
   there; revisit if a future profile shows ``name.lower()``
   alloc cost climbing.
 
+## Phase 12 (shipped): acceptor topology — 1 acceptor + N worker selectors (2026-05-02)
+
+Reverses the call made in Phase 7's *"What's left"* (and the earlier
+"Accept-dispatch alternative — explicitly dropped"). Phase 7b made the case
+for it concrete: free-threaded scaling needs N busy selector threads, and on
+macOS `SO_REUSEPORT` puts every conn on one. The acceptor topology adds a
+single dedicated acceptor thread that round-robins each accepted conn onto N
+worker selectors via the existing op queue + wakeup pipe.
+
+### What shipped
+
+The architectural enabler is the *Selector / ConnHandler* split (commit
+`8748c66`) — `BaseServer` now composes a dumb fd→callback `Selector` with a
+`ConnHandler` (after-accept policy):
+
+```
+Selector       ── owns fd→SelectorCallback map; nothing HTTP-specific
+   │
+   ▼
+ConnHandler    ── after-accept policy; default: track on the accepting selector;
+   │              acceptor mode: post_track to a worker selector
+   ▼
+RequestHandler ── pre-body dispatch
+   │
+   ▼
+BodyHandler    ── post-body continuation
+```
+
+`http_server` / `wsgi_server` / `HttpApp.service` each gained an
+`acceptor: bool = False` knob. With `acceptor=True, selectors=N`:
+one thread runs the acceptor `BaseServer` (listen socket only, no conn
+tracking), N threads each run a worker `Selector` (no listen socket); a
+`RoundRobinAcceptor` `ConnHandler` builds each new conn for the next worker
+and calls `worker.post_track(conn)` (cross-thread `_OpTrack` on the existing
+op queue from Phase 3-B). The handoff path was already cross-thread-safe —
+`ConnHandler` just gives it a stable name.
+
+### Bench (6 s/cell, Darwin arm64, two interpreters)
+
+The story splits cleanly along the GIL axis. Numbers: `localpost` group
+only, plaintext scenario.
+
+**Standard CPython 3.13 (GIL):**
+
+| Stack                                     |    RPS | vs `s=1` baseline |
+| ----------------------------------------- | -----: | ----------------: |
+| `localpost_native` (s=1, pool)            | 12,504 |                 — |
+| `localpost_native_s4` (SO_REUSEPORT)      | 12,812 |               +2% |
+| `localpost_native_acceptor_s4`            | 12,215 |               −2% |
+| `localpost_httptools` (s=1, pool)         | 24,356 |                 — |
+| `localpost_httptools_s4`                  | 24,598 |               +1% |
+| `localpost_httptools_acceptor_s4`         | 21,207 |          **−13%** |
+
+Under the GIL the topology is flat-to-slightly-worse. The cross-thread
+op-queue dispatch costs more than it saves: parser callbacks + dispatch +
+response-write all serialise on the GIL, so spreading the readable-event
+work across N threads buys nothing, and pays one extra wakeup-pipe write per
+conn for the privilege.
+
+**Free-threaded CPython 3.14t:**
+
+| Stack                                     |    RPS | vs `s=1` baseline |
+| ----------------------------------------- | -----: | ----------------: |
+| `localpost_native` (s=1, pool)            | 20,033 |                 — |
+| `localpost_native_s4` (SO_REUSEPORT)      | 20,604 |               +3% |
+| **`localpost_native_acceptor_s4`**        | **26,684** |       **+33%** |
+| `localpost_httptools` (s=1, pool)         | 16,262 |                 — |
+| `localpost_httptools_s4`                  | 15,973 |               −2% |
+| **`localpost_httptools_acceptor_s4`**     | **17,958** |       **+10%** |
+
+The headline result on h11: `native_acceptor_s4` does **26,684 vs `native_s4`'s
+20,604 = +30% over the SO_REUSEPORT alternative**. This is precisely the
+case the topology was added for — Phase 7b confirmed `SO_REUSEPORT` puts
+100 % of accepts on one selector on macOS; the explicit round-robin replaces
+that with a real 4-way spread. httptools shows a smaller gain because its
+hot path is shorter, so the per-conn dispatch overhead occupies a larger
+share of the budget.
+
+### Footgun: `acceptor + inline` (no pool)
+
+The wrong combination on the JSON-API common case:
+
+| Stack (3.14t)                                     |    RPS | vs inline s=1 |
+| ------------------------------------------------- | -----: | ------------: |
+| `localpost_httptools_inline` (s=1)                | 73,536 |             — |
+| `localpost_httptools_inline_s4` (SO_REUSEPORT)    | 74,033 |           +1% |
+| `localpost_httptools_inline_acceptor_s4`          | 43,998 |      **−40%** |
+
+With no pool, the handler runs on the worker selector thread, and the accept
+→ cross-thread `_OpTrack` hop is pure overhead — there's no parallelism to
+amortise it against. **`acceptor=True` should be paired with
+`thread_pool_handler`** for the JSON-API shape; documented on the
+`http_server` docstring.
+
+### When `acceptor + inline` is *right*: I/O-bound handlers
+
+The inline + acceptor combination *does* win when the handler genuinely
+parallelises (e.g. blocks on I/O). The `profile_update` scenario has a
+deliberate `time.sleep` totalling ~4 ms per request:
+
+| Stack (3.14t)                                     | RPS  | Notes                            |
+| ------------------------------------------------- | ---: | -------------------------------- |
+| `localpost_httptools_inline_acceptor_s4`          | 647  | round-robin across 4 selectors   |
+| `localpost_httptools_inline_s4` (SO_REUSEPORT)    | 164  | piled on one — same as s=1       |
+| `localpost_httptools_inline` (s=1)                | 164  | bound by single-thread sleep     |
+
+**~4× throughput** — the theoretical max for 4 workers. The
+`SO_REUSEPORT` variant offers no improvement because the kernel pinned every
+conn to the same selector (Phase 7b finding); explicit round-robin is what
+unlocks the parallelism.
+
+### What this validates
+
+- **Free-threading is now the supported fast path** (already true since
+  Phase 7b). The acceptor topology compounds it: +30 % over `SO_REUSEPORT`
+  on h11, +10 % on httptools, on the macOS dev box where `SO_REUSEPORT`
+  doesn't kernel-balance.
+- **The Phase 7 `selectors > 1` knob is still correct on Linux.** This
+  Phase didn't bench Linux; the documented expectation (`SO_REUSEPORT`
+  distributes there since 3.9) stands. Acceptor mode is the macOS / free-
+  threaded option, not a Linux replacement.
+- **The Selector / ConnHandler split is the right factoring.** The acceptor
+  topology fell out of `_service.py` in ~80 lines, with no changes to
+  `_base.py`'s parser-driven hot path. Future "where does this conn live"
+  decisions (per-host pinning, conn-shedding, deterministic-routing) are
+  the same shape — a different `ConnHandler`.
+
+### Trade-offs
+
+- **One more thread.** `acceptor=True, selectors=N` runs **N+1** OS threads,
+  not N. The acceptor thread does only `accept()` + a cross-thread enqueue;
+  it's nearly idle relative to the workers, but the cost is real on
+  thread-budget-sensitive deployments (e.g. ulimit-constrained containers).
+- **Pin point per conn.** A conn is round-robined exactly once on accept
+  and lives on its assigned worker selector for its full keep-alive
+  lifetime. No re-balancing if a worker gets a hot client. Two consequences:
+  long-lived keep-alive conns can drift out of balance; the parser-handoff
+  invariant (single owner per parser instance) is preserved by design.
+
 ## What's left for future perf work
 
 Within the [Optimisation boundaries](#optimisation-boundaries) at the top of
@@ -1063,13 +1202,10 @@ this doc:
   3.9). Untested locally because dev is macOS-only; settle it on the
   first Linux bench cell — no code change needed. Real deployments are
   ~99% Linux, so this is the actual perf focus, not the macOS dev-box
-  result above.
-- **Accept-dispatch alternative — explicitly dropped.** A
-  one-acceptor + N-selector design (dispatching new conns via the
-  existing Phase 3-B op queue) would close the macOS multi-selector
-  gap, but adds an in-process accept hop on Linux where the kernel
-  already distributes for free. Not worth the maintenance cost given
-  the deployment target.
+  result above. The macOS `SO_REUSEPORT` gap is now closed by the
+  acceptor topology (Phase 12); a Linux bench should also tell us
+  whether `acceptor=True` is worth using *over* `SO_REUSEPORT` on
+  free-threaded Linux, or whether kernel distribution dominates.
 - **Worker-side syscall coalescing.** One ``sendall`` per response (status
   + headers + body in a single ``bytearray``); ``socket.sendmsg`` for
   chunked responses (status + first chunk + terminator in one syscall).
