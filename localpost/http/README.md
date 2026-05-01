@@ -404,12 +404,56 @@ matched routes run on workers.
 
 ### Two-state connection model
 
-A connection is either **tracked** (registered in the selector for normal
-HTTP processing) or **borrowed** (a worker thread holds it for the duration
-of one request). The dispatcher unregisters before handing off to a worker
-(`stop_tracking`); `finish_response` re-registers via `_maybe_give_back`.
-Two states, no third "watchdog" mode, no shared mode field for threads to
-race on.
+A connection is either **TRACKED** (registered in the selector — selector
+owns the fd, parser, and I/O) or **BORROWED** (a worker thread holds the
+parser + socket; fd is unregistered). The dispatcher unregisters before
+handing off to a worker (`stop_tracking`); `finish_response` re-registers
+via `_maybe_give_back`. Two states, no third "watchdog" mode, no shared
+mode field for threads to race on.
+
+```
+            accept()
+                │
+                ▼
+       ConnHandler builds conn,
+       routes to a selector via
+         track() or post_track()
+                │
+                ▼
+       ┌──────────────────────┐         ┌──────────┐
+       │      TRACKED         │  close  │          │
+       │  fd registered       ├────────▶│  CLOSED  │
+       │  selector owns I/O   │         │          │
+       └──┬───────────────────┘         └──────────┘
+          │  ▲                                ▲
+   borrow │  │ _maybe_give_back               │ close
+          ▼  │                                │
+       ┌──────────────────────┐               │
+       │      BORROWED        │               │
+       │  fd unregistered     ├───────────────┘
+       │  worker owns I/O     │
+       └──────────────────────┘
+```
+
+Both topologies (single selector and acceptor + N worker selectors)
+funnel through the same diagram; only the entry edge differs:
+
+| From → to                | Method               | Caller thread     | Mechanism                                        |
+| ------------------------ | -------------------- | ----------------- | ------------------------------------------------ |
+| accept → TRACKED         | `Selector.track`     | selector          | inline `selectors.register` (TrackHere topology) |
+| accept → TRACKED         | `Selector.post_track`| acceptor          | op queue + wakeup pipe (RoundRobinAcceptor)      |
+| TRACKED → BORROWED       | `stop_tracking`      | selector          | inline `selectors.unregister`                    |
+| BORROWED → TRACKED       | `Selector.track`     | worker            | op queue + wakeup pipe                           |
+| TRACKED → CLOSED         | `BaseHTTPConn.close` | selector          | inline (idle / keep-alive / error)               |
+| BORROWED → CLOSED        | `close` + `post_close` | worker          | op queue + wakeup pipe (`_fd_to_key` cleanup)    |
+
+The op queue + wakeup pipe is the only cross-thread synchronisation edge
+(the `os.write` to the wakeup pipe is a full memory barrier). After
+`track()` returns, anything the worker did to the conn's parser
+(`h11.Connection.send` / `httptools.HttpRequestParser.feed_data`) is
+visible to the selector. After `stop_tracking()` returns, anything the
+selector did is visible to the worker. The parser is never touched
+concurrently from two threads.
 
 ### Pull-based client-disconnect detection
 
