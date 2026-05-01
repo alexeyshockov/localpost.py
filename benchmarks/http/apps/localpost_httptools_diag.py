@@ -34,7 +34,7 @@ from localpost.http import (
     NativeResponse,
     Routes,
     ServerConfig,
-    httptools_server,
+    http_server,
     route_match,
 )
 
@@ -111,14 +111,14 @@ def main() -> int:
     routes.post("/echo")(_echo)
     routes.post("/users/{user_id}/profile")(_profile_update)
     handler = routes.build().as_handler()
-    cfg = ServerConfig(host="127.0.0.1", port=args.port)
+    cfg = ServerConfig(host="127.0.0.1", port=args.port, backend="httptools")
 
     atexit.register(_print_distribution)
     signal.signal(signal.SIGTERM, lambda *_: (_print_distribution(), sys.exit(0)))
 
     @service
     async def app():
-        async with httptools_server(cfg, handler, selectors=args.selectors):
+        async with http_server(cfg, handler, selectors=args.selectors):
             yield
 
     return run_app(app())

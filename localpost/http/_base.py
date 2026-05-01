@@ -38,6 +38,7 @@ __all__ = [
     "Middleware",
     "RequestHandler",
     "compose",
+    "start_http_server",
     "start_http_server_base",
 ]
 
@@ -143,8 +144,8 @@ class HTTPReqCtx(Protocol):
     to the underlying server / connection for advanced use cases — e.g.
     :func:`thread_pool_handler` reaches into them to borrow the connection
     for a worker. They're declared as read-only properties so covariant
-    subtypes (concrete ``HTTPConnH11`` / ``HTTPConnHttptools``) satisfy
-    the Protocol.
+    subtypes (each backend's concrete ``HTTPConn`` from ``server_h11`` /
+    ``server_httptools``) satisfy the Protocol.
 
     The ``body`` attribute is empty when a :data:`RequestHandler` runs
     (pre-body phase). It is populated by the selector with the fully
@@ -714,9 +715,9 @@ def start_http_server_base(
 ) -> Iterator[BaseServer]:
     """Open a listening socket and yield a :class:`BaseServer` driving ``conn_factory``.
 
-    Each public entry point (``start_http_server``, ``start_httptools_server``)
-    is a thin wrapper supplying its own conn factory. The handler is fixed
-    for the lifetime of the server.
+    Internal helper. Public callers use :func:`start_http_server`, which
+    selects the per-backend ``HTTPConn`` factory based on
+    :attr:`ServerConfig.backend`.
     """
     logger = logging.getLogger(LOGGER_NAME)
     server_sock = socket.create_server(
@@ -736,3 +737,27 @@ def start_http_server_base(
             yield server
         finally:
             server._shutdown_active_connections()
+
+
+def start_http_server(
+    config: ServerConfig, handler: RequestHandler, /
+) -> AbstractContextManager[BaseServer]:
+    """Open a listening socket and yield a server driving the configured backend.
+
+    Backend is read from ``config.backend``. ``"h11"`` (default) is the
+    pure-Python parser shipped with the core install; ``"httptools"`` is
+    the C-based llhttp wrapper and requires the ``[http-fast]`` extra.
+    """
+    backend = config.backend
+    if backend == "h11":
+        from localpost.http.server_h11 import HTTPConn  # noqa: PLC0415
+    elif backend == "httptools":
+        try:
+            from localpost.http.server_httptools import HTTPConn  # noqa: PLC0415
+        except ImportError as e:
+            raise ImportError(
+                "httptools backend requires the [http-fast] extra (pip install localpost[http-fast])"
+            ) from e
+    else:
+        raise ValueError(f"unknown backend {backend!r} (expected 'h11' or 'httptools')")
+    return start_http_server_base(config, handler, HTTPConn)

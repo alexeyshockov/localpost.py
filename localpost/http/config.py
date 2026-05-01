@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, final
+from typing import Final, Literal, final
 
 __all__ = [
     "LOGGER_NAME",
@@ -18,6 +18,10 @@ LOGGER_NAME: Final = "localpost.http"
 class ServerConfig:
     host: str = "0.0.0.0"  # noqa: S104 — listen on all interfaces by default; explicit choice for a server lib
     port: int = 8000
+    backend: Literal["h11", "httptools"] = "h11"
+    """HTTP parser backend. ``"h11"`` (default) is pure-Python and ships with
+    the core install. ``"httptools"`` is the C-based llhttp wrapper; requires
+    the ``[http-fast]`` extra."""
     backlog: int = 1024
     """Maximum number of queued (in the kernel) connections."""
     rw_timeout: float = 1.0

@@ -40,12 +40,11 @@ from localpost.http._base import (
     RequestHandler,
     _send_all,
     emit_handler_error,
-    start_http_server_base,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
-from localpost.http.config import DEFAULT_BUFFER_SIZE, ServerConfig
+from localpost.http.config import DEFAULT_BUFFER_SIZE
 
-__all__ = ["start_http_server", "HTTPConnH11", "HTTPReqCtxH11"]
+__all__ = ["HTTPConn", "HTTPReqCtxH11"]
 
 
 def _to_h11_response(r: Response | InformationalResponse) -> h11.Response | h11.InformationalResponse:
@@ -72,8 +71,7 @@ def _has_response_framing(headers) -> bool:
 
 @final
 @dataclass(eq=False, slots=True)
-# TODO Rename to just HTTPConn
-class HTTPConnH11(BaseHTTPConn):
+class HTTPConn(BaseHTTPConn):
     server: BaseServer
     sock: socket.socket
     addr: tuple[str, int]
@@ -315,7 +313,7 @@ class HTTPReqCtxH11:
     """
 
     server: BaseServer
-    conn: HTTPConnH11
+    conn: HTTPConn
     request: Request
 
     body: bytes = b""
@@ -463,17 +461,3 @@ class HTTPReqCtxH11:
 
     def _sock_sendall(self, payload: bytes) -> None:
         _send_all(self.conn, payload)
-
-
-def start_http_server(config: ServerConfig, handler: RequestHandler, /):
-    """Open a listening socket and yield a server driving the h11 backend.
-
-    Default HTTP server: pure-Python parser, no C dependencies. For the
-    httptools backend (faster, opt-in via ``[http-fast]``), use
-    :func:`localpost.http.start_httptools_server`.
-    """
-
-    def _factory(server, sock, addr) -> HTTPConnH11:
-        return HTTPConnH11(server, sock, addr)
-
-    return start_http_server_base(config, handler, _factory)

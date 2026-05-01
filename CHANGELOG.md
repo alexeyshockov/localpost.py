@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+### Changed
+
+- **HTTP backend selection moved to `ServerConfig.backend`** (BREAKING).
+  A single entry point — `start_http_server(config, handler)` — and a
+  single hosted-service wrapper — `http_server(config, handler)` —
+  now pick between h11 and httptools based on the new
+  `ServerConfig.backend: Literal["h11", "httptools"] = "h11"` field
+  (default unchanged: pure-Python h11). Renames / removals:
+  - `start_httptools_server` removed → use
+    `start_http_server(ServerConfig(backend="httptools"), handler)`.
+  - `httptools_server` hosted-service wrapper removed → use
+    `http_server(ServerConfig(backend="httptools"), handler)`.
+  - `HttpApp.service(cfg, *, backend=…)` kwarg removed — set
+    `backend` on the `ServerConfig` instead.
+- Concrete connection classes lose their backend suffix: each backend
+  module exposes its own `HTTPConn` (was `HTTPConnH11` /
+  `HTTPConnHttptools`). The Protocol `HTTPReqCtx` and the ABC
+  `BaseHTTPConn` are unchanged. Internal-only — no external callers
+  referenced the old names.
+
 ### Added
 
 - **Per-request ``settimeout`` calls dropped from the borrow boundary.**

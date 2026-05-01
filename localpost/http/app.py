@@ -59,11 +59,11 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http import HTTPMethod
-from typing import Any, Literal, get_type_hints
+from typing import Any, get_type_hints
 
 from localpost import hosting
 from localpost.http._pool import _Pool, _pool_context
-from localpost.http._service import http_server, httptools_server
+from localpost.http._service import http_server
 from localpost.http._types import Response as NativeResponse
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
@@ -164,9 +164,6 @@ def _build_response(status: int, content_type: bytes, body: bytes) -> NativeResp
             (b"content-length", str(len(body)).encode("ascii")),
         ],
     )
-
-
-_BACKEND_FACTORIES = {"h11": http_server, "httptools": httptools_server}
 
 
 @dataclass(slots=True)
@@ -358,17 +355,14 @@ class HttpApp:
         self,
         config: ServerConfig,
         *,
-        backend: Literal["h11", "httptools"] = "h11",
         selectors: int = 1,
     ):
         """Return a :func:`localpost.hosting.service` that runs the app.
 
-        Composes worker pool + chosen backend's server. Use with
+        Composes worker pool + the HTTP server (backend selected via
+        :attr:`ServerConfig.backend`). Use with
         :func:`localpost.hosting.run_app` or :func:`localpost.hosting.serve`.
         """
-        if backend not in _BACKEND_FACTORIES:
-            raise ValueError(f"unknown backend {backend!r} (expected 'h11' or 'httptools')")
-        server_fn = _BACKEND_FACTORIES[backend]
         max_concurrency = self.max_concurrency
         backlog = self.backlog
 
@@ -376,12 +370,12 @@ class HttpApp:
         async def _app_service():
             if max_concurrency == 0:
                 inner = self._build_router_handler(None)
-                async with server_fn(config, inner, selectors=selectors):
+                async with http_server(config, inner, selectors=selectors):
                     yield
                 return
             async with _pool_context(max_concurrency, backlog) as pool:
                 inner = self._build_router_handler(pool)
-                async with server_fn(config, inner, selectors=selectors):
+                async with http_server(config, inner, selectors=selectors):
                     yield
 
         return _app_service()

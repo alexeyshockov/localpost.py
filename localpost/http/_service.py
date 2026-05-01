@@ -2,23 +2,18 @@ from __future__ import annotations
 
 import dataclasses
 import socket
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractContextManager
+from collections.abc import Awaitable
 from wsgiref.types import WSGIApplication
 
 from anyio import Event, create_task_group, from_thread, to_thread
 
 from localpost import hosting
 from localpost.hosting import ServiceLifetime
-from localpost.http._base import BaseServer
 from localpost.http.config import ServerConfig
 from localpost.http.server import RequestHandler, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
-__all__ = ["http_server", "httptools_server", "wsgi_server"]
-
-
-_StartFn = Callable[[ServerConfig, RequestHandler], AbstractContextManager[BaseServer]]
+__all__ = ["http_server", "wsgi_server"]
 
 
 def _resolve_ephemeral_port(host: str) -> int:
@@ -34,12 +29,46 @@ def _resolve_ephemeral_port(host: str) -> int:
         return probe.getsockname()[1]
 
 
-def _serve(
+@hosting.service
+def http_server(
     config: ServerConfig,
     handler: RequestHandler,
-    start: _StartFn,
-    selectors: int,
+    /,
+    *,
+    selectors: int = 1,
 ):
+    """Run an HTTP server inside a hosted service.
+
+    Backend (``h11`` / ``httptools``) is selected via
+    :attr:`ServerConfig.backend`. ``handler`` is invoked on the
+    **selector thread** for every accepted request — synchronous handlers
+    (e.g. a :class:`Router` answering 404 / 405 inline) complete without
+    leaving that thread. Handlers that need a worker pool should be
+    wrapped with :func:`localpost.http.thread_pool_handler` *before*
+    being passed in.
+
+    The service has no request-cancellation machinery of its own.
+    Per-request cancellation lives in :func:`localpost.http.check_cancelled`
+    and is wired up by :func:`thread_pool_handler` (the only place that
+    needs it — selector-thread handlers run to completion synchronously
+    and have no thread to signal).
+
+    Args:
+        config: Listening / timeouts / buffer-size / backend config.
+        handler: Sync request handler. Shared across selector threads when
+            ``selectors > 1`` — make sure any state it captures is
+            thread-safe (``thread_pool_handler`` already is).
+        selectors: Number of selector threads. Default 1. With ``> 1``,
+            each selector binds its own listening socket on the same
+            address via ``SO_REUSEPORT``; the kernel distributes incoming
+            connections. ``config.port == 0`` is resolved to an ephemeral
+            port once and shared by all selectors. Measured impact on
+            standard CPython / macOS is flat (GIL holds during parser
+            callbacks + dispatch + channel handoff; macOS
+            ``SO_REUSEPORT`` doesn't load-balance like Linux). Useful on
+            Linux (kernel-level distribution) and on free-threaded
+            builds; see ``benchmarks/http/PERF_FINDINGS.md`` Phase 7.
+    """
     if selectors < 1:
         raise ValueError(f"selectors must be >= 1 (got {selectors})")
 
@@ -47,7 +76,7 @@ def _serve(
 
         def run_single(lt: ServiceLifetime) -> Awaitable[None]:
             def run_server() -> None:
-                with start(config, handler) as server:
+                with start_http_server(config, handler) as server:
                     lt.set_started()
                     while not lt.shutting_down.is_set():
                         from_thread.check_cancelled()
@@ -72,7 +101,7 @@ def _serve(
         started: list[Event] = [Event() for _ in range(selectors)]
 
         def run_one(idx: int) -> None:
-            with start(actual_config, handler) as server:
+            with start_http_server(actual_config, handler) as server:
                 from_thread.run_sync(started[idx].set)
                 while not lt.shutting_down.is_set():
                     from_thread.check_cancelled()
@@ -89,69 +118,6 @@ def _serve(
                 tg.start_soon(to_thread.run_sync, run_one, i)
 
     return run_multi
-
-
-@hosting.service
-def http_server(
-    config: ServerConfig,
-    handler: RequestHandler,
-    /,
-    *,
-    selectors: int = 1,
-):
-    """Run an HTTP server inside a hosted service.
-
-    ``handler`` is invoked on the **selector thread** for every accepted
-    request — synchronous handlers (e.g. a :class:`Router` answering 404 /
-    405 inline) complete without leaving that thread. Handlers that need
-    a worker pool should be wrapped with
-    :func:`localpost.http.thread_pool_handler` *before* being passed in.
-
-    The service has no request-cancellation machinery of its own.
-    Per-request cancellation lives in :func:`localpost.http.check_cancelled`
-    and is wired up by :func:`thread_pool_handler` (the only place that
-    needs it — selector-thread handlers run to completion synchronously
-    and have no thread to signal).
-
-    Args:
-        config: Listening / timeouts / buffer-size config.
-        handler: Sync request handler. Shared across selector threads when
-            ``selectors > 1`` — make sure any state it captures is
-            thread-safe (``thread_pool_handler`` already is).
-        selectors: Number of selector threads. Default 1. With ``> 1``,
-            each selector binds its own listening socket on the same
-            address via ``SO_REUSEPORT``; the kernel distributes incoming
-            connections. ``config.port == 0`` is resolved to an ephemeral
-            port once and shared by all selectors. Measured impact on
-            standard CPython / macOS is flat (GIL holds during parser
-            callbacks + dispatch + channel handoff; macOS
-            ``SO_REUSEPORT`` doesn't load-balance like Linux). Useful on
-            Linux (kernel-level distribution) and on free-threaded
-            builds; see ``benchmarks/http/PERF_FINDINGS.md`` Phase 7.
-    """
-    return _serve(config, handler, start_http_server, selectors=selectors)
-
-
-@hosting.service
-def httptools_server(
-    config: ServerConfig,
-    handler: RequestHandler,
-    /,
-    *,
-    selectors: int = 1,
-):
-    """Same as :func:`http_server`, but using the httptools backend.
-
-    Requires the ``[http-fast]`` extra. See
-    :func:`localpost.http.start_httptools_server` for backend differences.
-    See :func:`http_server` for the ``selectors`` knob.
-    """
-    # Lazy: importing server_httptools at module top would require httptools to
-    # be installed for users that only need ``http_server`` (h11). The extra
-    # ``[http-fast]`` is opt-in.
-    from localpost.http.server_httptools import start_httptools_server  # noqa: PLC0415
-
-    return _serve(config, handler, start_httptools_server, selectors=selectors)
 
 
 def wsgi_server(

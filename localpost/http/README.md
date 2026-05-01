@@ -6,9 +6,9 @@ A small synchronous HTTP/1.1 server built on [h11](https://h11.readthedocs.io/),
 plus a URI-template router, a WSGI bridge, and a small framework
 (`HttpApp`) on top. Three layers, each usable on its own:
 
-- **Server**: `start_http_server` (h11) / `start_httptools_server`
-  (httptools) accept connections, parse HTTP, dispatch to a
-  `RequestHandler`. ~540 lines of sync code.
+- **Server**: `start_http_server` accepts connections, parses HTTP
+  (h11 by default; httptools opt-in via `ServerConfig.backend`),
+  dispatches to a `RequestHandler`. ~540 lines of sync code.
 - **Router**: thin URI-template dispatcher. Matches the request,
   attaches a `RouteMatch` to `ctx.attrs[RouteMatch]`, delegates to
   the registered handler. 404 / 405 inline.
@@ -375,17 +375,29 @@ pull-based variant collapses to two states and one syscall per
 
 ## Server backends
 
-Two implementations live side-by-side. They share the listening socket,
-selector loop, op queue, stale-conn sweep, and shutdown coordination
-(everything in `_base.py`). They differ in how they drive the parser:
+Two parser implementations live side-by-side. They share the listening
+socket, selector loop, op queue, stale-conn sweep, and shutdown
+coordination (everything in `_base.py`). They differ only in how they
+drive the parser:
 
-| Entry point                  | Parser      | Extra        | Notes                           |
-| ---------------------------- | ----------- | ------------ | ------------------------------- |
-| `start_http_server`          | h11         | `[http-server]` | default; pure Python, readable |
-| `start_httptools_server`     | httptools   | `[http-fast]`   | C-based llhttp; faster header parsing |
+| `ServerConfig.backend` | Parser      | Extra            | Notes                           |
+| ---------------------- | ----------- | ---------------- | ------------------------------- |
+| `"h11"` *(default)*    | h11         | `[http-server]`  | pure Python, readable           |
+| `"httptools"`          | httptools   | `[http-fast]`    | C-based llhttp; faster header parsing |
 
-Hosted-service equivalents: `http_server(...)` / `httptools_server(...)`
-(both decorated with `@hosting.service`).
+There is one entry point — `start_http_server(config, handler)` — and
+one hosted-service wrapper — `http_server(config, handler)`. The parser
+is selected via `ServerConfig.backend`:
+
+```python
+from localpost.http import ServerConfig, start_http_server
+
+with start_http_server(
+    ServerConfig(backend="httptools"), my_handler
+) as server:
+    while True:
+        server.run()
+```
 
 Pick whichever fits — handler code is identical. Both populate the same
 neutral `Request` / `NativeResponse` types from `localpost.http`. The

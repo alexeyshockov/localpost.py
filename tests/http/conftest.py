@@ -1,18 +1,15 @@
 from __future__ import annotations
 
+import dataclasses
 import socket
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 import pytest
 
 from localpost.http import RequestHandler, ServerConfig, start_http_server
-from localpost.http._base import BaseServer
 
-StartServer = Callable[[ServerConfig, RequestHandler], AbstractContextManager[BaseServer]]
 ServeInThread = Callable[[RequestHandler], "_ServerCM"]
 
 
@@ -20,24 +17,18 @@ class ServeBackendInThread(Protocol):
     def __call__(self, handler: RequestHandler, config: ServerConfig | None = None) -> _ServerCM: ...
 
 
-@dataclass(frozen=True, slots=True)
-class HTTPBackend:
-    name: str
-    start_server: StartServer
+Backend = Literal["h11", "httptools"]
 
 
 @pytest.fixture(params=("h11", "httptools"))
-def http_backend(request) -> HTTPBackend:
-    name = request.param
-    if name == "h11":
-        return HTTPBackend(name="h11", start_server=start_http_server)
-
-    try:
-        from localpost.http.server_httptools import start_httptools_server  # noqa: PLC0415
-    except ImportError as e:
-        pytest.skip(str(e))
-
-    return HTTPBackend(name="httptools", start_server=start_httptools_server)
+def http_backend(request) -> Backend:
+    name: Backend = request.param
+    if name == "httptools":
+        try:
+            import httptools  # noqa: F401, PLC0415
+        except ImportError as e:
+            pytest.skip(str(e))
+    return name
 
 
 @pytest.fixture
@@ -67,12 +58,12 @@ class _ServerCM:
     sets ``expect_loop_error = True`` (used to characterize crash paths).
     """
 
-    def __init__(self, config: ServerConfig, handler: RequestHandler, start_server: StartServer) -> None:
+    def __init__(self, config: ServerConfig, handler: RequestHandler) -> None:
         self._config = config
         self._handler = handler
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._cm = start_server(config, handler)
+        self._cm = start_http_server(config, handler)
         self.loop_error: BaseException | None = None
         self.expect_loop_error: bool = False
 
@@ -132,7 +123,7 @@ def serve_in_thread(server_config: ServerConfig) -> Iterator[ServeInThread]:
     active: list[_ServerCM] = []
 
     def make(handler: RequestHandler) -> _ServerCM:
-        cm = _ServerCM(server_config, handler, start_http_server)
+        cm = _ServerCM(server_config, handler)
         active.append(cm)
         return cm
 
@@ -147,11 +138,15 @@ def serve_in_thread(server_config: ServerConfig) -> Iterator[ServeInThread]:
 
 
 @pytest.fixture
-def serve_backend_in_thread(server_config: ServerConfig, http_backend: HTTPBackend) -> Iterator[ServeBackendInThread]:
+def serve_backend_in_thread(server_config: ServerConfig, http_backend: Backend) -> Iterator[ServeBackendInThread]:
     active: list[_ServerCM] = []
+    backend_config = dataclasses.replace(server_config, backend=http_backend)
 
     def make(handler: RequestHandler, config: ServerConfig | None = None) -> _ServerCM:
-        cm = _ServerCM(config or server_config, handler, http_backend.start_server)
+        cm = _ServerCM(
+            dataclasses.replace(config, backend=http_backend) if config is not None else backend_config,
+            handler,
+        )
         active.append(cm)
         return cm
 

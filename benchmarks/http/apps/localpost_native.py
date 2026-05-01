@@ -48,8 +48,8 @@ def main() -> int:
         ), body
 
     _ = (ping, hello, echo, profile_update)
-    cfg = ServerConfig(host="127.0.0.1", port=args.port)
-    return run_app(app.service(cfg, backend="h11", selectors=args.selectors))
+    cfg = ServerConfig(host="127.0.0.1", port=args.port, backend="h11")
+    return run_app(app.service(cfg, selectors=args.selectors))
 
 
 if __name__ == "__main__":

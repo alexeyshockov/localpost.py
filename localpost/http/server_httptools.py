@@ -43,12 +43,11 @@ from localpost.http._base import (
     RequestHandler,
     _send_all,
     emit_handler_error,
-    start_http_server_base,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
-from localpost.http.config import DEFAULT_BUFFER_SIZE, ServerConfig
+from localpost.http.config import DEFAULT_BUFFER_SIZE
 
-__all__ = ["start_httptools_server", "HTTPConnHttptools", "HTTPReqCtxHttptools"]
+__all__ = ["HTTPConn", "HTTPReqCtxHttptools"]
 
 
 # RFC 7231 §6.1 reason phrases for the codes the server-side actually emits.
@@ -112,8 +111,7 @@ def _response_allows_body(request_method: bytes, status_code: int) -> bool:
 
 @final
 @dataclass(eq=False, slots=True)
-# TODO Rename to HTTPConn
-class HTTPConnHttptools(BaseHTTPConn):
+class HTTPConn(BaseHTTPConn):
     server: BaseServer
     sock: socket.socket
     addr: tuple[str, int]
@@ -474,7 +472,7 @@ class HTTPReqCtxHttptools:
     """
 
     server: BaseServer
-    conn: HTTPConnHttptools
+    conn: HTTPConn
     request: Request
     _expect_100_continue: bool = False
     _keep_alive: bool = True
@@ -665,17 +663,3 @@ class HTTPReqCtxHttptools:
         elif terminator:
             _send_all(self.conn, terminator)
         self._maybe_give_back()
-
-
-def start_httptools_server(config: ServerConfig, handler: RequestHandler, /):
-    """Open a listening socket and yield a server driving the httptools backend.
-
-    Faster than the default h11 backend for header parsing. Requires the
-    ``[http-fast]`` extra. For the default backend see
-    :func:`localpost.http.start_http_server`.
-    """
-
-    def _factory(server: BaseServer, sock: socket.socket, addr: tuple[str, int]) -> HTTPConnHttptools:
-        return HTTPConnHttptools(server, sock, addr)
-
-    return start_http_server_base(config, handler, _factory)

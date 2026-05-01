@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import anyio
 import httpx
@@ -29,7 +29,8 @@ from localpost.http import (
     NativeResponse,
     RequestHandler,
     ServerConfig,
-    httptools_server,
+    http_server,
+    start_http_server,
 )
 from tests.http._helpers import drain_socket
 
@@ -43,15 +44,9 @@ pytestmark = pytest.mark.anyio
 async def _serve_app(
     app: HttpApp,
     cfg: ServerConfig,
-    *,
-    backend: Literal["h11", "httptools"] = "h11",
 ) -> AsyncGenerator[ServiceLifetimeView]:
-    async with serve(app.service(cfg, backend=backend)) as lt:
+    async with serve(app.service(cfg)) as lt:
         yield lt
-
-
-def _backend_name(http_backend) -> Literal["h11", "httptools"]:
-    return cast(Literal["h11", "httptools"], http_backend.name)
 
 
 async def _wait_ready(port: int, deadline: float = 5.0) -> bool:
@@ -485,8 +480,8 @@ class TestBackendSelection:
         def hello(name: str):
             return f"hi {name}"
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend=http_backend)
+        async with _serve_app(app, cfg) as lt:
             await lt.started
             await _wait_ready(free_port)
             r = await _get(f"http://127.0.0.1:{free_port}/world")
@@ -495,11 +490,10 @@ class TestBackendSelection:
             lt.shutdown()
             await lt.stopped
 
-    async def test_invalid_backend(self):
-        app = HttpApp()
-        cfg = ServerConfig(host="127.0.0.1", port=0)
+    def test_invalid_backend(self):
+        cfg = ServerConfig(host="127.0.0.1", port=0, backend=cast(Any, "bogus"))
         with pytest.raises(ValueError, match="unknown backend"):
-            app.service(cfg, backend=cast(Any, "bogus"))
+            start_http_server(cfg, lambda ctx: None)
 
 
 class TestStreamingRoutes:
@@ -523,8 +517,8 @@ class TestStreamingRoutes:
             captured["thread"] = threading.get_ident()
             return f"got {len(full)} bytes"
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend=http_backend)
+        async with _serve_app(app, cfg) as lt:
             await lt.started
             await _wait_ready(free_port)
             payload = b"a" * 1024
@@ -547,8 +541,8 @@ class TestStreamingRoutes:
                 pass
             return "ok"
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port, max_body_size=8)
-        async with _serve_app(app, cfg, backend=_backend_name(http_backend)) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, max_body_size=8, backend=http_backend)
+        async with _serve_app(app, cfg) as lt:
             await lt.started
             await _wait_ready(free_port)
 
@@ -586,8 +580,8 @@ class TestStreamingRoutes:
             captured["body"] = b"".join(chunks)
             return f"got {len(captured['body'])} bytes"
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(app.service(cfg, backend="httptools")) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend="httptools")
+        async with serve(app.service(cfg)) as lt:
             await lt.started
             await _wait_ready(free_port)
 
@@ -639,8 +633,8 @@ class TestStreamingRoutes:
 
             cast(Any, ctx)._defer_streaming_dispatch(dispatch)
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(httptools_server(cfg, handler)) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend="httptools")
+        async with serve(http_server(cfg, handler)) as lt:
             await lt.started
             await _wait_ready(free_port)
 
@@ -692,8 +686,8 @@ class TestStreamingRoutes:
             captured.append("ping")
             return "pong"
 
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(app.service(cfg, backend="httptools")) as lt:
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend="httptools")
+        async with serve(app.service(cfg)) as lt:
             await lt.started
             await _wait_ready(free_port)
 
