@@ -17,7 +17,7 @@ import pytest
 
 
 def _spawn() -> subprocess.Popen:
-    return subprocess.Popen(  # noqa: S603
+    return subprocess.Popen(
         [sys.executable, "-u", "-m", "tests.hosting._signal_app"],
         env={**os.environ},
         stdout=subprocess.PIPE,

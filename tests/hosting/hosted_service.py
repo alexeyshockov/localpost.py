@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from localpost.hosting import ServiceLifetime, service, serve
+from localpost.hosting import ServiceLifetime, serve, service
 
 pytestmark = pytest.mark.anyio
 

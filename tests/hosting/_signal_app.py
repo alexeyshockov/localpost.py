@@ -13,10 +13,10 @@ from localpost.hosting import ServiceLifetime, run_app
 
 
 async def long_running(lt: ServiceLifetime) -> None:
-    print("READY", flush=True)
+    print("READY", flush=True)  # noqa: T201
     lt.set_started()
     await lt.shutting_down.wait()
-    print("STOPPED", flush=True)
+    print("STOPPED", flush=True)  # noqa: T201
 
 
 if __name__ == "__main__":

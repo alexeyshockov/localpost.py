@@ -79,8 +79,7 @@ class TestRunManyChildCrashSiblingsKeepRunningToday:
         assert a_crashed.is_set()
         # Today: b ran to natural completion despite a's crash.
         assert b_finished_naturally.is_set(), (
-            "If this fails, _run_many learned to cancel siblings on child error — "
-            "flip the assertion."
+            "If this fails, _run_many learned to cancel siblings on child error — flip the assertion."
         )
         # exit_code reflects the composed parent, which didn't itself raise.
         assert exit_code == 0

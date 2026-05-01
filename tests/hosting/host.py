@@ -1,7 +1,7 @@
 import anyio
 import pytest
 
-from localpost.hosting import ServiceLifetime, ServiceLifetimeView, run, serve, Starting, Running, ShuttingDown, Stopped
+from localpost.hosting import Running, ServiceLifetime, ServiceLifetimeView, ShuttingDown, Starting, Stopped, run, serve
 
 pytestmark = pytest.mark.anyio
 
@@ -41,7 +41,7 @@ async def test_serve_yields_lifetime_view():
 async def test_exit_code_on_error():
     async def failing_service(lt: ServiceLifetime):
         lt.set_started()
-        raise Exception("Test error")
+        raise RuntimeError("Test error")
 
     async with serve(failing_service) as lt:
         await lt.stopped
@@ -71,7 +71,7 @@ async def test_run():
 async def test_run_failing():
     async def failing_service(lt: ServiceLifetime):
         lt.set_started()
-        raise Exception("boom")
+        raise RuntimeError("boom")
 
     exit_code = await run(failing_service)
     assert exit_code == 1

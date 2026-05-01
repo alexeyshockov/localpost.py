@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import sys
-
 import time
 
 from localpost.hosting import ServiceLifetime, run_app, service

@@ -318,6 +318,7 @@ def service(target: Callable[..., Any] | None = None):
 
                 async def svc_f(lt: ServiceLifetime) -> None:
                     await to_thread.run_sync(raw_svc_f, lt, limiter=limiter)
+
             return _ResolvedService(svc_f)
 
         return wrapper

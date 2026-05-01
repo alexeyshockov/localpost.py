@@ -31,8 +31,8 @@ def test_fixed_delay():
     delay = FixedDelay.create(None)
     assert delay() == timedelta(0)
 
-    with pytest.raises(ValueError):
-        FixedDelay.create("invalid")  # noqa
+    with pytest.raises(ValueError, match="Invalid delay"):
+        FixedDelay.create("invalid")  # type: ignore[arg-type]
 
 
 def test_random_delay():
@@ -77,7 +77,7 @@ def test_ensure_td():
     assert ensure_td("1h") == timedelta(hours=1)
 
     # Test with invalid input
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid time period"):
         ensure_td("invalid")
 
 

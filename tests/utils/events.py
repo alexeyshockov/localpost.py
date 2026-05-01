@@ -33,7 +33,8 @@ async def test_wait_all():
         await wait_all([event1, event2])
         tg.cancel_scope.cancel()
 
-    assert event1.is_set() and event2.is_set()
+    assert event1.is_set()
+    assert event2.is_set()
     assert tg.cancel_scope.cancel_called
 
 

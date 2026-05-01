@@ -103,8 +103,7 @@ class _ChannelMachine(RuleBasedStateMachine):
     # --- put_nowait variants ------------------------------------------------
 
     @precondition(
-        lambda self: self.model_open_receivers > 0
-        and (self.capacity is None or len(self.model_buffer) < self.capacity)
+        lambda self: self.model_open_receivers > 0 and (self.capacity is None or len(self.model_buffer) < self.capacity)
     )
     @rule(s=senders, item=st.integers())
     def put_nowait_ok(self, s, item):
@@ -114,10 +113,12 @@ class _ChannelMachine(RuleBasedStateMachine):
             self.model_sent.append(item)
 
     @precondition(
-        lambda self: self.capacity is not None
-        and self.capacity > 0
-        and len(self.model_buffer) >= self.capacity
-        and self.model_open_receivers > 0
+        lambda self: (
+            self.capacity is not None
+            and self.capacity > 0
+            and len(self.model_buffer) >= self.capacity
+            and self.model_open_receivers > 0
+        )
     )
     @rule(s=senders, item=st.integers())
     def put_nowait_full_blocks(self, s, item):

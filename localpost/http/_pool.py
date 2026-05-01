@@ -342,8 +342,6 @@ def streaming_pool_handler(
 
 
 @asynccontextmanager
-async def _streaming_pool_handler(
-    inner: _WorkFn, max_concurrency: int, backlog: int
-) -> AsyncGenerator[RequestHandler]:
+async def _streaming_pool_handler(inner: _WorkFn, max_concurrency: int, backlog: int) -> AsyncGenerator[RequestHandler]:
     async with _pool_context(max_concurrency, backlog) as pool:
         yield pool.dispatch_streaming(inner)
