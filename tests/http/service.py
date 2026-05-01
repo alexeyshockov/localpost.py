@@ -546,6 +546,86 @@ class TestMultiSelector:
         assert lt.exit_code == 0
 
 
+class TestAcceptorTopology:
+    """``acceptor=True`` runs a dedicated acceptor thread that round-robins
+    new conns to N worker selectors via the cross-thread op queue."""
+
+    async def test_serves_requests(self, free_port):
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, _handler_200(b"hi"), selectors=4, acceptor=True)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            for _ in range(8):
+                resp = await _get(f"http://127.0.0.1:{free_port}/")
+                assert resp.status_code == 200
+                assert resp.text == "hi"
+
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_distributes_conns_across_workers(self, free_port):
+        """N concurrent fresh conns should land on multiple worker selectors
+        (round-robin). We sample the worker thread id per request — with
+        N=4 workers and 8 fresh conns we expect at least 2 distinct workers
+        (loose bound to keep this stable under scheduling jitter)."""
+        threads_seen: set[int] = set()
+        lock = threading.Lock()
+
+        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+            with lock:
+                threads_seen.add(threading.get_ident())
+            ctx.complete(
+                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                b"hi",
+            )
+            return None
+
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, handler, selectors=4, acceptor=True)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            # Use fresh connections — keep-alive would pin every request to
+            # the same worker. ``httpx.Client(... headers={"Connection":
+            # "close"})`` is the simplest way.
+            results: list[httpx.Response | None] = [None] * 8
+
+            async def fire(i: int) -> None:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    results[i] = await client.get(
+                        f"http://127.0.0.1:{free_port}/",
+                        headers={"Connection": "close"},
+                    )
+
+            async with anyio.create_task_group() as tg:
+                for i in range(8):
+                    tg.start_soon(fire, i)
+
+            for r in results:
+                assert r is not None
+                assert r.status_code == 200
+
+            assert len(threads_seen) >= 2, f"expected round-robin across workers, got {threads_seen}"
+
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_shutdown_clean(self, free_port):
+        """Acceptor + workers shut down cleanly on lt.shutdown()."""
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        async with serve(http_server(cfg, _handler_200(b"x"), selectors=3, acceptor=True)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+            resp = await _get(f"http://127.0.0.1:{free_port}/")
+            assert resp.status_code == 200
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+
 class TestSelectorThreadFastPath:
     """When the Router is passed directly to ``http_server`` (no ``thread_pool_handler``
     wrapping), every route — including the 404 / 405 paths — runs on the selector
@@ -597,13 +677,7 @@ class TestSelectorThreadFastPath:
             await lt.stopped
 
 
-class _FakeConn:
-    def __init__(self, sock: socket.socket) -> None:
-        self.sock = sock
-        self.tracked = True
-
-
-class _FakeServer:
+class _FakeSelector:
     def __init__(self) -> None:
         self.stopped = False
 
@@ -612,9 +686,16 @@ class _FakeServer:
         conn.tracked = False
 
 
+class _FakeConn:
+    def __init__(self, sock: socket.socket, selector: _FakeSelector) -> None:
+        self.sock = sock
+        self.tracked = True
+        self.selector = selector
+
+
 class _DeferringCtx:
-    def __init__(self, server: _FakeServer, conn: _FakeConn) -> None:
-        self.server = server
+    def __init__(self, selector: _FakeSelector, conn: _FakeConn) -> None:
+        self.selector = selector
         self.conn = conn
         self.request = Request(method=b"POST", target=b"/upload", path=b"/upload", query_string=b"", headers=[])
         self.body = b""
@@ -629,9 +710,9 @@ class _DeferringCtx:
 class TestServiceRobustness:
     async def test_streaming_pool_defers_dispatch_when_context_requests_it(self):
         """Backends with parser callbacks can delay worker start until parsing unwinds."""
-        server = _FakeServer()
+        selector = _FakeSelector()
         sock, peer = socket.socketpair()
-        ctx = _DeferringCtx(server, _FakeConn(sock))
+        ctx = _DeferringCtx(selector, _FakeConn(sock, selector))
         ran = threading.Event()
 
         def work(_ctx: HTTPReqCtx) -> None:
@@ -641,12 +722,12 @@ class TestServiceRobustness:
             async with streaming_pool_handler(work, max_concurrency=1) as wrapped:
                 assert wrapped(cast(HTTPReqCtx, ctx)) is None
                 assert ctx.deferred is not None
-                assert server.stopped is False
+                assert selector.stopped is False
                 assert ran.wait(0.05) is False
 
                 ctx.deferred()
                 assert await to_thread.run_sync(lambda: ran.wait(2.0))
-                assert server.stopped is True
+                assert selector.stopped is True
                 assert ctx.conn.tracked is False
         finally:
             sock.close()

@@ -106,7 +106,7 @@ class _Pool:
         shutdown_event = self._shutdown_event
 
         def dispatched(ctx: HTTPReqCtx) -> None:
-            ctx.server.stop_tracking(ctx.conn)
+            ctx.conn.selector.stop_tracking(ctx.conn)
             if not admission.acquire(blocking=False):
                 _reject_overloaded(ctx)
                 return

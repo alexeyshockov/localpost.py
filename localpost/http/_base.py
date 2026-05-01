@@ -5,6 +5,19 @@ the listening socket, the selector loop, the op queue / wakeup pipe,
 stale-connection sweep, and shutdown. Each concrete backend (h11, httptools)
 provides a ``BaseHTTPConn`` subclass driven by its parser's natural idioms.
 
+The dispatch chain is loose-coupled:
+
+    Selector  ── owns fd→SelectorCallback map; nothing HTTP-specific
+       │
+       ▼
+    ConnHandler  ── after-accept policy; owns RequestHandler + conn_factory;
+       │              decides which Selector tracks the new conn
+       ▼
+    RequestHandler  ── pre-body dispatch; returns BodyHandler|None
+       │
+       ▼
+    BodyHandler  ── post-body continuation
+
 ISO-8859-1 is used for header encoding/decoding as per HTTP/1.1 specification.
 """
 
@@ -20,7 +33,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, closing, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, final
 
@@ -31,21 +44,27 @@ if TYPE_CHECKING:
     from collections.abc import Buffer
 
 __all__ = [
-    "BaseServer",
     "BaseHTTPConn",
+    "BaseServer",
     "BodyHandler",
+    "ConnFactory",
+    "ConnHandler",
     "HTTPReqCtx",
     "Middleware",
     "RequestHandler",
+    "RoundRobinAcceptor",
+    "Selector",
+    "SelectorCallback",
+    "TrackHere",
     "compose",
     "start_http_server",
     "start_http_server_base",
 ]
 
 
-# Selector data-tag for ``BaseServer._wakeup_r`` — distinguishable in the for-event
-# loop so the selector thread knows to drain the wakeup pipe + op queue.
-_WAKEUP_SENTINEL: object = object()
+# --------------------------------------------------------------------------
+# Op queue ops (cross-thread → selector-thread mutations)
+# --------------------------------------------------------------------------
 
 
 @final
@@ -72,12 +91,15 @@ class _OpClose:
 _Op = _OpTrack | _OpClose
 
 
-# Canned protocol-error responses, expressed as neutral types. Each backend
-# serialises them with its own writer (h11.Connection.send for the h11 impl,
-# the hand-written serialiser for the httptools impl). The httptools backend
-# also has access to a fully pre-serialised wire form per canned response —
-# see ``_PRESERIALIZED`` below — so error paths skip ``_serialize_response``
-# entirely.
+# --------------------------------------------------------------------------
+# Canned protocol-error responses
+# --------------------------------------------------------------------------
+
+# Each backend serialises them with its own writer (h11.Connection.send for the
+# h11 impl, the hand-written serialiser for the httptools impl). The httptools
+# backend also has access to a fully pre-serialised wire form per canned
+# response — see ``_PRESERIALIZED`` below — so error paths skip
+# ``_serialize_response`` entirely.
 
 # Reason phrases used by the pre-serialised wire form below. Kept here (not
 # in the httptools backend) so it stays parser-agnostic and the constants
@@ -136,12 +158,17 @@ SERVICE_UNAVAILABLE_BODY = b"Service Unavailable"
 SERVICE_UNAVAILABLE_RESPONSE, SERVICE_UNAVAILABLE_WIRE = _build_canned(503, SERVICE_UNAVAILABLE_BODY)
 
 
+# --------------------------------------------------------------------------
+# HTTPReqCtx Protocol + handler types
+# --------------------------------------------------------------------------
+
+
 class HTTPReqCtx(Protocol):
     """Per-request context handed to a :data:`RequestHandler`.
 
     Both server backends populate concrete implementations of this Protocol
-    with the same observable surface. ``server`` and ``conn`` give access
-    to the underlying server / connection for advanced use cases — e.g.
+    with the same observable surface. ``selector`` and ``conn`` give access
+    to the underlying selector / connection for advanced use cases — e.g.
     :func:`thread_pool_handler` reaches into them to borrow the connection
     for a worker. They're declared as read-only properties so covariant
     subtypes (each backend's concrete ``HTTPConn`` from ``server_h11`` /
@@ -163,7 +190,7 @@ class HTTPReqCtx(Protocol):
     attrs: dict[Any, Any]
 
     @property
-    def server(self) -> BaseServer: ...
+    def selector(self) -> Selector: ...
     @property
     def conn(self) -> BaseHTTPConn: ...
     @property
@@ -235,6 +262,11 @@ def compose(*middlewares: Middleware) -> Middleware:
     return wrap
 
 
+# --------------------------------------------------------------------------
+# I/O helpers
+# --------------------------------------------------------------------------
+
+
 def _send_all(conn: BaseHTTPConn, payload: bytes | bytearray | memoryview) -> None:
     """Send all of ``payload`` to ``conn.sock``.
 
@@ -261,7 +293,7 @@ def _send_all(conn: BaseHTTPConn, payload: bytes | bytearray | memoryview) -> No
             # calls in the same request skip the BlockingIOError dance;
             # the give-back path resets it. On the selector thread we
             # must restore non-blocking before returning.
-            sock.settimeout(conn.server.config.rw_timeout)
+            sock.settimeout(conn.selector.config.rw_timeout)
             try:
                 sock.sendall(view[sent:])
             finally:
@@ -292,19 +324,30 @@ def emit_handler_error(ctx: HTTPReqCtx) -> None:
     ctx.conn.close()
 
 
-class BaseHTTPConn(ABC):
-    """Abstract per-connection surface used by :class:`BaseServer`.
+# --------------------------------------------------------------------------
+# BaseHTTPConn — abstract per-connection surface
+# --------------------------------------------------------------------------
 
-    Subclasses own the parser instance and per-connection state. The base
-    server only observes the small surface declared here: tracking flag,
+
+class BaseHTTPConn(ABC):
+    """Abstract per-connection surface used by :class:`Selector`.
+
+    Subclasses own the parser instance and per-connection state. The
+    selector only observes the small surface declared here: tracking flag,
     socket, fd, idle / close-at timestamps, ``__call__`` entry point,
     ``close()``, and the stale-408 emission hook.
+
+    The ``__call__`` signature matches :data:`SelectorCallback` — a conn
+    *is* the per-fd callback for its own socket. The :data:`RequestHandler`
+    is captured as the ``handler`` field at construction time (by the
+    :data:`ConnFactory`).
     """
 
-    server: BaseServer
+    selector: Selector
     sock: socket.socket
     addr: tuple[str, int]
     fd: int
+    handler: RequestHandler
     tracked: bool
     """``True`` iff this conn is registered in the selector. ``False`` while a
     worker has borrowed it (between ``stop_tracking`` and the next ``track``)."""
@@ -317,10 +360,13 @@ class BaseHTTPConn(ABC):
     from a stalled mid-request (emit 408 Request Timeout)."""
 
     @abstractmethod
-    def __call__(self, h: RequestHandler, /) -> None:
+    def __call__(self, sel: Selector, /) -> None:
         """Drive the connection: read, parse, dispatch, write. Returns when the
         worker should be released (handler took the conn / connection closed /
-        more data needed from selector)."""
+        more data needed from selector).
+
+        Invoked by :meth:`Selector.run` whenever this conn's fd is readable.
+        """
 
     def close(self) -> None:
         """Tear down the connection.
@@ -342,20 +388,21 @@ class BaseHTTPConn(ABC):
             pass
         if not was_tracked:
             return
-        if threading.get_ident() == self.server._selector_thread_id:
+        sel = self.selector
+        if threading.get_ident() == sel._selector_thread_id:
             try:
-                self.server.selector.unregister(self.fd)
+                sel._sel.unregister(self.fd)
             except (KeyError, ValueError):
                 pass
         else:
-            self.server._ops.append(_OpClose(self.fd))
-            self.server._wake()
+            sel._ops.append(_OpClose(self.fd))
+            sel._wake()
 
     @abstractmethod
     def emit_stale_408(self) -> None:
         """Best-effort 408 emission for a stalled mid-request connection.
 
-        Called by :meth:`BaseServer._cleanup_stale` for conns that received
+        Called by :meth:`Selector._cleanup_stale` for conns that received
         bytes but never produced a complete request. The h11 impl sends via
         the parser; the httptools impl writes raw bytes. Implementations
         no-op when no response is appropriate (idle keep-alive, response
@@ -364,48 +411,195 @@ class BaseHTTPConn(ABC):
         """
 
 
-_ConnFactory = Callable[["BaseServer", socket.socket, tuple[str, int]], BaseHTTPConn]
+# --------------------------------------------------------------------------
+# Type aliases for the dispatch chain
+# --------------------------------------------------------------------------
+
+
+SelectorCallback = Callable[["Selector"], None]
+"""Per-fd callback invoked by :meth:`Selector.run` when an fd it owns is
+readable. The selector is passed in so the callback can register or
+unregister fds on it.
+
+Implementations are dataclasses with ``__call__`` (not closures), so their
+state is repr-able for debugging. :class:`BaseHTTPConn` itself satisfies
+this signature — a conn *is* its own per-fd callback. Other built-in
+implementations: :class:`_DrainWakeup` (wakeup pipe), :class:`_AcceptListener`
+(listen socket).
+"""
+
+ConnFactory = Callable[
+    ["Selector", socket.socket, tuple[str, int], RequestHandler],
+    BaseHTTPConn,
+]
+"""Builds a per-connection :class:`BaseHTTPConn`. Backend-specific —
+:class:`localpost.http.server_h11.HTTPConn` and
+:class:`localpost.http.server_httptools.HTTPConn` both satisfy this shape.
+"""
+
+ConnHandler = Callable[["Selector", socket.socket, tuple[str, int]], None]
+"""After-accept policy. Receives the just-accepted raw client socket and
+addr (selector that did the accept is passed for reference).
+
+Default behaviour (:class:`TrackHere`): build a conn for the receiving
+selector and track it locally.
+
+Acceptor mode (:class:`RoundRobinAcceptor`): build a conn bound to a
+worker selector and ``post_track`` it across threads.
+"""
+
+
+# --------------------------------------------------------------------------
+# Built-in selector callbacks (callable dataclasses, not closures)
+# --------------------------------------------------------------------------
 
 
 @final
-class BaseServer:
-    """Parser-agnostic server: owns the listening socket, selector, and op queue.
-
-    A :class:`BaseHTTPConn` factory is injected at construction time — each
-    accepted connection is built by ``conn_factory(server, sock, addr)``.
-    All parser-specific behaviour lives behind that interface.
+@dataclass(eq=False, slots=True, frozen=True)
+class _DrainWakeup:
+    """Selector callback for the wakeup pipe fd. Drains the byte(s) and
+    pulls any pending ops onto the selector thread.
     """
 
-    def __init__(
-        self,
-        config: ServerConfig,
-        handler: RequestHandler,
-        logger: logging.Logger,
-        server_sock: socket.socket,
-        selector: selectors.BaseSelector,
-        conn_factory: _ConnFactory,
-    ) -> None:
-        self.sock = server_sock
-        self.port: int = server_sock.getsockname()[1]
-        """
-        Actual port the server is listening on.
+    def __call__(self, sel: Selector, /) -> None:
+        sel._drain_wakeup()
+        sel._drain_ops()
 
-        Can be useful when port 0 is specified to auto-assign a free port.
-        """
-        self.selector = selector
+
+@final
+@dataclass(eq=False, slots=True, frozen=True)
+class _AcceptListener:
+    """Selector callback for a listen socket. Accepts one connection and
+    delegates to the configured :data:`ConnHandler`.
+
+    We do **not** loop over ``accept`` here — the listening socket stays
+    edge-readable until drained, but the selector polls level-triggered
+    by default; a single accept per readable event keeps fairness with
+    other fds and matches the existing behaviour.
+    """
+
+    listen_sock: socket.socket
+    conn_handler: ConnHandler
+    logger: logging.Logger
+
+    def __call__(self, sel: Selector, /) -> None:
+        client_sock, addr = self.listen_sock.accept()
+        # Linux 2.6.28+ inherits ``O_NONBLOCK`` from the listening socket;
+        # macOS / BSD do not. Set explicitly. While the conn is tracked
+        # the socket is non-blocking; the send/recv paths may flip it to
+        # blocking-with-timeout on a borrowed conn (``_send_all`` and the
+        # per-backend receive helpers) and the give-back path resets it
+        # before re-tracking.
+        client_sock.setblocking(False)
+        try:
+            self.conn_handler(sel, client_sock, addr)
+        except Exception:
+            self.logger.exception("ConnHandler raised; closing %s", addr)
+            with suppress(Exception):
+                client_sock.close()
+
+
+# --------------------------------------------------------------------------
+# Built-in ConnHandler implementations
+# --------------------------------------------------------------------------
+
+
+@final
+@dataclass(eq=False, slots=True, frozen=True)
+class TrackHere:
+    """Default :data:`ConnHandler`. Builds a conn for the accepting selector
+    and tracks it locally. This is the behaviour the server has always had —
+    a single thread accepts, parses, and dispatches on the same selector.
+    """
+
+    handler: RequestHandler
+    conn_factory: ConnFactory
+
+    def __call__(self, sel: Selector, sock: socket.socket, addr: tuple[str, int]) -> None:
+        conn = self.conn_factory(sel, sock, addr, self.handler)
+        sel.track(conn)
+
+
+@final
+@dataclass(eq=False, slots=True)
+class RoundRobinAcceptor:
+    """:data:`ConnHandler` for the acceptor topology. Spreads new conns
+    across a tuple of worker :class:`Selector` instances using a simple
+    monotonic counter.
+
+    The worker selectors must be running their own ``run()`` loop on a
+    separate thread; this handler enqueues ``_OpTrack`` via
+    :meth:`Selector.post_track`, which is cross-thread safe (op queue +
+    wakeup pipe).
+    """
+
+    workers: tuple[Selector, ...]
+    handler: RequestHandler
+    conn_factory: ConnFactory
+    _next: int = 0
+
+    def __call__(self, _sel: Selector, sock: socket.socket, addr: tuple[str, int]) -> None:
+        if not self.workers:
+            with suppress(Exception):
+                sock.close()
+            return
+        target = self.workers[self._next % len(self.workers)]
+        self._next += 1
+        conn = self.conn_factory(target, sock, addr, self.handler)
+        target.post_track(conn)
+
+
+# --------------------------------------------------------------------------
+# Selector primitive
+# --------------------------------------------------------------------------
+
+
+@final
+class Selector:
+    """Dumb fd→callback dispatcher with op queue + wakeup pipe.
+
+    A :class:`Selector` is HTTP-agnostic. It owns:
+
+    - a :class:`selectors.BaseSelector` (fd → :data:`SelectorCallback` map)
+    - a self-pipe wakeup so worker threads can ask the selector thread to
+      apply ``_OpTrack`` / ``_OpClose`` ops
+    - the stale-connection sweep over registered :class:`BaseHTTPConn`s
+    - a ``shutting_down`` flag
+
+    The selector thread is the **single writer** to the underlying
+    ``selectors.BaseSelector``. ``register`` / ``unregister`` must be
+    called from the selector thread; the cross-thread mutation paths
+    (``track`` from a worker, ``close`` from any thread) enqueue ops and
+    wake the selector.
+
+    Use cases:
+
+    - **All-in-one** (default): a :class:`BaseServer` owns a Selector,
+      registers its listen socket on it, and runs the loop on one
+      thread. Same behaviour as before this refactor.
+    - **Worker-only**: a Selector with no listen socket. The acceptor
+      topology spawns N of these, each on its own thread; conns are
+      delivered via :meth:`post_track` from a separate acceptor thread.
+    """
+
+    def __init__(self, config: ServerConfig, *, port: int, logger: logging.Logger) -> None:
         self.config = config
-        self.handler = handler
+        self.port: int = port
+        """Bound port the *server* is listening on. Threaded through to
+        worker selectors so :data:`HTTPReqCtx`-consumers (e.g. the WSGI
+        bridge) can populate ``SERVER_PORT`` without reaching for the
+        listen socket."""
         self.logger = logger
-        self._conn_factory = conn_factory
+        self._sel: selectors.BaseSelector = selectors.DefaultSelector()
         self.shutting_down: bool = False
         """Set to True on context-manager exit. Once set, ``track`` rejects
         new registrations and ``_maybe_give_back`` closes connections
         instead of returning them to the selector."""
         # Lock-free op queue + self-pipe wakeup. The selector thread is the
-        # single writer to ``self.selector``; cross-thread mutations from
+        # single writer to ``self._sel``; cross-thread mutations from
         # workers (``track`` from ``_maybe_give_back``, ``close`` from error
         # paths) enqueue ops and write a wakeup byte. The selector drains at
-        # the top of every iteration and on wakeup-sentinel events.
+        # the top of every iteration and on wakeup-callback events.
         self._ops: collections.deque[_Op] = collections.deque()
         r, w = os.pipe()
         os.set_blocking(r, False)
@@ -415,13 +609,13 @@ class BaseServer:
             fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
         self._wakeup_r: int = r
         self._wakeup_w: int = w
-        selector.register(r, selectors.EVENT_READ, data=_WAKEUP_SENTINEL)
+        self._sel.register(r, selectors.EVENT_READ, data=_DrainWakeup())
         self._selector_thread_id: int | None = None
         """Cached on the first ``run()`` call. Used to route ``track`` /
         ``close`` calls inline when invoked from the selector thread itself
-        (e.g. from the accept branch of ``run``)."""
+        (e.g. from the accept callback)."""
         # Stale-connection cleanup runs lazily — at most once per
-        # ``_cleanup_interval``. Avoids walking ``selector.get_map()`` on
+        # ``_cleanup_interval``. Avoids walking the selector map on
         # every iteration when nothing's actually stale (which is the
         # common case under load: keep_alive_timeout=15s, rw_timeout=1s).
         # Floor at 100 ms so users with degenerate tiny timeouts don't
@@ -432,59 +626,26 @@ class BaseServer:
         )
         self._last_cleanup_at: float = 0.0
 
-    def _find_stale(self):
-        now = time.monotonic()
-        for key in self.selector.get_map().values():
-            if (conn := key.data) and isinstance(conn, BaseHTTPConn) and conn.close_at and now > conn.close_at:
-                yield conn
+    # ----- Public registration API (selector-thread only) -----
 
-    def _cleanup_stale(self):
-        # Selector-thread only. Lock-free: ``self.selector`` and
-        # ``conn.tracked`` are owned by the selector thread.
-        #
-        # We deliberately keep this on the selector thread rather than a
-        # dedicated cleanup thread. With the lazy gate below the common
-        # case is an O(1) timestamp compare (no walk); the actual O(N)
-        # sweep runs at most every ``_cleanup_interval``, ~twice a second
-        # by default. A separate thread would either need a lock around
-        # ``selector.get_map()`` (losing the lock-free property of the
-        # current op-queue model) or maintain a parallel data structure
-        # — both add machinery without buying anything visible.
-        #
-        # Lazy: skip the O(N) walk over registered conns when not enough
-        # time has passed since the last sweep. Worst-case extra detection
-        # latency is ``_cleanup_interval`` (default 0.5 s) on top of the
-        # configured ``rw_timeout`` / ``keep_alive_timeout`` — both already
-        # measure non-fatal conditions.
-        now = time.monotonic()
-        if now - self._last_cleanup_at < self._cleanup_interval:
-            return
-        self._last_cleanup_at = now
-        stale = list(self._find_stale())
-        for conn in stale:
-            try:
-                self.selector.unregister(conn.sock)
-            except (KeyError, ValueError):
-                pass
-            conn.tracked = False
-        for conn in stale:
-            # Stalled mid-request gets a 408; idle keep-alive gets silently
-            # dropped. The decision and the bytes-on-wire are the conn's
-            # job — backends differ.
-            try:
-                conn.emit_stale_408()
-            except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
-                pass
-            try:
-                conn.sock.close()
-            except OSError:
-                pass
+    def register(self, fd: int, callback: SelectorCallback, /) -> None:
+        """Register ``fd`` with ``callback``. Selector-thread only."""
+        self._sel.register(fd, selectors.EVENT_READ, data=callback)
+
+    def unregister(self, fd: int, /) -> None:
+        """Unregister ``fd``. Selector-thread only. Swallows missing-fd errors."""
+        try:
+            self._sel.unregister(fd)
+        except (KeyError, ValueError):
+            pass
+
+    # ----- Conn tracking -----
 
     def track(self, conn: BaseHTTPConn) -> None:
         """Register ``conn`` in the selector for normal HTTP processing.
 
         Safe from any thread. When called from a worker, the actual
-        ``selector.register`` happens on the selector thread (drained from
+        ``selectors.register`` happens on the selector thread (drained from
         ``self._ops`` at the top of the next iteration). ``conn.tracked``
         is flipped optimistically so concurrent readers see the intended
         state.
@@ -524,8 +685,8 @@ class BaseServer:
     def stop_tracking(self, conn: BaseHTTPConn) -> None:
         """Unregister ``conn`` from the selector; the worker becomes the sole I/O owner.
 
-        Selector-thread only (called from the dispatcher inside ``BaseServer.run``'s
-        for-event loop). Socket stays non-blocking — the worker's send
+        Selector-thread only (called from the dispatcher inside the conn's
+        ``__call__``). Socket stays non-blocking — the worker's send
         path (:func:`_send_all`) handles partial writes and falls back
         to blocking-with-timeout only when the kernel buffer fills.
         Client-disconnect detection while the conn is borrowed lives in
@@ -538,10 +699,33 @@ class BaseServer:
         docstring on each backend for the full invariant.
         """
         try:
-            self.selector.unregister(conn.sock)
+            self._sel.unregister(conn.sock)
         except (KeyError, ValueError):
             pass
         conn.tracked = False
+
+    def post_track(self, conn: BaseHTTPConn) -> None:
+        """Cross-thread :meth:`track`. Always enqueues ``_OpTrack`` and wakes
+        the selector — never applies inline. Used by the acceptor
+        topology to deliver fresh conns from the acceptor thread to a
+        worker selector.
+        """
+        if self.shutting_down:
+            with suppress(OSError):
+                conn.sock.close()
+            conn.tracked = False
+            return
+        conn.tracked = True
+        self._ops.append(_OpTrack(conn))
+        self._wake()
+
+    def post_close(self, fd: int) -> None:
+        """Cross-thread close-cleanup. Enqueues a ``_OpClose`` so the
+        selector thread cleans its ``_fd_to_key`` map after the worker
+        already closed the socket.
+        """
+        self._ops.append(_OpClose(fd))
+        self._wake()
 
     # ----- Op queue + self-pipe helpers -----
 
@@ -575,9 +759,9 @@ class BaseServer:
             try:
                 if isinstance(op, _OpTrack):
                     self._apply_track(op.conn)
-                elif isinstance(op, _OpClose) and op.fd in self.selector.get_map():
+                elif isinstance(op, _OpClose) and op.fd in self._sel.get_map():
                     try:
-                        self.selector.unregister(op.fd)
+                        self._sel.unregister(op.fd)
                     except (KeyError, ValueError):
                         pass
             except Exception:
@@ -586,14 +770,14 @@ class BaseServer:
     def _apply_track(self, conn: BaseHTTPConn) -> None:
         """Selector-thread handler for ``_OpTrack``.
 
-        Probes ``selector.get_map()`` (an O(1) dict-``in`` check) to choose
+        Probes ``self._sel.get_map()`` (an O(1) dict-``in`` check) to choose
         ``modify`` vs ``register``, instead of catching ``KeyError`` from
         ``modify``. The error path inside ``selectors.modify`` builds the
         exception message as ``f"{fileobj!r}"`` — and ``socket.__repr__``
         is surprisingly expensive (~25 µs/call). Per-request overhead.
         """
         sock = conn.sock
-        sel = self.selector
+        sel = self._sel
         try:
             if conn.fd in sel.get_map():
                 sel.modify(sock, selectors.EVENT_READ, data=conn)
@@ -606,11 +790,91 @@ class BaseServer:
             except OSError:
                 pass
 
-    def _shutdown_active_connections(self) -> None:
-        """Set the shutdown flag and close any connections still in the selector.
+    # ----- Stale-conn sweep -----
 
-        Called from ``start_http_server.__exit__`` *after* the selector loop
-        has stopped. Workers calling ``track`` / ``close`` post-shutdown
+    def _find_stale(self) -> Iterator[BaseHTTPConn]:
+        now = time.monotonic()
+        for key in self._sel.get_map().values():
+            data = key.data
+            if isinstance(data, BaseHTTPConn) and data.close_at and now > data.close_at:
+                yield data
+
+    def _cleanup_stale(self) -> None:
+        # Selector-thread only. Lock-free: ``self._sel`` and ``conn.tracked``
+        # are owned by the selector thread.
+        #
+        # We deliberately keep this on the selector thread rather than a
+        # dedicated cleanup thread. With the lazy gate below the common
+        # case is an O(1) timestamp compare (no walk); the actual O(N)
+        # sweep runs at most every ``_cleanup_interval``, ~twice a second
+        # by default. A separate thread would either need a lock around
+        # ``self._sel.get_map()`` (losing the lock-free property of the
+        # current op-queue model) or maintain a parallel data structure
+        # — both add machinery without buying anything visible.
+        #
+        # Lazy: skip the O(N) walk over registered conns when not enough
+        # time has passed since the last sweep. Worst-case extra detection
+        # latency is ``_cleanup_interval`` (default 0.5 s) on top of the
+        # configured ``rw_timeout`` / ``keep_alive_timeout`` — both already
+        # measure non-fatal conditions.
+        now = time.monotonic()
+        if now - self._last_cleanup_at < self._cleanup_interval:
+            return
+        self._last_cleanup_at = now
+        stale = list(self._find_stale())
+        for conn in stale:
+            try:
+                self._sel.unregister(conn.sock)
+            except (KeyError, ValueError):
+                pass
+            conn.tracked = False
+        for conn in stale:
+            # Stalled mid-request gets a 408; idle keep-alive gets silently
+            # dropped. The decision and the bytes-on-wire are the conn's
+            # job — backends differ.
+            try:
+                conn.emit_stale_408()
+            except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
+                pass
+            try:
+                conn.sock.close()
+            except OSError:
+                pass
+
+    # ----- Run loop -----
+
+    def run(self, *, timeout: float | None = None) -> None:
+        """One iteration of the selector loop. Should be called repeatedly until the selector is stopped.
+
+        ``timeout`` bounds the underlying ``selectors.select`` call — it caps
+        how long this method blocks before returning to the caller, giving
+        the caller a chance to check for shutdown / cancellation. Defaults to
+        ``config.select_timeout``.
+
+        Uniform dispatch — every fd in the map has a :data:`SelectorCallback`
+        as ``key.data``. No isinstance branches, no sentinel comparisons.
+        """
+        if self._selector_thread_id is None:
+            self._selector_thread_id = threading.get_ident()
+        if timeout is None:
+            timeout = self.config.select_timeout
+        self._drain_ops()
+        self._cleanup_stale()
+        for key, _ in self._sel.select(timeout=timeout):
+            cb: SelectorCallback = key.data
+            try:
+                cb(self)
+            except Exception:
+                self.logger.exception("Selector callback raised: %r", cb)
+
+    # ----- Shutdown -----
+
+    def shutdown(self) -> None:
+        """Set the shutdown flag, drain residual ops, close registered conns,
+        and close the wakeup pipe.
+
+        Called from the outer context manager *after* the selector loop has
+        stopped. Workers calling ``track`` / ``close`` post-shutdown
         self-clean via the ``shutting_down`` check.
         """
         self.shutting_down = True
@@ -630,87 +894,107 @@ class BaseServer:
                 op.conn.tracked = False
             # _OpClose just cleans _fd_to_key — handled by the walk below.
 
-        for key in list(self.selector.get_map().values()):
-            if key.fileobj is self.sock:
-                continue  # listening socket — closed by the outer CM
-            if key.fileobj == self._wakeup_r:
-                continue  # wakeup pipe — closed below
-            if not isinstance(key.data, BaseHTTPConn):
+        for key in list(self._sel.get_map().values()):
+            data = key.data
+            if not isinstance(data, BaseHTTPConn):
                 continue
-            conn = key.data
             try:
-                self.selector.unregister(conn.sock)
+                self._sel.unregister(data.sock)
             except (KeyError, ValueError):
                 pass
             try:
-                conn.sock.close()
+                data.sock.close()
             except OSError:
                 pass
-            conn.tracked = False
+            data.tracked = False
 
         # Close the wakeup pipe.
-        try:
-            self.selector.unregister(self._wakeup_r)
-        except (KeyError, ValueError):
-            pass
+        with suppress(KeyError, ValueError):
+            self._sel.unregister(self._wakeup_r)
         for fd in (self._wakeup_r, self._wakeup_w):
             try:
                 os.close(fd)
             except OSError:
                 pass
 
-    def run(self, *, timeout: float | None = None) -> None:
-        """One iteration of the server loop. Should be called repeatedly until the server is stopped.
+    def close(self) -> None:
+        """Close the underlying ``selectors.BaseSelector``. Idempotent."""
+        with suppress(Exception):
+            self._sel.close()
 
-        ``timeout`` bounds the underlying ``selector.select`` call — it caps how long this
-        method blocks before returning to the caller, giving the caller a chance to check
-        for shutdown / cancellation. Defaults to ``config.select_timeout``.
+
+# --------------------------------------------------------------------------
+# BaseServer — listen socket + Selector + ConnHandler composition
+# --------------------------------------------------------------------------
+
+
+@final
+class BaseServer:
+    """Listening server: composes a :class:`Selector`, a listen socket, and
+    a :data:`ConnHandler`.
+
+    Parser-agnostic; the conn factory lives inside the :data:`ConnHandler`
+    (so ``BaseServer`` itself doesn't know whether you're using the h11 or
+    httptools backend).
+
+    The default :class:`TrackHere` ``ConnHandler`` reproduces today's
+    behaviour: each accepted connection is built and tracked on the same
+    selector that accepted it. Use :class:`RoundRobinAcceptor` to
+    distribute conns across worker selectors.
+    """
+
+    def __init__(
+        self,
+        config: ServerConfig,
+        conn_handler: ConnHandler,
+        logger: logging.Logger,
+        server_sock: socket.socket,
+        selector: Selector,
+    ) -> None:
+        self.sock = server_sock
+        self.port: int = server_sock.getsockname()[1]
+        """Actual port the server is listening on (useful when port 0 is
+        specified to auto-assign a free port)."""
+        self.selector = selector
+        self.config = config
+        self.conn_handler = conn_handler
+        self.logger = logger
+        # Listen socket is registered with an _AcceptListener callback.
+        server_sock.settimeout(0)
+        selector.register(
+            server_sock.fileno(),
+            _AcceptListener(server_sock, conn_handler, logger),
+        )
+
+    def run(self, *, timeout: float | None = None) -> None:
+        """Forwarder to :meth:`Selector.run`. Convenience for the common
+        all-in-one shape (BaseServer owns its selector and the caller
+        drives one loop).
         """
-        if self._selector_thread_id is None:
-            self._selector_thread_id = threading.get_ident()
-        if timeout is None:
-            timeout = self.config.select_timeout
-        server_sock = self.sock
-        h = self.handler
-        self._drain_ops()
-        self._cleanup_stale()
-        for key, _ in self.selector.select(timeout=timeout):
-            data = key.data
-            if data is _WAKEUP_SENTINEL:
-                self._drain_wakeup()
-                self._drain_ops()
-                continue
-            if key.fileobj is server_sock:
-                client_sock, client_addr = server_sock.accept()
-                # Linux 2.6.28+ inherits ``O_NONBLOCK`` from the listening
-                # socket; macOS / BSD do not. Set explicitly. While the
-                # conn is tracked the socket is non-blocking; the send /
-                # recv paths may flip it to blocking-with-timeout on a
-                # borrowed conn (``_send_all`` and the per-backend
-                # receive helpers) and the give-back path resets it
-                # before re-tracking.
-                client_sock.setblocking(False)
-                conn = self._conn_factory(self, client_sock, client_addr)
-                self.track(conn)
-                continue
-            if isinstance(data, BaseHTTPConn):
-                try:
-                    data(h)
-                except Exception:
-                    self.logger.exception("Unhandled exception from connection %s", data.addr)
-                    try:
-                        data.close()
-                    except Exception:  # noqa: BLE001, S110
-                        pass
-            else:
-                raise RuntimeError(f"Unexpected selector key: {key!r}")  # noqa: TRY004
+        self.selector.run(timeout=timeout)
+
+    @property
+    def shutting_down(self) -> bool:
+        return self.selector.shutting_down
+
+    def shutdown(self) -> None:
+        """Tear down: shut down the selector (which closes registered conns
+        and the wakeup pipe). The listening socket is closed by the outer
+        context manager.
+        """
+        self.selector.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Public entry points
+# --------------------------------------------------------------------------
 
 
 @contextmanager
 def start_http_server_base(
     config: ServerConfig,
     handler: RequestHandler,
-    conn_factory: _ConnFactory,
+    conn_factory: ConnFactory,
     /,
 ) -> Iterator[BaseServer]:
     """Open a listening socket and yield a :class:`BaseServer` driving ``conn_factory``.
@@ -725,18 +1009,18 @@ def start_http_server_base(
         backlog=config.backlog,
         reuse_port=True,
     )
-    selector = selectors.DefaultSelector()
+    port = server_sock.getsockname()[1]
+    selector = Selector(config, port=port, logger=logger)
+    conn_handler = TrackHere(handler, conn_factory)
 
-    server_sock.settimeout(0)
-    selector.register(server_sock, selectors.EVENT_READ)
-
-    with closing(server_sock), closing(selector):
-        server = BaseServer(config, handler, logger, server_sock, selector, conn_factory)
+    with closing(server_sock):
+        server = BaseServer(config, conn_handler, logger, server_sock, selector)
         logger.info("Serving on %s:%d", config.host, server.port)
         try:
             yield server
         finally:
-            server._shutdown_active_connections()
+            server.shutdown()
+            selector.close()
 
 
 def start_http_server(

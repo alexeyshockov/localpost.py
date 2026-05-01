@@ -1,3 +1,11 @@
+from localpost.http._base import (
+    ConnFactory,
+    ConnHandler,
+    RoundRobinAcceptor,
+    Selector,
+    SelectorCallback,
+    TrackHere,
+)
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
@@ -27,6 +35,13 @@ __all__ = [
     "BodyHandler",
     "Middleware",
     "compose",
+    # selector / accept-side topology
+    "Selector",
+    "SelectorCallback",
+    "ConnHandler",
+    "ConnFactory",
+    "TrackHere",
+    "RoundRobinAcceptor",
     # neutral wire types (used directly with HTTPReqCtx)
     "Request",
     "NativeResponse",

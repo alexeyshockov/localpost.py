@@ -38,7 +38,9 @@ class TestStartHttpServer:
 
     def test_handler_stored_on_server(self):
         with start_http_server(ServerConfig(host="127.0.0.1", port=0), _noop_handler) as server:
-            assert server.handler is _noop_handler
+            # ConnHandler owns the RequestHandler in the new chain layout
+            # (Selector → ConnHandler → RequestHandler → BodyHandler).
+            assert server.conn_handler.handler is _noop_handler  # type: ignore[attr-defined]
 
 
 # --- Request / response basics -----------------------------------------------

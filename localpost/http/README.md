@@ -150,6 +150,38 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
   `RequestHandler`) and `.wsgi` (for deployment under Gunicorn / Granian /
   etc.). Build via `routes.build()` or `Router.from_routes(routes)`.
 
+### Dispatch chain
+
+The internals are a four-link, loose-coupled chain:
+
+```
+Selector  ── owns fd→SelectorCallback map; nothing HTTP-specific
+   │
+   ▼
+ConnHandler  ── after-accept policy; owns RequestHandler + ConnFactory;
+   │              decides which Selector tracks the new conn
+   ▼
+RequestHandler  ── pre-body dispatch; returns BodyHandler|None
+   │
+   ▼
+BodyHandler  ── post-body continuation
+```
+
+Each link knows only the next. `Selector` doesn't carry a `RequestHandler` —
+the handler is owned by the `ConnHandler` and threaded into the conn at
+construction. This factoring is what makes the acceptor topology (1 acceptor
+thread + N worker selectors) drop in without touching the request hot path.
+
+- **`Selector`** — dumb fd→callback dispatcher. Built-in callbacks:
+  `_DrainWakeup` (wakeup pipe), `_AcceptListener` (listen socket), and
+  `BaseHTTPConn` itself (a conn *is* its own per-fd callback).
+- **`ConnHandler = Callable[[Selector, socket.socket, tuple[str, int]], None]`** —
+  after-accept policy. Two built-ins: `TrackHere` (default — track on the
+  selector that accepted) and `RoundRobinAcceptor` (acceptor topology —
+  spread conns across worker selectors via `Selector.post_track`).
+- All callbacks are spelled as **callable dataclasses** (not closures), so
+  their state is `repr`-able for debugging.
+
 ## Public API
 
 ### `localpost.http.server`
@@ -159,6 +191,17 @@ sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 | `start_http_server(cfg, handler)` | Context manager yielding a `Server` bound to ``handler`` |
 | `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
+
+### Selector / accept-side topology
+
+| Symbol                    | Notes                                      |
+| ------------------------- | ------------------------------------------ |
+| `Selector`                | Dumb fd→callback dispatcher (op queue + wakeup pipe + stale-conn sweep). One per selector thread. |
+| `SelectorCallback`        | `Callable[[Selector], None]` — registered per-fd, invoked when readable |
+| `ConnHandler`             | `Callable[[Selector, sock, addr], None]` — after-accept policy |
+| `ConnFactory`             | `Callable[[Selector, sock, addr, RequestHandler], BaseHTTPConn]` |
+| `TrackHere`               | Default `ConnHandler`: build conn for accepting selector and `track()` it. Reproduces the all-in-one behaviour. |
+| `RoundRobinAcceptor`      | `ConnHandler` for the acceptor topology — spreads new conns across a tuple of worker `Selector`s via `post_track` (cross-thread op queue). |
 
 ### Cancellation
 
@@ -255,10 +298,21 @@ on the documented public Flask API.
 
 | Symbol                                            | Module                       | Notes                                                                               |
 | ------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------- |
-| `http_server(config, handler)`                    | `localpost.http._service`    | `@hosting.service` — runs the server loop with `handler`. No thread pool.           |
-| `wsgi_server(config, app)`                        | `localpost.http._service`    | Same, for a generic WSGI app.                                                       |
+| `http_server(config, handler, *, selectors=1, acceptor=False)` | `localpost.http._service`    | `@hosting.service` — runs the server loop with `handler`. See **Threading topologies** below. |
+| `wsgi_server(config, app, *, selectors=1, acceptor=False)`     | `localpost.http._service`    | Same, for a generic WSGI app.                                                       |
 | `flask_server(config, app)`                       | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`.                                          |
 | `thread_pool_handler(inner, *, max_concurrency, backlog=0)` | `localpost.http._pool` | Async CM. Yields a `RequestHandler` that runs `inner` on a worker thread. Admission cap = `max_concurrency + backlog`; default `backlog=0` means exactly `max_concurrency` in flight. |
+
+#### Threading topologies
+
+`http_server` supports three accept-side shapes, all sharing the same
+`RequestHandler` / `BodyHandler` chain:
+
+| Configuration                         | Threads                                       | When to use |
+| ------------------------------------- | --------------------------------------------- | ----------- |
+| Default (`selectors=1`)               | 1 thread accepts, parses, and dispatches      | Simple deployments; thread-pool wrapper handles concurrency on the request side |
+| `selectors=N`                         | N independent selectors, each with its own listening socket via `SO_REUSEPORT` | Linux kernel-level connection load-balancing; free-threaded builds |
+| `selectors=N, acceptor=True`          | 1 acceptor thread + N worker selector threads | macOS / free-threaded targets where `SO_REUSEPORT` doesn't distribute evenly. Acceptor accepts each conn and round-robins it to a worker via the cross-thread op queue. |
 
 The server loop runs in a worker thread (`anyio.to_thread.run_sync`); shutdown
 is driven by `lt.shutting_down` via `threadtools.check_cancelled()`. The

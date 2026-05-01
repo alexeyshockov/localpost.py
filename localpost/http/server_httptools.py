@@ -38,9 +38,9 @@ from localpost.http._base import (
     PAYLOAD_TOO_LARGE_WIRE,
     REQUEST_TIMEOUT_WIRE,
     BaseHTTPConn,
-    BaseServer,
     BodyHandler,
     RequestHandler,
+    Selector,
     _send_all,
     emit_handler_error,
 )
@@ -112,9 +112,10 @@ def _response_allows_body(request_method: bytes, status_code: int) -> bool:
 @final
 @dataclass(eq=False, slots=True)
 class HTTPConn(BaseHTTPConn):
-    server: BaseServer
+    selector: Selector
     sock: socket.socket
     addr: tuple[str, int]
+    handler: RequestHandler
     fd: int = field(init=False)
     parser: httptools.HttpRequestParser = field(init=False)
     """The httptools (llhttp) parser — parse-only on our side; the
@@ -127,7 +128,7 @@ class HTTPConn(BaseHTTPConn):
     the worker also calls ``parser.feed_data`` from inside
     ``ctx.receive`` to drain remaining body bytes. The op-queue /
     wakeup-pipe handoff in
-    :class:`localpost.http._base.BaseServer` is the synchronisation
+    :class:`localpost.http._base.Selector` is the synchronisation
     edge — `os.write` to the wakeup pipe is a full memory barrier.
     The parser is **never** touched concurrently from two threads;
     ownership is strict (selector → worker on ``stop_tracking``;
@@ -175,9 +176,6 @@ class HTTPConn(BaseHTTPConn):
     # keep-alive support — the conn is closed once finish_response returns.
     _close_after_response: bool = False
     _response_started: bool = False
-
-    # Set by ``__call__`` so parser callbacks can dispatch the pre-body handler.
-    _handler: RequestHandler | None = None
 
     def __post_init__(self) -> None:
         self.fd = self.sock.fileno()
@@ -228,7 +226,7 @@ class HTTPConn(BaseHTTPConn):
                 except ValueError:
                     cl = None
                 break
-        if cl is not None and cl > self.server.config.max_body_size:
+        if cl is not None and cl > self.selector.config.max_body_size:
             self._body_too_large = cl
             self._cur_oversize = True
             return
@@ -259,7 +257,7 @@ class HTTPConn(BaseHTTPConn):
             http_version=version,
         )
         ctx = HTTPReqCtxHttptools(
-            self.server,
+            self.selector,
             self,
             req,
             _expect_100_continue=self._cur_expect_100,
@@ -274,13 +272,12 @@ class HTTPConn(BaseHTTPConn):
         # thread; it can call ``ctx.complete(...)`` (response sent inline,
         # returns None), ``ctx.borrow()`` (escape to worker, returns None),
         # or return a :data:`BodyHandler` continuation to receive the body.
-        assert self._handler is not None
         try:
-            result = self._handler(ctx)
+            result = self.handler(ctx)
         except BodyTooLarge:
             raise
         except Exception:
-            self.server.logger.exception("Handler raised for %s %r", req.method, req.target)
+            self.selector.logger.exception("Handler raised for %s %r", req.method, req.target)
             emit_handler_error(ctx)
             result = None
 
@@ -312,7 +309,7 @@ class HTTPConn(BaseHTTPConn):
             # of which thread is currently inside ``feed_data``. ``ctx.receive``
             # drains it (and pulls more bytes from the socket if needed).
             new_total = len(self._streaming_body_buf) + len(data)
-            if new_total > self.server.config.max_body_size:
+            if new_total > self.selector.config.max_body_size:
                 self._body_too_large = new_total
                 return
             self._streaming_body_buf += data
@@ -320,7 +317,7 @@ class HTTPConn(BaseHTTPConn):
         if self._continuation is None or self._cur_oversize:
             return  # no body wanted (handler done) or already oversize
         new_total = len(self._body_buf) + len(data)
-        if new_total > self.server.config.max_body_size:
+        if new_total > self.selector.config.max_body_size:
             self._body_too_large = new_total
             return
         self._body_buf += data
@@ -341,23 +338,22 @@ class HTTPConn(BaseHTTPConn):
             except BodyTooLarge:
                 raise
             except Exception:
-                self.server.logger.exception("Body handler raised for %s %r", ctx.request.method, ctx.request.target)
+                self.selector.logger.exception("Body handler raised for %s %r", ctx.request.method, ctx.request.target)
                 emit_handler_error(ctx)
         self._message_complete = True
 
     # ----- BaseHTTPConn surface -----
 
-    def __call__(self, h: RequestHandler, /) -> None:
-        self._handler = h
+    def __call__(self, _sel: Selector, /) -> None:
         try:
             self._loop()
         except _ProtocolError as e:
-            self.server.logger.warning("Bad client input from %s: %s", self.addr, e)
+            self.selector.logger.warning("Bad client input from %s: %s", self.addr, e)
             self._try_send_wire(BAD_REQUEST_WIRE)
             self.close()
         except BodyTooLarge:
-            self.server.logger.warning(
-                "Request body from %s exceeds max_body_size=%d", self.addr, self.server.config.max_body_size
+            self.selector.logger.warning(
+                "Request body from %s exceeds max_body_size=%d", self.addr, self.selector.config.max_body_size
             )
             self._try_send_wire(PAYLOAD_TOO_LARGE_WIRE)
             self.close()
@@ -382,7 +378,7 @@ class HTTPConn(BaseHTTPConn):
             dispatch()
 
     def _loop(self) -> None:
-        config = self.server.config
+        config = self.selector.config
         while self.tracked:
             # Did the previous request just complete? Either roll into the
             # next one (keep-alive) or close.
@@ -429,7 +425,7 @@ class HTTPConn(BaseHTTPConn):
         self._streaming_eom = False
         self._deferred_streaming_dispatch = None
         self.idle = True
-        self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
+        self.close_at = time.monotonic() + self.selector.config.keep_alive_timeout
 
     def _try_send_wire(self, wire: bytes) -> None:
         """Best-effort: write a pre-serialised status+headers+body block.
@@ -471,7 +467,7 @@ class HTTPReqCtxHttptools:
     chunk together; one per subsequent chunk).
     """
 
-    server: BaseServer
+    selector: Selector
     conn: HTTPConn
     request: Request
     _expect_100_continue: bool = False
@@ -499,7 +495,7 @@ class HTTPReqCtxHttptools:
     @contextmanager
     def borrow(self) -> Iterator[HTTPReqCtxHttptools]:
         assert not self.borrowed
-        self.server.stop_tracking(self.conn)
+        self.selector.stop_tracking(self.conn)
         try:
             yield self
         finally:
@@ -533,7 +529,7 @@ class HTTPReqCtxHttptools:
                 sock.settimeout(0)
             except OSError:
                 pass
-        self.server.track(self.conn)
+        self.selector.track(self.conn)
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         self.start_response(response)
@@ -561,7 +557,7 @@ class HTTPReqCtxHttptools:
             self._send_continue()
 
         conn = self.conn
-        rw = self.server.config.rw_timeout
+        rw = self.selector.config.rw_timeout
 
         if conn._streaming_active:
             while not conn._streaming_body_buf and not conn._streaming_eom:

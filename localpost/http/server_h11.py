@@ -35,9 +35,9 @@ from localpost.http._base import (
     REQUEST_TIMEOUT_BODY,
     REQUEST_TIMEOUT_RESPONSE,
     BaseHTTPConn,
-    BaseServer,
     BodyHandler,
     RequestHandler,
+    Selector,
     _send_all,
     emit_handler_error,
 )
@@ -72,9 +72,10 @@ def _has_response_framing(headers) -> bool:
 @final
 @dataclass(eq=False, slots=True)
 class HTTPConn(BaseHTTPConn):
-    server: BaseServer
+    selector: Selector
     sock: socket.socket
     addr: tuple[str, int]
+    handler: RequestHandler
     fd: int = field(init=False)
     """The integer file descriptor captured at construction time. Used to
     clean up ``selector._fd_to_key`` after ``sock.close()`` (where
@@ -89,7 +90,7 @@ class HTTPConn(BaseHTTPConn):
     ``__call__`` entry until ``stop_tracking`` (in the
     :data:`BodyHandler` dispatcher); the worker owns it from then until
     ``track`` re-registers the conn. The op-queue / wakeup-pipe
-    handoff in :class:`localpost.http._base.BaseServer` is the
+    handoff in :class:`localpost.http._base.Selector` is the
     synchronisation edge — `os.write` to the wakeup pipe is a full
     memory barrier across threads. The parser is **never** touched
     concurrently from two threads.
@@ -129,26 +130,27 @@ class HTTPConn(BaseHTTPConn):
             return
         _send_all(self, payload)
 
-    def __call__(self, h: RequestHandler, /) -> None:
+    def __call__(self, _sel: Selector, /) -> None:
         try:
-            self._loop(h)
+            self._loop()
         except h11.RemoteProtocolError as e:
-            self.server.logger.warning("Bad client input from %s: %s", self.addr, e)
+            self.selector.logger.warning("Bad client input from %s: %s", self.addr, e)
             self._try_send_status(BAD_REQUEST_RESPONSE, BAD_REQUEST_BODY)
             self.close()
         except h11.LocalProtocolError:
-            self.server.logger.exception("Local protocol error from %s", self.addr)
+            self.selector.logger.exception("Local protocol error from %s", self.addr)
             self._try_send_status(INTERNAL_ERROR_RESPONSE, INTERNAL_ERROR_BODY)
             self.close()
         except BodyTooLarge:
-            self.server.logger.warning(
-                "Request body from %s exceeds max_body_size=%d", self.addr, self.server.config.max_body_size
+            self.selector.logger.warning(
+                "Request body from %s exceeds max_body_size=%d", self.addr, self.selector.config.max_body_size
             )
             self._try_send_status(PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_BODY)
             self.close()
 
-    def _loop(self, h: RequestHandler) -> None:
+    def _loop(self) -> None:
         parser = self.parser
+        h = self.handler
 
         while self.tracked:
             if parser.our_state is h11.MUST_CLOSE:
@@ -158,7 +160,7 @@ class HTTPConn(BaseHTTPConn):
                 parser.start_next_cycle()
                 self.body_bytes_received = 0
                 self.idle = True
-                self.close_at = time.monotonic() + self.server.config.keep_alive_timeout
+                self.close_at = time.monotonic() + self.selector.config.keep_alive_timeout
                 # Per-request state from previous cycle is no longer relevant.
                 self._ctx = None
                 self._continuation = None
@@ -180,10 +182,10 @@ class HTTPConn(BaseHTTPConn):
                     self.receive()
                 except BlockingIOError:
                     return  # Wait for it in the selector
-                self.close_at = time.monotonic() + self.server.config.rw_timeout
+                self.close_at = time.monotonic() + self.selector.config.rw_timeout
             elif isinstance(event, h11.Data):
                 self.body_bytes_received += len(event.data)
-                if self.body_bytes_received > self.server.config.max_body_size:
+                if self.body_bytes_received > self.selector.config.max_body_size:
                     raise BodyTooLarge(self.body_bytes_received)
                 if self._continuation is not None:
                     self._body_buf += event.data
@@ -201,7 +203,7 @@ class HTTPConn(BaseHTTPConn):
                     except BodyTooLarge:
                         raise
                     except Exception:
-                        self.server.logger.exception(
+                        self.selector.logger.exception(
                             "Body handler raised for %s %r", ctx.request.method, ctx.request.target
                         )
                         emit_handler_error(ctx)
@@ -211,7 +213,7 @@ class HTTPConn(BaseHTTPConn):
                         return
             elif isinstance(event, h11.Request):
                 cl = _content_length(event.headers)
-                if cl is not None and cl > self.server.config.max_body_size:
+                if cl is not None and cl > self.selector.config.max_body_size:
                     raise BodyTooLarge(cl)
                 # h11 hands us ``bytes`` for method/target/version and a list
                 # of ``(bytes, bytes)`` tuples for headers. ``bytes(b)`` for an
@@ -241,7 +243,7 @@ class HTTPConn(BaseHTTPConn):
                     headers=list(event.headers),
                     http_version=event.http_version,
                 )
-                ctx = HTTPReqCtxH11(self.server, self, req)
+                ctx = HTTPReqCtxH11(self.selector, self, req)
                 self._ctx = ctx
                 self._body_buf = bytearray()
                 self._continuation = None
@@ -250,7 +252,7 @@ class HTTPConn(BaseHTTPConn):
                 except BodyTooLarge:
                     raise
                 except Exception:
-                    self.server.logger.exception("Handler raised for %s %r", event.method, event.target)
+                    self.selector.logger.exception("Handler raised for %s %r", event.method, event.target)
                     emit_handler_error(ctx)
                     result = None
                 if result is not None:
@@ -260,7 +262,7 @@ class HTTPConn(BaseHTTPConn):
                 if not self.tracked:
                     return  # connection was closed during error recovery
             elif isinstance(event, h11.ConnectionClosed):
-                self.server.logger.debug("Client closed connection")
+                self.selector.logger.debug("Client closed connection")
                 self.close()
                 return
             else:
@@ -312,7 +314,7 @@ class HTTPReqCtxH11:
     chunk in a single ``sendall``.
     """
 
-    server: BaseServer
+    selector: Selector
     conn: HTTPConn
     request: Request
 
@@ -329,7 +331,7 @@ class HTTPReqCtxH11:
     def borrow(self) -> Iterator[HTTPReqCtxH11]:
         """Switch the conn out of selector tracking for the duration of the block."""
         assert not self.borrowed
-        self.server.stop_tracking(self.conn)
+        self.selector.stop_tracking(self.conn)
         try:
             yield self
         finally:
@@ -351,7 +353,7 @@ class HTTPReqCtxH11:
                 sock.settimeout(0)
             except OSError:
                 pass
-        self.server.track(self.conn)
+        self.selector.track(self.conn)
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         self.start_response(response)
@@ -382,7 +384,7 @@ class HTTPReqCtxH11:
                 try:
                     self.conn.receive(size)
                 except BlockingIOError:
-                    sock.settimeout(self.server.config.rw_timeout)
+                    sock.settimeout(self.selector.config.rw_timeout)
                     try:
                         self.conn.receive(size)
                     finally:
@@ -390,7 +392,7 @@ class HTTPReqCtxH11:
                             sock.settimeout(0)
             elif isinstance(event, h11.Data):
                 self.conn.body_bytes_received += len(event.data)
-                if self.conn.body_bytes_received > self.server.config.max_body_size:
+                if self.conn.body_bytes_received > self.selector.config.max_body_size:
                     raise BodyTooLarge(self.conn.body_bytes_received)
                 return bytes(event.data)
             elif isinstance(event, h11.EndOfMessage):

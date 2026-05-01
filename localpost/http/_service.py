@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import socket
 from collections.abc import Awaitable
+from contextlib import closing
 from wsgiref.types import WSGIApplication
 
 from anyio import Event, create_task_group, from_thread, to_thread
 
 from localpost import hosting
 from localpost.hosting import ServiceLifetime
-from localpost.http.config import ServerConfig
-from localpost.http.server import RequestHandler, start_http_server
+from localpost.http._base import (
+    BaseServer,
+    RoundRobinAcceptor,
+    Selector,
+    start_http_server,
+)
+from localpost.http.config import LOGGER_NAME, ServerConfig
+from localpost.http.server import RequestHandler
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = ["http_server", "wsgi_server"]
@@ -29,6 +37,25 @@ def _resolve_ephemeral_port(host: str) -> int:
         return probe.getsockname()[1]
 
 
+def _pick_conn_factory(backend: str):
+    """Match :func:`start_http_server`'s backend selection — used by the
+    acceptor topology, where we wire :class:`RoundRobinAcceptor` directly
+    instead of going through ``start_http_server``."""
+    if backend == "h11":
+        from localpost.http.server_h11 import HTTPConn  # noqa: PLC0415
+
+        return HTTPConn
+    if backend == "httptools":
+        try:
+            from localpost.http.server_httptools import HTTPConn  # noqa: PLC0415
+        except ImportError as e:
+            raise ImportError(
+                "httptools backend requires the [http-fast] extra (pip install localpost[http-fast])"
+            ) from e
+        return HTTPConn
+    raise ValueError(f"unknown backend {backend!r} (expected 'h11' or 'httptools')")
+
+
 @hosting.service
 def http_server(
     config: ServerConfig,
@@ -36,6 +63,7 @@ def http_server(
     /,
     *,
     selectors: int = 1,
+    acceptor: bool = False,
 ):
     """Run an HTTP server inside a hosted service.
 
@@ -58,19 +86,35 @@ def http_server(
         handler: Sync request handler. Shared across selector threads when
             ``selectors > 1`` — make sure any state it captures is
             thread-safe (``thread_pool_handler`` already is).
-        selectors: Number of selector threads. Default 1. With ``> 1``,
-            each selector binds its own listening socket on the same
-            address via ``SO_REUSEPORT``; the kernel distributes incoming
-            connections. ``config.port == 0`` is resolved to an ephemeral
-            port once and shared by all selectors. Measured impact on
-            standard CPython / macOS is flat (GIL holds during parser
-            callbacks + dispatch + channel handoff; macOS
-            ``SO_REUSEPORT`` doesn't load-balance like Linux). Useful on
-            Linux (kernel-level distribution) and on free-threaded
-            builds; see ``benchmarks/http/PERF_FINDINGS.md`` Phase 7.
+        selectors: Number of selector threads. Default 1.
+
+            With ``acceptor=False`` (default), each selector binds its own
+            listening socket on the same address via ``SO_REUSEPORT``;
+            the kernel distributes incoming connections. ``config.port == 0``
+            is resolved to an ephemeral port once and shared by all
+            selectors. Measured impact on standard CPython / macOS is
+            flat (GIL holds during parser callbacks + dispatch + channel
+            handoff; macOS ``SO_REUSEPORT`` doesn't load-balance like
+            Linux). Useful on Linux (kernel-level distribution) and on
+            free-threaded builds; see ``benchmarks/http/PERF_FINDINGS.md``
+            Phase 7.
+
+            With ``acceptor=True``, ``selectors`` is the number of
+            **worker** selectors fed by a single acceptor thread. See
+            ``acceptor`` below.
+        acceptor: When ``True``, run a dedicated acceptor thread that
+            accepts every connection on the listen socket and round-robins
+            it to one of ``selectors`` worker selectors via the cross-thread
+            op queue. Useful when ``SO_REUSEPORT`` doesn't distribute
+            evenly (macOS, free-threaded builds). The acceptor thread does
+            no parsing; worker selectors do all I/O for the conns assigned
+            to them.
     """
     if selectors < 1:
         raise ValueError(f"selectors must be >= 1 (got {selectors})")
+
+    if acceptor:
+        return _run_acceptor(config, handler, workers=selectors)
 
     if selectors == 1:
 
@@ -120,12 +164,97 @@ def http_server(
     return run_multi
 
 
+def _run_acceptor(config: ServerConfig, handler: RequestHandler, *, workers: int):
+    """Acceptor topology: 1 acceptor thread + N worker-selector threads.
+
+    The acceptor's :class:`BaseServer` runs a :class:`RoundRobinAcceptor`
+    as its :data:`ConnHandler`; each accepted client socket is wrapped in
+    a :class:`BaseHTTPConn` bound to the next worker :class:`Selector` and
+    delivered via :meth:`Selector.post_track` (cross-thread op queue +
+    wakeup pipe).
+    """
+    conn_factory = _pick_conn_factory(config.backend)
+
+    async def run(lt: ServiceLifetime) -> None:
+        logger = logging.getLogger(LOGGER_NAME)
+        # Bind the listen socket once on the calling (anyio) thread so we
+        # can compute ``port`` deterministically before any worker spins
+        # up. This mirrors what ``start_http_server_base`` does internally.
+        listen_sock = socket.create_server(
+            (config.host, config.port),
+            backlog=config.backlog,
+            reuse_port=True,
+        )
+        port = listen_sock.getsockname()[1]
+        logger.info("Serving on %s:%d (acceptor + %d workers)", config.host, port, workers)
+
+        # Build worker selectors first so the acceptor's ConnHandler can
+        # capture them. Each worker has its own Selector with its own
+        # wakeup pipe / op queue. ``shutting_down`` is per-selector — we
+        # toggle them on shutdown.
+        worker_selectors = tuple(
+            Selector(config, port=port, logger=logger) for _ in range(workers)
+        )
+        acceptor_selector = Selector(config, port=port, logger=logger)
+        round_robin = RoundRobinAcceptor(
+            workers=worker_selectors,
+            handler=handler,
+            conn_factory=conn_factory,
+        )
+        acceptor_server = BaseServer(
+            config, round_robin, logger, listen_sock, acceptor_selector
+        )
+
+        worker_started: list[Event] = [Event() for _ in range(workers)]
+        acceptor_started = Event()
+
+        def run_worker(idx: int) -> None:
+            sel = worker_selectors[idx]
+            try:
+                from_thread.run_sync(worker_started[idx].set)
+                while not lt.shutting_down.is_set():
+                    from_thread.check_cancelled()
+                    sel.run()
+            finally:
+                sel.shutdown()
+                sel.close()
+
+        def run_acceptor() -> None:
+            try:
+                from_thread.run_sync(acceptor_started.set)
+                while not lt.shutting_down.is_set():
+                    from_thread.check_cancelled()
+                    acceptor_server.run()
+            finally:
+                acceptor_server.shutdown()
+                acceptor_selector.close()
+
+        async def wait_started() -> None:
+            await acceptor_started.wait()
+            for ev in worker_started:
+                await ev.wait()
+            lt.set_started()
+
+        try:
+            async with create_task_group() as tg:
+                tg.start_soon(wait_started)
+                tg.start_soon(to_thread.run_sync, run_acceptor)
+                for i in range(workers):
+                    tg.start_soon(to_thread.run_sync, run_worker, i)
+        finally:
+            with closing(listen_sock):
+                pass
+
+    return run
+
+
 def wsgi_server(
     config: ServerConfig,
     app: WSGIApplication,
     /,
     *,
     selectors: int = 1,
+    acceptor: bool = False,
 ):
     """Same as :func:`http_server`, but for a WSGI application.
 
@@ -137,4 +266,4 @@ def wsgi_server(
             async with http_server(config, h):
                 ...
     """
-    return http_server(config, wrap_wsgi(app), selectors=selectors)
+    return http_server(config, wrap_wsgi(app), selectors=selectors, acceptor=acceptor)
