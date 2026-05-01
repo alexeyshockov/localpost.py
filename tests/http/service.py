@@ -46,13 +46,15 @@ async def _serve_pooled(
     *,
     max_concurrency: int,
     backlog: int = 0,
+    selectors: int = 1,
+    acceptor: bool = False,
 ) -> AsyncGenerator[ServiceLifetimeView]:
     """Compose ``thread_pool_handler`` + ``http_server`` and yield the http_server lifetime view.
 
     Tests own shutdown via the yielded lifetime; the pool drains on exit.
     """
     async with thread_pool_handler(handler, max_concurrency=max_concurrency, backlog=backlog) as wrapped:
-        async with serve(http_server(cfg, wrapped)) as lt:
+        async with serve(http_server(cfg, wrapped, selectors=selectors, acceptor=acceptor)) as lt:
             yield lt
 
 
@@ -487,10 +489,10 @@ class TestMultiSelector:
             http_server(cfg, _handler_200(), selectors=0)
 
     async def test_serves_requests_inline(self, free_port):
-        """selectors=2, no thread pool. Each request runs on whichever
-        selector accepted it; both must serve correctly."""
+        """selectors=4, no thread pool. Each request runs on whichever
+        selector accepted it; all must serve correctly."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(http_server(cfg, _handler_200(b"hi"), selectors=2)) as lt:
+        async with serve(http_server(cfg, _handler_200(b"hi"), selectors=4)) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -504,13 +506,13 @@ class TestMultiSelector:
         assert lt.exit_code == 0
 
     async def test_serves_requests_pooled_concurrent(self, free_port):
-        """selectors=2 + thread pool. Multiple selectors push onto the
-        single shared channel; the pool drains across both producers."""
+        """selectors=4 + thread pool. Multiple selectors push onto the
+        single shared channel; the pool drains across all producers."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         # backlog=8: with 10 fast requests against max_concurrency=4, headroom keeps the
         # rendezvous race from intermittently 503'ing late arrivals during the test.
         async with thread_pool_handler(_handler_200(b"hi"), max_concurrency=4, backlog=8) as wrapped:
-            async with serve(http_server(cfg, wrapped, selectors=2)) as lt:
+            async with serve(http_server(cfg, wrapped, selectors=4)) as lt:
                 await lt.started
                 await _wait_server_ready(free_port)
 
@@ -536,7 +538,7 @@ class TestMultiSelector:
         """All N selector threads must exit on shutdown — no leaked threads
         and a clean exit code."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(http_server(cfg, _handler_200(b"x"), selectors=3)) as lt:
+        async with serve(http_server(cfg, _handler_200(b"x"), selectors=4)) as lt:
             await lt.started
             await _wait_server_ready(free_port)
             resp = await _get(f"http://127.0.0.1:{free_port}/")
@@ -616,11 +618,74 @@ class TestAcceptorTopology:
     async def test_shutdown_clean(self, free_port):
         """Acceptor + workers shut down cleanly on lt.shutdown()."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with serve(http_server(cfg, _handler_200(b"x"), selectors=3, acceptor=True)) as lt:
+        async with serve(http_server(cfg, _handler_200(b"x"), selectors=4, acceptor=True)) as lt:
             await lt.started
             await _wait_server_ready(free_port)
             resp = await _get(f"http://127.0.0.1:{free_port}/")
             assert resp.status_code == 200
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_serves_requests_httptools(self, free_port):
+        """Acceptor + httptools backend.
+
+        The cross-thread handoff (``_OpTrack`` → ``Selector.post_track``) is
+        parser-agnostic at the type level, but httptools' push-callback model
+        means the parser is *constructed* on the acceptor thread (inside
+        ``RoundRobinAcceptor.__call__``) and *driven* on the worker thread.
+        Smoke-tests that the parser instance survives the move.
+        """
+        cfg = ServerConfig(host="127.0.0.1", port=free_port, backend="httptools")
+        async with serve(http_server(cfg, _handler_200(b"hi"), selectors=4, acceptor=True)) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            for _ in range(8):
+                resp = await _get(f"http://127.0.0.1:{free_port}/")
+                assert resp.status_code == 200
+                assert resp.text == "hi"
+
+            lt.shutdown()
+            await lt.stopped
+        assert lt.exit_code == 0
+
+    async def test_serves_requests_pooled(self, free_port):
+        """Acceptor + thread_pool_handler — most production-like cell.
+
+        Pool dispatch routes through ``ctx.conn.selector.stop_tracking(ctx.conn)``;
+        in acceptor mode that selector is the **worker**, not the acceptor.
+        Catches any regression where ``conn.selector`` is misaligned with the
+        actual owning selector.
+        """
+        cfg = ServerConfig(host="127.0.0.1", port=free_port)
+        # backlog=8 keeps the rendezvous race from intermittently 503'ing late
+        # arrivals while the pool has spare capacity.
+        async with _serve_pooled(
+            cfg,
+            _handler_200(b"hi"),
+            max_concurrency=4,
+            backlog=8,
+            selectors=4,
+            acceptor=True,
+        ) as lt:
+            await lt.started
+            await _wait_server_ready(free_port)
+
+            results: list[httpx.Response | None] = [None] * 10
+
+            async def fire(i: int) -> None:
+                results[i] = await _get(f"http://127.0.0.1:{free_port}/")
+
+            async with anyio.create_task_group() as tg:
+                for i in range(10):
+                    tg.start_soon(fire, i)
+
+            for r in results:
+                assert r is not None
+                assert r.status_code == 200
+                assert r.text == "hi"
+
             lt.shutdown()
             await lt.stopped
         assert lt.exit_code == 0
