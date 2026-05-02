@@ -55,10 +55,10 @@ class Stack:
 
 
 STACKS: Final[tuple[Stack, ...]] = (
-    Stack("localpost_native", app="native", backend="lp-h11", selectors=1, pool=True),
-    Stack("localpost_native_s4", app="native", backend="lp-h11", selectors=4, pool=True),
+    Stack("localpost_h11", app="native", backend="lp-h11", selectors=1, pool=True),
+    Stack("localpost_h11_s4", app="native", backend="lp-h11", selectors=4, pool=True),
     Stack(
-        "localpost_native_acceptor_s4",
+        "localpost_h11_acceptor_s4",
         app="native",
         backend="lp-h11",
         selectors=4,

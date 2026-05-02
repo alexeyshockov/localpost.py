@@ -19,7 +19,7 @@ brew install oha   # one-time prereq
 just bench-http
 
 # faster sanity sweep
-just bench-http --duration 5 --stacks localpost_native,flask_gunicorn
+just bench-http --duration 5 --stacks localpost_h11,flask_gunicorn
 
 # micro (pytest-benchmark)
 just bench-micro
@@ -31,7 +31,7 @@ Three "app types", each implementing the same four scenarios:
 
 | App type   | Stacks                                                                                    |
 |------------|-------------------------------------------------------------------------------------------|
-| Native     | `localpost_native`                                                                        |
+| Native     | `localpost_h11`, `localpost_httptools`, plus their `_s4` (`SO_REUSEPORT`) and `_acceptor_s4` variants; `localpost_httptools_inline` (no pool) and its multi-selector variants |
 | WSGI/Flask | `localpost_wsgi`, `localpost_flask`, `flask_cheroot`, `flask_gunicorn`, `flask_granian`   |
 | ASGI       | `starlette_uvicorn`, `starlette_granian`                                                  |
 

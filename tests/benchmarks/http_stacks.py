@@ -30,7 +30,7 @@ def test_select_by_backend_glob_and_selectors():
     selected = select_stacks(filters=["backend=lp-*", "selectors=1"])
     names = {s.name for s in selected}
     assert names == {
-        "localpost_native",
+        "localpost_h11",
         "localpost_httptools",
         "localpost_httptools_inline",
         "localpost_wsgi",

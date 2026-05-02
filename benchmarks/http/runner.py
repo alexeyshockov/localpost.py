@@ -26,7 +26,7 @@ Run from the repo root::
     just bench-http --group quick                         # ~4 stacks, fast PR check
     just bench-http --filter app=flask                    # all Flask servers
     just bench-http --filter 'backend=lp-*' --filter selectors=1
-    just bench-http --stacks localpost_native,flask_gunicorn  # exact list (escape hatch)
+    just bench-http --stacks localpost_h11,flask_gunicorn  # exact list (escape hatch)
     just bench-http --pythons 3.13=.venv-bench/3.13/bin/python
 """
 

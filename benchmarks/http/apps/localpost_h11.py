@@ -1,4 +1,4 @@
-"""LocalPost native handler — HttpApp + h11 backend."""
+"""LocalPost — HttpApp framework + h11 (pure-Python) backend."""
 
 from __future__ import annotations
 

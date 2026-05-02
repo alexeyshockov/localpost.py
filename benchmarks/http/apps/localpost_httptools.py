@@ -1,6 +1,6 @@
-"""LocalPost native handler — HttpApp + httptools backend.
+"""LocalPost — HttpApp framework + httptools (C/llhttp) backend.
 
-Same behaviour as ``localpost_native``; only the server backend differs.
+Same behaviour as ``localpost_h11``; only the server backend differs.
 """
 
 from __future__ import annotations

@@ -1090,6 +1090,14 @@ and calls `worker.post_track(conn)` (cross-thread `_OpTrack` on the existing
 op queue from Phase 3-B). The handoff path was already cross-thread-safe —
 `ConnHandler` just gives it a stable name.
 
+> **Stack rename in this phase.** `localpost_native` → `localpost_h11`
+> (and its `_s4` / `_acceptor_s4` variants). The old name conflated
+> "default LocalPost framework" with "default backend" — confusing once
+> `localpost_httptools` sat next to it in the matrix. Earlier-phase tables
+> in this document still reference `localpost_native` for historical
+> accuracy; from this phase onward the parser is explicit on every stack
+> name (`_h11` / `_httptools`).
+
 ### Bench (6 s/cell, Darwin arm64, two interpreters)
 
 The story splits cleanly along the GIL axis. Numbers: `localpost` group
@@ -1099,9 +1107,9 @@ only, plaintext scenario.
 
 | Stack                                     |    RPS | vs `s=1` baseline |
 | ----------------------------------------- | -----: | ----------------: |
-| `localpost_native` (s=1, pool)            | 12,504 |                 — |
-| `localpost_native_s4` (SO_REUSEPORT)      | 12,812 |               +2% |
-| `localpost_native_acceptor_s4`            | 12,215 |               −2% |
+| `localpost_h11` (s=1, pool)               | 12,504 |                 — |
+| `localpost_h11_s4` (SO_REUSEPORT)         | 12,812 |               +2% |
+| `localpost_h11_acceptor_s4`               | 12,215 |               −2% |
 | `localpost_httptools` (s=1, pool)         | 24,356 |                 — |
 | `localpost_httptools_s4`                  | 24,598 |               +1% |
 | `localpost_httptools_acceptor_s4`         | 21,207 |          **−13%** |
@@ -1116,15 +1124,15 @@ conn for the privilege.
 
 | Stack                                     |    RPS | vs `s=1` baseline |
 | ----------------------------------------- | -----: | ----------------: |
-| `localpost_native` (s=1, pool)            | 20,033 |                 — |
-| `localpost_native_s4` (SO_REUSEPORT)      | 20,604 |               +3% |
-| **`localpost_native_acceptor_s4`**        | **26,684** |       **+33%** |
+| `localpost_h11` (s=1, pool)               | 20,033 |                 — |
+| `localpost_h11_s4` (SO_REUSEPORT)         | 20,604 |               +3% |
+| **`localpost_h11_acceptor_s4`**           | **26,684** |       **+33%** |
 | `localpost_httptools` (s=1, pool)         | 16,262 |                 — |
 | `localpost_httptools_s4`                  | 15,973 |               −2% |
 | **`localpost_httptools_acceptor_s4`**     | **17,958** |       **+10%** |
 
-The headline result on h11: `native_acceptor_s4` does **26,684 vs `native_s4`'s
-20,604 = +30% over the SO_REUSEPORT alternative**. This is precisely the
+The headline result on h11: `localpost_h11_acceptor_s4` does **26,684 vs
+`localpost_h11_s4`'s 20,604 = +30% over the SO_REUSEPORT alternative**. This is precisely the
 case the topology was added for — Phase 7b confirmed `SO_REUSEPORT` puts
 100 % of accepts on one selector on macOS; the explicit round-robin replaces
 that with a real 4-way spread. httptools shows a smaller gain because its
