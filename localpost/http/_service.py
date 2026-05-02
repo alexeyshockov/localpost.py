@@ -7,9 +7,11 @@ from collections.abc import Awaitable
 from contextlib import closing
 from wsgiref.types import WSGIApplication
 
+import anyio
 from anyio import Event, create_task_group, from_thread, to_thread
 
 from localpost import hosting
+from localpost._utils import AnyEventView
 from localpost.hosting import ServiceLifetime
 from localpost.http._base import (
     BaseServer,
@@ -35,6 +37,24 @@ def _resolve_ephemeral_port(host: str) -> int:
     """
     with socket.create_server((host, 0)) as probe:
         return probe.getsockname()[1]
+
+
+async def _periodic_cleanup(period: float, shutdown: AnyEventView, *selectors: Selector) -> None:
+    """Drive stale-conn cleanup on every selector at a fixed cadence.
+
+    One coroutine per selector group is enough — the per-selector op queue
+    coalesces duplicates, and the sweep itself is cheap when nothing is
+    expired. Returns cleanly when ``shutdown`` is set so the surrounding
+    task group can finish; the wait is checkpointed every ``period`` seconds
+    via ``anyio.move_on_after``.
+    """
+    while not shutdown.is_set():
+        with anyio.move_on_after(period):
+            await shutdown.wait()
+        if shutdown.is_set():
+            return
+        for sel in selectors:
+            sel.post_cleanup()
 
 
 def _pick_conn_factory(backend: str):
@@ -132,7 +152,7 @@ def http_server(
 
     # Multi-selector: N independent ``BaseServer`` threads bound to the
     # same address via ``SO_REUSEPORT`` (already enabled in
-    # ``start_http_server_base``). The kernel hashes incoming SYNs across
+    # ``_start_http_server``). The kernel hashes incoming SYNs across
     # the listening sockets; established conns stay with one selector for
     # their lifetime. The ``handler`` instance is shared — when wrapped
     # with ``thread_pool_handler`` the underlying channel naturally accepts
@@ -179,7 +199,7 @@ def _run_acceptor(config: ServerConfig, handler: RequestHandler, *, workers: int
         logger = logging.getLogger(LOGGER_NAME)
         # Bind the listen socket once on the calling (anyio) thread so we
         # can compute ``port`` deterministically before any worker spins
-        # up. This mirrors what ``start_http_server_base`` does internally.
+        # up. This mirrors what ``_start_http_server`` does internally.
         listen_sock = socket.create_server(
             (config.host, config.port),
             backlog=config.backlog,
@@ -234,6 +254,13 @@ def _run_acceptor(config: ServerConfig, handler: RequestHandler, *, workers: int
         try:
             async with create_task_group() as tg:
                 tg.start_soon(wait_started)
+                tg.start_soon(
+                    _periodic_cleanup,
+                    config.select_timeout,
+                    lt.shutting_down,
+                    acceptor_selector,
+                    *worker_selectors,
+                )
                 tg.start_soon(to_thread.run_sync, run_acceptor)
                 for i in range(workers):
                     tg.start_soon(to_thread.run_sync, run_worker, i)

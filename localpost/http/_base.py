@@ -58,7 +58,6 @@ __all__ = [
     "TrackHere",
     "compose",
     "start_http_server",
-    "start_http_server_base",
 ]
 
 
@@ -88,7 +87,13 @@ class _OpClose:
     fd: int
 
 
-_Op = _OpTrack | _OpClose
+@final
+@dataclass(frozen=True, slots=True, eq=False)
+class _OpCleanup:
+    """Cleanup stale keep-alive connections."""
+
+
+_Op = _OpTrack | _OpClose | _OpCleanup
 
 
 # --------------------------------------------------------------------------
@@ -614,17 +619,6 @@ class Selector:
         """Cached on the first ``run()`` call. Used to route ``track`` /
         ``close`` calls inline when invoked from the selector thread itself
         (e.g. from the accept callback)."""
-        # Stale-connection cleanup runs lazily — at most once per
-        # ``_cleanup_interval``. Avoids walking the selector map on
-        # every iteration when nothing's actually stale (which is the
-        # common case under load: keep_alive_timeout=15s, rw_timeout=1s).
-        # Floor at 100 ms so users with degenerate tiny timeouts don't
-        # pathologically over-cleanup.
-        self._cleanup_interval: float = max(
-            min(config.rw_timeout, config.keep_alive_timeout) / 2,
-            0.1,
-        )
-        self._last_cleanup_at: float = 0.0
 
     # ----- Public registration API (selector-thread only) -----
 
@@ -727,6 +721,16 @@ class Selector:
         self._ops.append(_OpClose(fd))
         self._wake()
 
+    def post_cleanup(self) -> None:
+        """Cross-thread: ask the selector thread to sweep stale conns.
+
+        Coalesced inside :meth:`_drain_ops` — multiple posts before the
+        next drain pass run :meth:`_cleanup_stale` once. Cheap when no
+        conns are stale (single dict iteration).
+        """
+        self._ops.append(_OpCleanup())
+        self._wake()
+
     # ----- Op queue + self-pipe helpers -----
 
     def _wake(self) -> None:
@@ -750,12 +754,17 @@ class Selector:
             pass
 
     def _drain_ops(self) -> None:
-        """Apply all pending ops on the selector thread."""
+        """Apply all pending ops on the selector thread.
+
+        ``_OpCleanup`` is coalesced — multiple posts in the same drain pass
+        run :meth:`_cleanup_stale` once at the end.
+        """
+        cleanup_due = False
         while True:
             try:
                 op = self._ops.popleft()
             except IndexError:
-                return
+                break
             try:
                 if isinstance(op, _OpTrack):
                     self._apply_track(op.conn)
@@ -764,8 +773,12 @@ class Selector:
                         self._sel.unregister(op.fd)
                     except (KeyError, ValueError):
                         pass
+                elif isinstance(op, _OpCleanup):
+                    cleanup_due = True
             except Exception:
                 self.logger.exception("Op handler raised for %r", op)
+        if cleanup_due:
+            self._cleanup_stale()
 
     def _apply_track(self, conn: BaseHTTPConn) -> None:
         """Selector-thread handler for ``_OpTrack``.
@@ -802,25 +815,6 @@ class Selector:
     def _cleanup_stale(self) -> None:
         # Selector-thread only. Lock-free: ``self._sel`` and ``conn.tracked``
         # are owned by the selector thread.
-        #
-        # We deliberately keep this on the selector thread rather than a
-        # dedicated cleanup thread. With the lazy gate below the common
-        # case is an O(1) timestamp compare (no walk); the actual O(N)
-        # sweep runs at most every ``_cleanup_interval``, ~twice a second
-        # by default. A separate thread would either need a lock around
-        # ``self._sel.get_map()`` (losing the lock-free property of the
-        # current op-queue model) or maintain a parallel data structure
-        # — both add machinery without buying anything visible.
-        #
-        # Lazy: skip the O(N) walk over registered conns when not enough
-        # time has passed since the last sweep. Worst-case extra detection
-        # latency is ``_cleanup_interval`` (default 0.5 s) on top of the
-        # configured ``rw_timeout`` / ``keep_alive_timeout`` — both already
-        # measure non-fatal conditions.
-        now = time.monotonic()
-        if now - self._last_cleanup_at < self._cleanup_interval:
-            return
-        self._last_cleanup_at = now
         stale = list(self._find_stale())
         for conn in stale:
             try:
@@ -855,7 +849,6 @@ class Selector:
         if timeout is None:
             timeout = self.config.select_timeout
         self._drain_ops()
-        self._cleanup_stale()
         for key, _ in self._sel.select(timeout=timeout):
             cb: SelectorCallback = key.data
             try:
@@ -986,8 +979,19 @@ class BaseServer:
 # --------------------------------------------------------------------------
 
 
+def _cleanup_ticker(period: float, selector: Selector, stop: threading.Event) -> None:
+    """Daemon-thread cleanup driver for the bare ``start_http_server`` CM.
+
+    Posts an ``_OpCleanup`` to ``selector`` every ``period`` seconds until
+    ``stop`` is set. Hosted callers use the anyio variant in ``_service.py``
+    instead — this exists so the bare context manager remains self-contained.
+    """
+    while not stop.wait(period):
+        selector.post_cleanup()
+
+
 @contextmanager
-def start_http_server_base(
+def _start_http_server(
     config: ServerConfig,
     handler: RequestHandler,
     conn_factory: ConnFactory,
@@ -1009,12 +1013,23 @@ def start_http_server_base(
     selector = Selector(config, port=port, logger=logger)
     conn_handler = TrackHere(handler, conn_factory)
 
+    cleanup_stop = threading.Event()
+    cleanup_thread = threading.Thread(
+        target=_cleanup_ticker,
+        args=(config.select_timeout, selector, cleanup_stop),
+        name=f"localpost-http-cleanup-{port}",
+        daemon=True,
+    )
+
     with closing(server_sock):
         server = BaseServer(config, conn_handler, logger, server_sock, selector)
         logger.info("Serving on %s:%d", config.host, server.port)
+        cleanup_thread.start()
         try:
             yield server
         finally:
+            cleanup_stop.set()
+            cleanup_thread.join(timeout=config.select_timeout * 2)
             server.shutdown()
             selector.close()
 
@@ -1038,4 +1053,4 @@ def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Abstr
             ) from e
     else:
         raise ValueError(f"unknown backend {backend!r} (expected 'h11' or 'httptools')")
-    return start_http_server_base(config, handler, HTTPConn)
+    return _start_http_server(config, handler, HTTPConn)
