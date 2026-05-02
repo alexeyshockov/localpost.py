@@ -69,11 +69,11 @@ ServeApp = Callable[[HttpApp], _ServerCM]
 def serve_app() -> Iterator[ServeApp]:
     """Spin up an :class:`HttpApp` on a random local port. Use as ``with``::
 
-        def test_x(serve_app):
-            app = HttpApp()
-            ...
-            with serve_app(app) as port:
-                resp = httpx.get(f"http://127.0.0.1:{port}/...")
+    def test_x(serve_app):
+        app = HttpApp()
+        ...
+        with serve_app(app) as port:
+            resp = httpx.get(f"http://127.0.0.1:{port}/...")
     """
     active: list[_ServerCM] = []
 

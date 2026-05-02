@@ -22,6 +22,7 @@ from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.openapi import spec as openapi_spec
+from localpost.openapi.filter import OpFilter
 from localpost.openapi.resolvers import (
     ArgResolver,
     ArgResolverFactory,
@@ -62,13 +63,25 @@ class Operation:
     ``None`` for the ``HTTPReqCtx`` pass-through, which contributes nothing to
     the OpenAPI doc."""
 
+    filters: tuple[OpFilter, ...]
+    """Filters to run before the resolvers. Includes both app-level filters
+    (injected by :class:`HttpApp`) and per-operation filters."""
+
     return_shapes: tuple[_ResponseShape, ...]
     summary: str
     operation_id: str
     description: str
 
     @classmethod
-    def create(cls, method: HTTPMethod, path: str, fn: Callable[..., Any], /) -> Self:
+    def create(
+        cls,
+        method: HTTPMethod,
+        path: str,
+        fn: Callable[..., Any],
+        /,
+        *,
+        filters: tuple[OpFilter, ...] = (),
+    ) -> Self:
         template = URITemplate.parse(path)
         path_var_names = set(template.variable_names)
 
@@ -117,6 +130,7 @@ class Operation:
             target=fn,
             arg_resolvers=tuple(arg_resolvers),
             arg_resolver_factories=tuple(arg_factories),
+            filters=filters,
             return_shapes=return_shapes,
             summary=summary,
             operation_id=operation_id,
@@ -142,6 +156,12 @@ class Operation:
         return pre_body
 
     def _run(self, ctx: HTTPReqCtx) -> None:
+        for f in self.filters:
+            short_circuit = f(ctx)
+            if short_circuit is not None:
+                response, body = _build_http_response(short_circuit)
+                ctx.complete(response, body)
+                return
         kwargs: dict[str, object] = {}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)
@@ -174,7 +194,10 @@ class Operation:
                 continue
             op = factory.update_doc(param, op, registry)
         responses = _build_responses(self.return_shapes, registry)
-        return replace(op, responses=responses)
+        op = replace(op, responses=responses)
+        for f in self.filters:
+            op = f.contribute_operation(op, registry)
+        return op
 
 
 # --- Helpers -------------------------------------------------------------
