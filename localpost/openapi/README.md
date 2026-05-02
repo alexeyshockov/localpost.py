@@ -156,6 +156,47 @@ or per-operation:
 def admin() -> str: ...
 ```
 
+### Server-Sent Events (SSE)
+
+Return a generator (or any iterator) and the operation auto-promotes to an
+SSE stream — `Content-Type: text/event-stream`, chunked transfer encoding,
+one event per yielded value:
+
+```python
+from collections.abc import Generator
+from dataclasses import dataclass
+
+from localpost.openapi import HttpApp, Event
+
+
+@dataclass
+class Tick:
+    n: int
+
+
+app = HttpApp()
+
+
+@app.get("/clock")
+def clock() -> Generator[Event[Tick]]:
+    for n in range(60):
+        yield Event(data=Tick(n=n), id=str(n))
+        time.sleep(1)
+```
+
+Yield bare values for `data:`-only events; yield `Event` instances for
+control over `event:` / `id:` / `retry:` / comment fields. The OpenAPI doc
+emits `text/event-stream` (with the schema for `Event[Tick]`) instead of
+`application/json` for that operation.
+
+Cancellation: the framework calls `localpost.http.check_cancelled` between
+events, so client disconnects (and pool shutdowns) terminate the stream
+without leaking workers — provided the app runs under
+`thread_pool_handler` (the default for `HttpApp.service(...)`).
+
+For an iterator you've already constructed, wrap it in `EventStream(...)`
+to be explicit; otherwise just return the generator directly.
+
 ### Built-in auth filters
 
 ```python
@@ -207,6 +248,7 @@ focused on user-facing concepts.
 | `results.py` | `OpResult` hierarchy |
 | `filter.py` | `OpFilter` protocol |
 | `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth filters |
+| `sse.py` | `Event`, `EventStream`, encoder — Server-Sent Events |
 | `spec.py` | OpenAPI 3.2 dataclasses |
 | `schemas.py` | `SchemaRegistry` — msgspec / pydantic JSON Schema generation |
 | `pydantic.py` | Explicit pydantic helpers (auto-detection in `FromBody` works without this) |

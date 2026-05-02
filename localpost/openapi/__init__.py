@@ -64,6 +64,7 @@ from localpost.openapi.results import (
     UnprocessableEntity,
 )
 from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry, is_pydantic_model
+from localpost.openapi.sse import Event, EventStream
 
 __all__ = [
     # core
@@ -100,4 +101,7 @@ __all__ = [
     "SchemaRegistry",
     "REF_TEMPLATE",
     "is_pydantic_model",
+    # SSE
+    "Event",
+    "EventStream",
 ]

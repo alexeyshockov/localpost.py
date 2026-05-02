@@ -10,7 +10,13 @@ table for dispatch, and its :meth:`build_spec` contributes a
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import (
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Mapping,
+)
 from dataclasses import dataclass, replace
 from http import HTTPMethod
 from types import UnionType
@@ -18,6 +24,7 @@ from typing import Annotated, Any, Self, Union, get_args, get_origin, get_type_h
 
 import msgspec
 
+from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
@@ -33,6 +40,7 @@ from localpost.openapi.resolvers import (
 )
 from localpost.openapi.results import NoContent, Ok, OpResult
 from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
+from localpost.openapi.sse import EventStream, iter_events
 
 __all__ = ["Operation"]
 
@@ -44,11 +52,12 @@ def _resolve_ctx(ctx: HTTPReqCtx) -> HTTPReqCtx:
 
 @dataclass(frozen=True, slots=True)
 class _ResponseShape:
-    """One branch of the return type — a (status, body type) pair."""
+    """One branch of the return type — a (status, body type, content type)."""
 
     status_code: int
     description: str
     body_type: Any | None
+    content_type: str = "application/json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +199,9 @@ class Operation:
         result = self.target(**kwargs)
         if isinstance(result, _Response):
             ctx.complete(result, b"")
+            return
+        if _is_sse_payload(result):
+            _stream_sse(ctx, result)
             return
         if isinstance(result, OpResult):
             op_result: OpResult = result
@@ -333,13 +345,19 @@ def _extract_response_shapes(return_annotation: Any) -> list[_ResponseShape]:
             continue
         member_origin = get_origin(member)
         cls = member_origin if member_origin is not None else member
-        if isinstance(cls, type) and issubclass(cls, OpResult):
+        sse_payload = _sse_payload_type(member)
+        if sse_payload is not _NOT_SSE:
+            code = 200
+            description = "Successful response"
+            body_type = sse_payload
+            content_type = "text/event-stream"
+            has_success = True
+        elif isinstance(cls, type) and issubclass(cls, OpResult):
             code = cls._status_code
             description = cls._description
-            body_type: Any | None
-            if cls is NoContent:
-                body_type = None
-            else:
+            body_type = None
+            content_type = "application/json"
+            if cls is not NoContent:
                 generic_args = get_args(member) if member_origin is not None else ()
                 body_type = generic_args[0] if generic_args else None
             if code < 400:
@@ -352,15 +370,41 @@ def _extract_response_shapes(return_annotation: Any) -> list[_ResponseShape]:
             code = 200
             description = "Successful response"
             body_type = member
+            content_type = "application/json"
             has_success = True
         if code in seen_codes:
             continue
         seen_codes.add(code)
-        shapes.append(_ResponseShape(code, description, body_type))
+        shapes.append(_ResponseShape(code, description, body_type, content_type))
 
     if not has_success and not shapes:
         shapes.append(_ResponseShape(200, "Successful response", None))
     return shapes
+
+
+# Sentinel: unique object so callers can distinguish "not an SSE return"
+# from "SSE return with no payload type" (e.g. a bare Iterator).
+_NOT_SSE: Any = object()
+
+
+def _sse_payload_type(annotation: Any) -> Any:
+    """If ``annotation`` is a ``Generator[T, ...]`` / ``Iterator[T, ...]`` /
+    ``Iterable[T]`` / ``EventStream[T]``, return ``T`` (or ``_NOT_SSE``).
+    """
+    origin = get_origin(annotation)
+    if origin is None:
+        return _NOT_SSE
+    # ``EventStream[T]`` — origin is ``EventStream`` itself.
+    if origin is EventStream:
+        args = get_args(annotation)
+        return args[0] if args else None
+    # ``Generator[T, send, return]`` / ``Iterator[T]`` / ``Iterable[T]``
+    # all live in ``collections.abc``; their generic origins are the abc
+    # classes themselves.
+    if origin not in (Generator, Iterator, Iterable):
+        return _NOT_SSE
+    args = get_args(annotation)
+    return args[0] if args else None
 
 
 def _build_responses(shapes: tuple[_ResponseShape, ...], registry: SchemaRegistry) -> dict[str, openapi_spec.Response]:
@@ -372,7 +416,7 @@ def _build_responses(shapes: tuple[_ResponseShape, ...], registry: SchemaRegistr
         schema = registry.schema_for(shape.body_type)
         responses[str(shape.status_code)] = openapi_spec.Response(
             description=shape.description,
-            content={"application/json": openapi_spec.MediaType(schema=schema)},
+            content={shape.content_type: openapi_spec.MediaType(schema=schema)},
         )
     return responses
 
@@ -420,3 +464,56 @@ def _build_http_response(result: OpResult) -> tuple[_Response, bytes]:
 def _iter_headers(headers: Mapping[str, str]):
     for name, value in headers.items():
         yield name.encode("ascii"), value.encode("iso-8859-1")
+
+
+# --- SSE streaming -------------------------------------------------------
+
+_SSE_RESPONSE_HEADERS: list[tuple[bytes, bytes]] = [
+    (b"content-type", b"text/event-stream; charset=utf-8"),
+    (b"cache-control", b"no-cache"),
+    (b"x-accel-buffering", b"no"),  # Disable proxy buffering (nginx).
+]
+
+
+def _is_sse_payload(value: object) -> bool:
+    """True if ``value`` should be streamed as SSE.
+
+    Recognises explicit :class:`EventStream` and any ``Iterator`` (the
+    result of calling a generator function or building one explicitly).
+    Bare ``Iterable`` is too broad — ``list`` / ``tuple`` / ``dict`` are
+    all iterable but should land in JSON.
+    """
+    return isinstance(value, (EventStream, Iterator))
+
+
+def _stream_sse(ctx: HTTPReqCtx, source: object) -> None:
+    """Run ``source`` as an SSE stream over ``ctx``.
+
+    Sends the SSE response headers (chunked transfer encoding is implicit
+    — we don't set ``content-length`` so h11 picks chunked), then writes
+    one event per yielded item until the iterator exhausts or the client
+    disconnects (signalled via :func:`localpost.http.check_cancelled`).
+    """
+    # ``check_cancelled`` only works when a request context is active —
+    # i.e. when the handler runs under the worker pool. When the SSE op
+    # runs directly on the selector (no pool, e.g. in tests), skip the
+    # check; the handler's iteration is bounded by the generator itself.
+    try:
+        check_cancelled()
+        cancel_supported = True
+    except LookupError:
+        cancel_supported = False
+    except RequestCancelled:
+        return
+
+    ctx.start_response(_Response(status_code=200, headers=list(_SSE_RESPONSE_HEADERS)))
+    try:
+        for chunk in iter_events(source):
+            if cancel_supported:
+                check_cancelled()
+            ctx.send(chunk)
+    except RequestCancelled:
+        # Client went away; stop iterating. Don't try to finish_response
+        # — the connection state is uncertain.
+        return
+    ctx.finish_response()

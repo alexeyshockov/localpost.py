@@ -11,6 +11,7 @@ Then::
     curl -X POST http://localhost:8000/books \\
         -H 'Content-Type: application/json' \\
         -d '{"id": "1", "title": "Dune", "author": "Frank Herbert"}'
+    curl -N http://localhost:8000/books/42/pages   # streams as SSE
 
 Docs UIs:
     http://localhost:8000/docs        (Swagger UI)
@@ -19,11 +20,20 @@ Docs UIs:
 """
 
 import sys
+import time
+from collections.abc import Generator
 from dataclasses import dataclass
 
 from localpost import hosting
 from localpost.http import ServerConfig
-from localpost.openapi import BadRequest, Created, HttpApp, NotFound, spec
+from localpost.openapi import (
+    BadRequest,
+    Created,
+    Event,
+    HttpApp,
+    NotFound,
+    spec,
+)
 
 
 @dataclass
@@ -31,6 +41,13 @@ class Book:
     id: str
     title: str
     author: str
+
+
+@dataclass
+class BookPage:
+    book_id: str
+    number: int
+    content: str
 
 
 _LIBRARY: dict[str, Book] = {
@@ -63,6 +80,25 @@ def create_book(book: Book) -> Created[Book]:
     """Add a new book to the library."""
     _LIBRARY[book.id] = book
     return Created(book, headers={"Location": f"/books/{book.id}"})
+
+
+@app.get("/books/{book_id}/pages")
+def stream_pages(book_id: str) -> Generator[Event[BookPage]]:
+    """Stream the book's pages as Server-Sent Events.
+
+    The Generator return type auto-promotes to ``text/event-stream``.
+    """
+    book = _LIBRARY.get(book_id)
+    if book is None:
+        # SSE handlers can only return events; surface "not found" as a
+        # single error event rather than a 404. (Mid-stream switching to
+        # JSON requires returning before the first yield — different
+        # design.)
+        yield Event(data=BookPage(book_id=book_id, number=0, content="not found"), event="error")
+        return
+    for n in range(1, 6):
+        yield Event(data=BookPage(book_id=book_id, number=n, content=f"page {n} of {book.title}"), id=str(n))
+        time.sleep(0.5)
 
 
 if __name__ == "__main__":
