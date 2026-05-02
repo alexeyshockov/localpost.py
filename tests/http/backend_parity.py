@@ -6,14 +6,14 @@ import socket
 
 import httpx
 
-from localpost.http import HTTPReqCtx, NativeResponse, ServerConfig
+from localpost.http import HTTPReqCtx, Response, ServerConfig
 from tests.http._helpers import drain_socket, read_http_response, read_until
 
 
 def _ok(body: bytes = b"hello"):
     def handler(ctx: HTTPReqCtx) -> None:
         ctx.complete(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[
                     (b"content-type", b"text/plain"),
@@ -40,7 +40,7 @@ def test_buffered_post_body_handler(serve_backend_in_thread):
         received.append(ctx.body)
         out = b"echo:" + ctx.body
         ctx.complete(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[
                     (b"content-type", b"text/plain"),
@@ -68,7 +68,7 @@ def test_keep_alive_sequential_requests(serve_backend_in_thread):
         counter += 1
         body = str(counter).encode("ascii")
         ctx.complete(
-            NativeResponse(
+            Response(
                 200,
                 [
                     (b"content-type", b"text/plain"),
@@ -95,7 +95,7 @@ def test_keep_alive_sequential_requests(serve_backend_in_thread):
 
 def test_malformed_request_returns_400(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.complete(NativeResponse(200, [(b"content-length", b"0")]), b"")
+        ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
 
     with serve_backend_in_thread(handler) as port:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
@@ -108,7 +108,7 @@ def test_expect_100_continue(serve_backend_in_thread):
     def body_handler(ctx: HTTPReqCtx) -> None:
         out = b"got:" + ctx.body
         ctx.complete(
-            NativeResponse(
+            Response(
                 200,
                 [
                     (b"content-type", b"text/plain"),
@@ -140,7 +140,7 @@ def test_oversize_content_length_returns_413(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
         nonlocal called
         called = True
-        ctx.complete(NativeResponse(200, [(b"content-length", b"0")]), b"")
+        ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
 
     config = ServerConfig(host="127.0.0.1", port=0, max_body_size=100)
     with serve_backend_in_thread(handler, config) as port:
@@ -159,7 +159,7 @@ def test_handler_exception_returns_500_and_server_survives(serve_backend_in_thre
         calls += 1
         if ctx.request.target == b"/boom":
             raise RuntimeError("handler crashed")
-        ctx.complete(NativeResponse(200, [(b"content-length", b"2")]), b"ok")
+        ctx.complete(Response(200, [(b"content-length", b"2")]), b"ok")
 
     with serve_backend_in_thread(handler) as port:
         r1 = httpx.get(f"http://127.0.0.1:{port}/boom", timeout=2)
@@ -175,7 +175,7 @@ def test_handler_exception_returns_500_and_server_survives(serve_backend_in_thre
 def test_streaming_response_chunks(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
         ctx.start_response(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[],
             )
@@ -193,7 +193,7 @@ def test_streaming_response_chunks(serve_backend_in_thread):
 
 def test_unframed_204_response_has_no_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(NativeResponse(status_code=204, headers=[]))
+        ctx.start_response(Response(status_code=204, headers=[]))
         ctx.finish_response()
 
     with serve_backend_in_thread(handler) as port:
@@ -206,7 +206,7 @@ def test_unframed_204_response_has_no_transfer_encoding(serve_backend_in_thread)
 
 def test_unframed_304_response_has_no_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(NativeResponse(status_code=304, headers=[]))
+        ctx.start_response(Response(status_code=304, headers=[]))
         ctx.finish_response()
 
     with serve_backend_in_thread(handler) as port:
@@ -219,7 +219,7 @@ def test_unframed_304_response_has_no_transfer_encoding(serve_backend_in_thread)
 
 def test_unframed_head_response_has_no_body_or_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(NativeResponse(status_code=200, headers=[]))
+        ctx.start_response(Response(status_code=200, headers=[]))
         ctx.finish_response()
 
     with serve_backend_in_thread(handler) as port:

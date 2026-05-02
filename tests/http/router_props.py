@@ -25,8 +25,8 @@ from hypothesis import strategies as st
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
     Request,
+    Response,
     RouteMatch,
     Router,
     Routes,
@@ -94,10 +94,10 @@ class _FakeCtx:
     body: bytes = b""
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
-    completed_response: NativeResponse | None = None
+    completed_response: Response | None = None
     completed_body: bytes = b""
 
-    def complete(self, response: NativeResponse, body: bytes | None = None) -> None:
+    def complete(self, response: Response, body: bytes | None = None) -> None:
         self.response_status = response.status_code
         self.completed_response = response
         self.completed_body = body or b""
@@ -107,11 +107,11 @@ class _FakeCtx:
 class _Outcome:
     status: int
     route_match: RouteMatch | None
-    response: NativeResponse | None
+    response: Response | None
 
 
 def _route_handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-    ctx.complete(NativeResponse(200, [(b"content-length", b"0")]), b"")
+    ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
     return None
 
 
@@ -156,7 +156,7 @@ def _matches(template: str, path: str) -> bool:
     return URITemplate.parse(template).match(path) is not None
 
 
-def _allow_header(response: NativeResponse) -> str | None:
+def _allow_header(response: Response) -> str | None:
     for name, value in response.headers:
         if name.lower() == b"allow":
             return value.decode("ascii")

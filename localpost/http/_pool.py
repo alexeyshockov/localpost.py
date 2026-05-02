@@ -22,12 +22,11 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import AsyncGenerator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
-    EndOfStream,
     create_task_group,
     to_thread,
 )
@@ -44,7 +43,9 @@ from localpost.http._types import BodyTooLarge
 from localpost.http.config import LOGGER_NAME
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
 
-# --- Internal pool primitive --------------------------------------------
+# --------------------------------------------------------------------------
+# Internal pool primitive
+# --------------------------------------------------------------------------
 
 
 _WorkFn = Callable[[HTTPReqCtx], None]
@@ -164,11 +165,7 @@ async def _pool_context(max_concurrency: int, backlog: int) -> AsyncGenerator[_P
 
     def worker(my_rx: threadtools.ReceiveChannel[_WorkItem]) -> None:
         with my_rx:
-            while True:
-                try:
-                    ctx, cancel, fn = my_rx.get()
-                except (EndOfStream, ClosedResourceError):
-                    return
+            for ctx, cancel, fn in my_rx:
                 try:
                     with _enter_request(cancel):
                         try:
@@ -211,7 +208,7 @@ async def _pool_context(max_concurrency: int, backlog: int) -> AsyncGenerator[_P
     async with create_task_group() as tg:
         for _ in range(max_concurrency):
             tg.start_soon(run_worker, rx.clone())
-        rx.close()
+        rx.close()  # Keep only workers read ends
         try:
             yield _Pool(tx, shutdown_event, admission)
         finally:
@@ -229,16 +226,19 @@ def _emit_body_too_large(ctx: HTTPReqCtx) -> None:
         ctx.conn.close()
 
 
-# --- Public wrappers ----------------------------------------------------
+# --------------------------------------------------------------------------
+# Public wrappers
+# --------------------------------------------------------------------------
 
 
-def thread_pool_handler(
+@asynccontextmanager
+async def thread_pool_handler(
     inner: RequestHandler,
     /,
     *,
     max_concurrency: int,
     backlog: int = 0,
-) -> AbstractAsyncContextManager[RequestHandler]:
+) -> AsyncGenerator[RequestHandler]:
     """Async context manager: yields a ``RequestHandler`` that offloads
     body-handler continuations to a worker thread.
 
@@ -277,13 +277,6 @@ def thread_pool_handler(
         raise ValueError("max_concurrency must be >= 1")
     if backlog < 0:
         raise ValueError("backlog must be >= 0")
-    return _thread_pool_handler(inner, max_concurrency, backlog)
-
-
-@asynccontextmanager
-async def _thread_pool_handler(
-    inner: RequestHandler, max_concurrency: int, backlog: int
-) -> AsyncGenerator[RequestHandler]:
     async with _pool_context(max_concurrency, backlog) as pool:
 
         def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
@@ -295,13 +288,14 @@ async def _thread_pool_handler(
         yield wrapped
 
 
-def streaming_pool_handler(
+@asynccontextmanager
+async def streaming_pool_handler(
     inner: _WorkFn,
     /,
     *,
     max_concurrency: int,
     backlog: int = 0,
-) -> AbstractAsyncContextManager[RequestHandler]:
+) -> AsyncGenerator[RequestHandler]:
     """Async context manager: yields a ``RequestHandler`` that runs
     ``inner`` on a worker thread with a *borrowed* conn — body **not**
     pre-buffered.
@@ -327,7 +321,7 @@ def streaming_pool_handler(
             with open("/tmp/u", "wb") as f:
                 while chunk := ctx.receive(8192):
                     f.write(chunk)
-            ctx.complete(NativeResponse(204, [(b"content-length", b"0")]), b"")
+            ctx.complete(Response(204, [(b"content-length", b"0")]), b"")
 
 
         async with streaming_pool_handler(upload, max_concurrency=4) as h:
@@ -338,10 +332,5 @@ def streaming_pool_handler(
         raise ValueError("max_concurrency must be >= 1")
     if backlog < 0:
         raise ValueError("backlog must be >= 0")
-    return _streaming_pool_handler(inner, max_concurrency, backlog)
-
-
-@asynccontextmanager
-async def _streaming_pool_handler(inner: _WorkFn, max_concurrency: int, backlog: int) -> AsyncGenerator[RequestHandler]:
     async with _pool_context(max_concurrency, backlog) as pool:
         yield pool.dispatch_streaming(inner)

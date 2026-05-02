@@ -26,8 +26,8 @@ from localpost.http import (
     HttpApp,
     HTTPReqCtx,
     Middleware,
-    NativeResponse,
     RequestHandler,
+    Response,
     ServerConfig,
     http_server,
     start_http_server,
@@ -146,13 +146,13 @@ class TestResponseConversion:
             await lt.stopped
 
     async def test_native_response_passes_through(self, free_port):
-        """Handlers can drop to wire-format with NativeResponse. Body must match
+        """Handlers can drop to wire-format with Response. Body must match
         the declared Content-Length (or set 0)."""
         app = HttpApp()
 
         @app.get("/raw")
         def raw():
-            return NativeResponse(
+            return Response(
                 status_code=418,
                 headers=[(b"content-type", b"text/plain"), (b"content-length", b"0")],
             )
@@ -255,7 +255,7 @@ def _short_circuit_with_status(status: int, body: bytes) -> Middleware:
     def mw(inner: RequestHandler) -> RequestHandler:
         def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
             ctx.complete(
-                NativeResponse(
+                Response(
                     status_code=status,
                     headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
                 ),
@@ -629,7 +629,7 @@ class TestStreamingRoutes:
                         break
                     chunks.append(chunk)
                 captured["body"] = b"".join(chunks)
-                req_ctx.complete(NativeResponse(200, [(b"content-length", b"2")]), b"ok")
+                req_ctx.complete(Response(200, [(b"content-length", b"2")]), b"ok")
 
             cast(Any, ctx)._defer_streaming_dispatch(dispatch)
 

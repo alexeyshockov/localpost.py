@@ -15,7 +15,7 @@ _EXT_KEY = "localpost.di.provider"
 
 
 @final
-@dataclass(frozen=True, eq=False, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class RequestContext(ResolutionContext):
     ctx: ExitStack = field(default_factory=ExitStack)
 

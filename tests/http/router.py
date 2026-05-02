@@ -17,7 +17,7 @@ import pytest
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
+    Response,
     RouteMatch,
     Routes,
     URITemplate,
@@ -30,7 +30,7 @@ def _ok_handler(body: bytes = b"ok"):
 
     def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
         ctx.complete(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[
                     (b"content-type", b"text/plain"),
@@ -116,7 +116,7 @@ class TestRouteMatchAttached:
             captured["template"] = m.matched_template.template
             captured["path_args"] = dict(m.path_args)
             ctx.complete(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[(b"content-length", b"2")],
                 ),
@@ -271,7 +271,7 @@ class TestPathVariableEncoding:
         def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
             m = route_match(ctx)
             captured["name"] = m.path_args["name"]
-            ctx.complete(NativeResponse(200, [(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(200, [(b"content-length", b"2")]), b"ok")
             return None
 
         routes = Routes()

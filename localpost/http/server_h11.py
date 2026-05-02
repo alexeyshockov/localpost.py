@@ -70,7 +70,7 @@ def _has_response_framing(headers) -> bool:
 
 
 @final
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class HTTPConn(BaseHTTPConn):
     selector: Selector
     sock: socket.socket
@@ -302,7 +302,7 @@ class HTTPConn(BaseHTTPConn):
             pass
 
 
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class HTTPReqCtxH11:
     """Per-request context for the h11 backend.
 

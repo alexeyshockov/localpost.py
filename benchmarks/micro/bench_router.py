@@ -13,11 +13,11 @@ construction, or response writing.
 
 from __future__ import annotations
 
-from localpost.http import HTTPReqCtx, NativeResponse, Routes
+from localpost.http import HTTPReqCtx, Response, Routes
 
 
 def _ok(ctx: HTTPReqCtx):
-    ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+    ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
 
 def _build_routes_20() -> Routes:

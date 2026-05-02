@@ -9,7 +9,7 @@ import threading
 import httpx
 import pytest
 
-from localpost.http import HTTPReqCtx, NativeResponse, ServerConfig, start_http_server
+from localpost.http import HTTPReqCtx, Response, ServerConfig, start_http_server
 from tests.http._helpers import drain_socket
 
 # --- Listening-socket lifecycle (no requests) ---------------------------------
@@ -50,7 +50,7 @@ class TestBasicRequestResponse:
     def test_simple_200(self, serve_in_thread):
         def handler(ctx: HTTPReqCtx):
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"Content-Type", b"text/plain")]),
+                Response(status_code=200, headers=[(b"Content-Type", b"text/plain")]),
                 b"OK",
             )
 
@@ -63,7 +63,7 @@ class TestBasicRequestResponse:
     def test_404_response(self, serve_in_thread):
         def handler(ctx: HTTPReqCtx):
             ctx.complete(
-                NativeResponse(status_code=404, headers=[(b"Content-Type", b"text/plain")]),
+                Response(status_code=404, headers=[(b"Content-Type", b"text/plain")]),
                 b"Not Found",
             )
 
@@ -75,7 +75,7 @@ class TestBasicRequestResponse:
 
     def test_empty_body(self, serve_in_thread):
         def handler(ctx: HTTPReqCtx):
-            ctx.complete(NativeResponse(status_code=204, headers=[]))
+            ctx.complete(Response(status_code=204, headers=[]))
 
         with serve_in_thread(handler) as port:
             resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
@@ -91,7 +91,7 @@ class TestRequestRouting:
         def handler(ctx: HTTPReqCtx):
             captured["method"] = ctx.request.method
             captured["target"] = ctx.request.target
-            ctx.complete(NativeResponse(status_code=200, headers=[]), b"")
+            ctx.complete(Response(status_code=200, headers=[]), b"")
 
         with serve_in_thread(handler) as port:
             httpx.post(f"http://127.0.0.1:{port}/api/items?q=1", timeout=5)
@@ -104,7 +104,7 @@ class TestRequestRouting:
 
         def handler(ctx: HTTPReqCtx):
             captured_headers.update(ctx.request.headers)
-            ctx.complete(NativeResponse(status_code=200, headers=[]), b"")
+            ctx.complete(Response(status_code=200, headers=[]), b"")
 
         with serve_in_thread(handler) as port:
             httpx.get(f"http://127.0.0.1:{port}/", headers={"X-Custom": "hello"}, timeout=5)
@@ -122,7 +122,7 @@ class TestRequestBody:
                 if not chunk:
                     break
                 received_body.extend(chunk)
-            ctx.complete(NativeResponse(status_code=200, headers=[]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[]), b"ok")
 
         with serve_in_thread(handler) as port:
             httpx.post(f"http://127.0.0.1:{port}/", content=b"hello world body", timeout=5)
@@ -134,7 +134,7 @@ class TestChunkedResponse:
     def test_streaming_response(self, serve_in_thread):
         def handler(ctx: HTTPReqCtx):
             ctx.start_response(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[(b"Transfer-Encoding", b"chunked")],
                 )
@@ -158,7 +158,7 @@ class TestBorrow:
             borrow_states.append(ctx.borrowed)  # False — still tracked
             with ctx.borrow():
                 borrow_states.append(ctx.borrowed)  # True — untracked
-                ctx.complete(NativeResponse(status_code=200, headers=[]), b"borrowed")
+                ctx.complete(Response(status_code=200, headers=[]), b"borrowed")
             borrow_states.append(ctx.borrowed)  # False — re-tracked after finish_response
 
         with serve_in_thread(handler) as port:
@@ -175,7 +175,7 @@ class TestKeepAlive:
             nonlocal call_count
             call_count += 1
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"Content-Length", b"2")]),
+                Response(status_code=200, headers=[(b"Content-Length", b"2")]),
                 b"ok",
             )
 
@@ -199,7 +199,7 @@ class TestKeepAlive:
             nonlocal call_count
             call_count += 1
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 
@@ -226,7 +226,7 @@ class TestKeepAlive:
 def _ok_handler(ctx: HTTPReqCtx) -> None:
     body = b"ok"
     ctx.complete(
-        NativeResponse(status_code=200, headers=[(b"content-length", str(len(body)).encode())]),
+        Response(status_code=200, headers=[(b"content-length", str(len(body)).encode())]),
         body,
     )
 
@@ -270,7 +270,7 @@ class TestProtocolErrors:
             with crash_lock:
                 crash_count += 1
             ctx.start_response(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[(b"transfer-encoding", b"chunked")],
                 )
@@ -338,7 +338,7 @@ class TestExpect100Continue:
                         break
                     captured.extend(chunk)
                 ctx.complete(
-                    NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                    Response(status_code=200, headers=[(b"content-length", b"2")]),
                     b"ok",
                 )
 
@@ -377,7 +377,7 @@ class TestHeadAndPipelining:
                 (b"content-type", b"text/plain"),
                 (b"content-length", str(len(body)).encode()),
             ]
-            response = NativeResponse(status_code=200, headers=headers)
+            response = Response(status_code=200, headers=headers)
             if ctx.request.method == b"HEAD":
                 ctx.complete(response, None)
             else:
@@ -400,7 +400,7 @@ class TestHeadAndPipelining:
                 served.append(ctx.request.target)
             body = b"resp-for-" + ctx.request.target
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", str(len(body)).encode())]),
+                Response(status_code=200, headers=[(b"content-length", str(len(body)).encode())]),
                 body,
             )
 
@@ -429,7 +429,7 @@ class TestSendBuffer:
         """``ctx.send`` accepts any Buffer (memoryview, bytearray, …)."""
 
         def handler(ctx: HTTPReqCtx) -> None:
-            ctx.start_response(NativeResponse(status_code=200, headers=[(b"content-length", b"5")]))
+            ctx.start_response(Response(status_code=200, headers=[(b"content-length", b"5")]))
             payload = bytearray(b"hello")
             ctx.send(memoryview(payload)[:5])
             ctx.finish_response()
@@ -450,7 +450,7 @@ class TestStaleCleanup:
 
         def handler(ctx: HTTPReqCtx) -> None:
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 
@@ -478,7 +478,7 @@ class TestStaleCleanup:
         """Client starts sending headers and stops; server emits 408 once stale."""
 
         def handler(ctx: HTTPReqCtx) -> None:
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=0, keep_alive_timeout=0.1, rw_timeout=0.1)
         with start_http_server(cfg, handler) as server:
@@ -508,7 +508,7 @@ class TestBodyLimit:
 
         def handler(ctx: HTTPReqCtx) -> None:
             captured["called"] = True
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=0, max_body_size=10)
         with start_http_server(cfg, handler) as server:
@@ -590,7 +590,7 @@ class TestGracefulShutdown:
 
         def handler(ctx: HTTPReqCtx) -> None:
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 

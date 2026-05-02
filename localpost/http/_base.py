@@ -68,7 +68,7 @@ __all__ = [
 
 
 @final
-@dataclass(eq=False, slots=True, frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class _OpTrack:
     """Worker-enqueued op: register ``conn`` in the selector with ``data=conn``."""
 
@@ -76,7 +76,7 @@ class _OpTrack:
 
 
 @final
-@dataclass(eq=False, slots=True, frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class _OpClose:
     """Worker-enqueued op: clean up ``selector._fd_to_key[fd]`` after ``sock.close()``.
 
@@ -455,7 +455,7 @@ worker selector and ``post_track`` it across threads.
 
 
 @final
-@dataclass(eq=False, slots=True, frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class _DrainWakeup:
     """Selector callback for the wakeup pipe fd. Drains the byte(s) and
     pulls any pending ops onto the selector thread.
@@ -467,7 +467,7 @@ class _DrainWakeup:
 
 
 @final
-@dataclass(eq=False, slots=True, frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class _AcceptListener:
     """Selector callback for a listen socket. Accepts one connection and
     delegates to the configured :data:`ConnHandler`.
@@ -505,7 +505,7 @@ class _AcceptListener:
 
 
 @final
-@dataclass(eq=False, slots=True, frozen=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class TrackHere:
     """Default :data:`ConnHandler`. Builds a conn for the accepting selector
     and tracks it locally. This is the behaviour the server has always had —
@@ -521,7 +521,7 @@ class TrackHere:
 
 
 @final
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class RoundRobinAcceptor:
     """:data:`ConnHandler` for the acceptor topology. Spreads new conns
     across a tuple of worker :class:`Selector` instances using a simple
@@ -832,14 +832,10 @@ class Selector:
             # Stalled mid-request gets a 408; idle keep-alive gets silently
             # dropped. The decision and the bytes-on-wire are the conn's
             # job — backends differ.
-            try:
+            with suppress(Exception):
                 conn.emit_stale_408()
-            except Exception:  # noqa: BLE001, S110 — the conn is being torn down anyway
-                pass
-            try:
+            with suppress(OSError):
                 conn.sock.close()
-            except OSError:
-                pass
 
     # ----- Run loop -----
 
@@ -1023,9 +1019,7 @@ def start_http_server_base(
             selector.close()
 
 
-def start_http_server(
-    config: ServerConfig, handler: RequestHandler, /
-) -> AbstractContextManager[BaseServer]:
+def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> AbstractContextManager[BaseServer]:
     """Open a listening socket and yield a server driving the configured backend.
 
     Backend is read from ``config.backend``. ``"h11"`` (default) is the

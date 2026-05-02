@@ -24,9 +24,9 @@ from hypothesis import strategies as st
 
 from localpost.http import (
     HTTPReqCtx,
-    NativeResponse,
     Request,
     RequestHandler,
+    Response,
     ServerConfig,
     start_http_server,
 )
@@ -170,7 +170,7 @@ def parity_servers() -> Iterator[tuple[int, int, list[Request], list[Request]]]:
     def make_handler(captured: list[Request]) -> RequestHandler:
         def handler(ctx: HTTPReqCtx):
             captured.append(ctx.request)
-            ctx.complete(NativeResponse(200, [(b"content-length", b"0")]), b"")
+            ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
 
         return handler
 

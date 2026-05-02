@@ -57,12 +57,12 @@ scheduler = [
 ]
 http = [
     "h11 ~=0.16",
+    "click ~=8.0",
 ]
 http-fast = [
-    # C-based HTTP/1.1 parser (llhttp); enables ``start_httptools_server``.
-    # NOTE: under free-threaded CPython, 0.7.x auto-re-enables the GIL on
-    # import; 0.8+ declares Py_mod_gil = Py_MOD_GIL_NOT_USED.
-    "httptools",
+    # C-based HTTP/1.1 parser (llhttp)
+    # NOTE! Under free-threaded CPython, 0.7.1 and below auto-re-enables the GIL on import.
+    "httptools @ git+https://github.com/MagicStack/httptools.git",
 ]
 
 [dependency-groups]

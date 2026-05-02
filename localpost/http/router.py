@@ -23,7 +23,7 @@ from http import HTTPMethod
 from http.client import responses as _http_phrases
 from typing import Self, final
 
-from localpost.http._types import Response as _NativeResponse
+from localpost.http._types import Response as _Response
 from localpost.http.server import BodyHandler, HTTPReqCtx
 from localpost.http.server import RequestHandler as NativeRequestHandler
 
@@ -95,7 +95,7 @@ def route_match(ctx: HTTPReqCtx) -> RouteMatch:
 
 
 @final
-@dataclass(frozen=True, eq=False, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class Route:
     """One compiled route inside a :class:`Router`."""
 
@@ -106,7 +106,7 @@ class Route:
     allow_header: str
     """Pre-rendered ``Allow`` header value (e.g. ``"GET, POST"``)."""
 
-    method_not_allowed: tuple[_NativeResponse, bytes]
+    method_not_allowed: tuple[_Response, bytes]
     """Pre-built ``(Response, body)`` for the 405 path on this route. Avoids
     rebuilding the response (status, headers list, ``content-length`` ASCII
     encode) on every method-mismatch."""
@@ -116,7 +116,7 @@ class Route:
 
 
 @final
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class Routes:
     """Mutable route builder.
 
@@ -134,7 +134,7 @@ class Routes:
         @routes.get("/hello/{name}")
         def hello(ctx: HTTPReqCtx) -> BodyHandler | None:
             match = route_match(ctx)
-            ctx.complete(NativeResponse(...), b"hi " + match.path_args["name"].encode())
+            ctx.complete(Response(...), b"hi " + match.path_args["name"].encode())
             return None
 
 
@@ -180,7 +180,7 @@ class Routes:
 
 
 @final
-@dataclass(frozen=True, eq=False, slots=True)
+@dataclass(frozen=True, slots=True, eq=False)
 class Router:
     """Immutable, compiled URI-template dispatcher.
 
@@ -250,7 +250,7 @@ class Router:
 
         allowed_methods: set[HTTPMethod] = set()
         matched_routes = 0
-        single_route_405: tuple[_NativeResponse, bytes] | None = None
+        single_route_405: tuple[_Response, bytes] | None = None
 
         for route in self.routes:
             path_args = route.template.match(path)
@@ -318,7 +318,9 @@ class Router:
         return dispatch
 
 
-# --- Match result types -------------------------------------------------
+# --------------------------------------------------------------------------
+# Match result types
+# --------------------------------------------------------------------------
 
 
 @final
@@ -337,7 +339,7 @@ class _MatchNotFound:
 @final
 @dataclass(frozen=True, slots=True)
 class _MatchMethodNotAllowed:
-    response: _NativeResponse
+    response: _Response
     body: bytes
 
 
@@ -345,7 +347,9 @@ _MatchResult = _MatchOk | _MatchNotFound | _MatchMethodNotAllowed
 _MATCH_NOT_FOUND = _MatchNotFound()
 
 
-# --- Internal helpers ---------------------------------------------------
+# --------------------------------------------------------------------------
+# Internal helpers
+# --------------------------------------------------------------------------
 
 
 def _literal_prefix_len(t: URITemplate) -> int:
@@ -386,8 +390,8 @@ def _build_plain_response(
     body: bytes,
     *,
     extra_headers: tuple[tuple[bytes, bytes], ...] = (),
-) -> _NativeResponse:
-    return _NativeResponse(
+) -> _Response:
+    return _Response(
         status_code=status_code,
         headers=[
             (b"content-type", b"text/plain"),
@@ -403,7 +407,7 @@ _NOT_FOUND_RESPONSE = _build_plain_response(404, _NOT_FOUND_BODY)
 _METHOD_NOT_ALLOWED_BODY = b"Method Not Allowed"
 
 
-def _build_method_not_allowed(allow_header: str) -> tuple[_NativeResponse, bytes]:
+def _build_method_not_allowed(allow_header: str) -> tuple[_Response, bytes]:
     """Pre-build the 405 response for a route. Called once at ``Routes.build()``
     time so the dispatch hot path skips the list / encode / Response build."""
     response = _build_plain_response(

@@ -25,7 +25,7 @@ from localpost.hosting import run_app, service
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
+    Response,
     Routes,
     ServerConfig,
     http_server,
@@ -37,7 +37,7 @@ from localpost.http.router_sentry import sentry_router_handler
 
 def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
     ctx.complete(
-        NativeResponse(
+        Response(
             status_code=200,
             headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
         ),

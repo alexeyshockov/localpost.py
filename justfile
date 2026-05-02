@@ -1,7 +1,7 @@
 #!/usr/bin/env -S just --justfile
 
-default:
-    just --list
+doctor:
+    brew install uv oha ty
 
 deps:
     uv sync --all-groups --all-extras

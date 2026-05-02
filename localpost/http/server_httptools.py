@@ -110,7 +110,7 @@ def _response_allows_body(request_method: bytes, status_code: int) -> bool:
 
 
 @final
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class HTTPConn(BaseHTTPConn):
     selector: Selector
     sock: socket.socket
@@ -455,7 +455,7 @@ class _ProtocolError(Exception):
     """Translated httptools parser error. Mapped to 400 by the conn loop."""
 
 
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class HTTPReqCtxHttptools:
     """Per-request context for the httptools backend.
 

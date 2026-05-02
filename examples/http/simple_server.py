@@ -1,12 +1,12 @@
 import logging
 
-from localpost.http import HTTPReqCtx, NativeResponse, ServerConfig, start_http_server
+from localpost.http import HTTPReqCtx, Response, ServerConfig, start_http_server
 
 
 def _main():
     def simple_app(ctx: HTTPReqCtx):
         ctx.complete(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[(b"Content-Type", b"text/plain"), (b"Content-Length", b"14")],
             ),

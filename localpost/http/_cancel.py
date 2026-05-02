@@ -34,7 +34,7 @@ class RequestCancelled(Exception):
 
 
 @final
-@dataclass(eq=False, slots=True)
+@dataclass(slots=True, eq=False)
 class RequestCancel:
     """Per-request cancellation token.
 

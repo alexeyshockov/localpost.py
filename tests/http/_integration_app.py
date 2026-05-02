@@ -23,14 +23,14 @@ def _build_handler():
         from localpost.http import (  # noqa: PLC0415
             BodyHandler,
             HTTPReqCtx,
-            NativeResponse,
+            Response,
             Routes,
             route_match,
         )
 
         def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
             ctx.complete(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[
                         (b"content-type", b"text/plain"),

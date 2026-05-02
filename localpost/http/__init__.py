@@ -9,8 +9,7 @@ from localpost.http._base import (
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
-from localpost.http._types import BodyTooLarge, InformationalResponse, Request
-from localpost.http._types import Response as NativeResponse
+from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.app import HttpApp
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
@@ -44,7 +43,7 @@ __all__ = [
     "RoundRobinAcceptor",
     # neutral wire types (used directly with HTTPReqCtx)
     "Request",
-    "NativeResponse",
+    "Response",
     "InformationalResponse",
     "BodyTooLarge",
     # router

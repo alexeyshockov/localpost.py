@@ -7,7 +7,7 @@ from typing import Any, final, override
 from urllib.parse import unquote_to_bytes
 from wsgiref.types import WSGIApplication
 
-from localpost.http._types import Response as _NativeResponse
+from localpost.http._types import Response as _Response
 from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 
 __all__ = ["wrap_wsgi"]
@@ -83,7 +83,7 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
             status_code = int(status.split(" ", 1)[0])
             reason = status.split(" ", 1)[1] if " " in status else ""
             wire_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in headers]
-            response_state["response"] = _NativeResponse(
+            response_state["response"] = _Response(
                 status_code=status_code,
                 headers=wire_headers,
                 reason=reason.encode("iso-8859-1") if reason else b"",

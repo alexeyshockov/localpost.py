@@ -22,9 +22,9 @@ from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
     Request,
     RequestCancelled,
+    Response,
     Routes,
     ServerConfig,
     check_cancelled,
@@ -61,7 +61,7 @@ async def _serve_pooled(
 def _handler_200(body: bytes = b"ok"):
     def handler(ctx: HTTPReqCtx):
         ctx.complete(
-            NativeResponse(
+            Response(
                 status_code=200,
                 headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode())],
             ),
@@ -133,7 +133,7 @@ class TestHttpServerService:
             # Block until the test releases us; this forces parallelism.
             release.wait(timeout=5.0)
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"ok",
             )
 
@@ -191,7 +191,7 @@ class TestHttpServerService:
             time.sleep(0.1)
             with lock:
                 in_flight -= 1
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -229,7 +229,7 @@ class TestHttpServerService:
             except RequestCancelled:
                 handler_cancelled.set()
                 raise
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -265,7 +265,7 @@ class TestHttpServerService:
             book_id = route_match(ctx).path_args["id"]
             body = f"book={book_id}".encode()
             ctx.complete(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode("ascii"))],
                 ),
@@ -293,13 +293,13 @@ class TestHttpServerService:
 
     async def test_invalid_max_concurrency(self):
         with pytest.raises(ValueError, match="max_concurrency"):
-            # The CM-creation call is enough to trigger validation; we don't
-            # need to enter it.
-            thread_pool_handler(_handler_200(), max_concurrency=0)
+            async with thread_pool_handler(_handler_200(), max_concurrency=0):
+                pass
 
     async def test_invalid_backlog(self):
         with pytest.raises(ValueError, match="backlog"):
-            thread_pool_handler(_handler_200(), max_concurrency=1, backlog=-1)
+            async with thread_pool_handler(_handler_200(), max_concurrency=1, backlog=-1):
+                pass
 
 
 class TestBacklogAdmission:
@@ -320,7 +320,7 @@ class TestBacklogAdmission:
         def body_handler(ctx: HTTPReqCtx):
             entered.set()
             release.wait(timeout=5.0)
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -363,7 +363,7 @@ class TestBacklogAdmission:
         idle on get() at dispatch time."""
 
         def handler(ctx: HTTPReqCtx):
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
@@ -386,7 +386,7 @@ class TestBacklogAdmission:
         def body_handler(ctx: HTTPReqCtx):
             entered.release()
             release.wait(timeout=5.0)
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -433,7 +433,7 @@ class TestBacklogAdmission:
         def body_handler(ctx: HTTPReqCtx):
             entered.set()
             release.wait(timeout=5.0)
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -579,7 +579,7 @@ class TestAcceptorTopology:
             with lock:
                 threads_seen.add(threading.get_ident())
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+                Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"hi",
             )
             return None
@@ -710,7 +710,7 @@ class TestSelectorThreadFastPath:
             with lock:
                 threads_seen.add(threading.get_ident())
             ctx.complete(
-                NativeResponse(
+                Response(
                     status_code=200,
                     headers=[(b"content-type", b"text/plain"), (b"content-length", b"2")],
                 ),
@@ -813,7 +813,7 @@ class TestServiceRobustness:
             gate.wait(timeout=5.0)
             with lock:
                 in_flight -= 1
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler
@@ -853,7 +853,7 @@ class TestServiceRobustness:
         def body_handler(ctx: HTTPReqCtx):
             entered.set()
             release.wait(timeout=5.0)
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         routes = Routes()
 
@@ -945,7 +945,7 @@ class TestServiceRobustness:
         """
 
         def handler(ctx: HTTPReqCtx):
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
@@ -967,7 +967,7 @@ class TestDispatchLoad:
         def body_handler(ctx: HTTPReqCtx):
             tid = str(threading.get_ident()).encode()
             ctx.complete(
-                NativeResponse(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
+                Response(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
                 tid,
             )
 
@@ -1021,7 +1021,7 @@ class TestRequestCancellation:
                 handler_cancelled.set()
                 raise
             # Should not be reached
-            ctx.complete(NativeResponse(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
+            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         def handler(_ctx: HTTPReqCtx):
             return body_handler

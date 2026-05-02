@@ -27,7 +27,7 @@ from localpost.hosting import serve
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
+    Response,
     ServerConfig,
     http_server,
 )
@@ -41,7 +41,7 @@ def _capturing_handler(seen: Counter, lock: threading.Lock):
         with lock:
             seen[threading.get_ident()] += 1
         ctx.complete(
-            NativeResponse(status_code=200, headers=[(b"content-length", b"2")]),
+            Response(status_code=200, headers=[(b"content-length", b"2")]),
             b"ok",
         )
         return None

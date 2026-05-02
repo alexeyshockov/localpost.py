@@ -11,7 +11,7 @@ import time
 from benchmarks.http.apps._cli import parse_args
 from benchmarks.http.scenarios import PING_BODY, PROFILE_WORK_DELAYS_S, hello_body, profile_update_body
 from localpost.hosting import run_app
-from localpost.http import HttpApp, HTTPReqCtx, NativeResponse, ServerConfig
+from localpost.http import HttpApp, HTTPReqCtx, Response, ServerConfig
 
 
 def main() -> int:
@@ -22,7 +22,7 @@ def main() -> int:
     def ping():
         # Wire-bytes for the tightest plaintext path (skips the str → bytes
         # encode and the Content-Type rewrite).
-        return NativeResponse(
+        return Response(
             status_code=200,
             headers=[
                 (b"content-type", b"text/plain"),
@@ -33,7 +33,7 @@ def main() -> int:
     @app.get("/hello/{name}")
     def hello(name: str):
         body = hello_body(name)
-        return NativeResponse(
+        return Response(
             status_code=200,
             headers=[
                 (b"content-type", b"text/plain"),
@@ -43,7 +43,7 @@ def main() -> int:
 
     @app.post("/echo")
     def echo(ctx: HTTPReqCtx):
-        return NativeResponse(
+        return Response(
             status_code=200,
             headers=[
                 (b"content-type", b"application/json"),
@@ -56,7 +56,7 @@ def main() -> int:
         body = profile_update_body(user_id, ctx.body)
         for delay_s in PROFILE_WORK_DELAYS_S:
             time.sleep(delay_s)
-        return NativeResponse(
+        return Response(
             status_code=200,
             headers=[
                 (b"content-type", b"application/json"),

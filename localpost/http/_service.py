@@ -192,18 +192,14 @@ def _run_acceptor(config: ServerConfig, handler: RequestHandler, *, workers: int
         # capture them. Each worker has its own Selector with its own
         # wakeup pipe / op queue. ``shutting_down`` is per-selector — we
         # toggle them on shutdown.
-        worker_selectors = tuple(
-            Selector(config, port=port, logger=logger) for _ in range(workers)
-        )
+        worker_selectors = tuple(Selector(config, port=port, logger=logger) for _ in range(workers))
         acceptor_selector = Selector(config, port=port, logger=logger)
         round_robin = RoundRobinAcceptor(
             workers=worker_selectors,
             handler=handler,
             conn_factory=conn_factory,
         )
-        acceptor_server = BaseServer(
-            config, round_robin, logger, listen_sock, acceptor_selector
-        )
+        acceptor_server = BaseServer(config, round_robin, logger, listen_sock, acceptor_selector)
 
         worker_started: list[Event] = [Event() for _ in range(workers)]
         acceptor_started = Event()

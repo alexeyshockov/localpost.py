@@ -111,9 +111,9 @@ module's `__init__.py`.
 
 ## Module deep-dives
 
-For more detail on each module, see:
+For more detail on each module, read its README on demand:
 
-@localpost/hosting/README.md
-@localpost/scheduler/README.md
-@localpost/di/README.md
-@localpost/http/README.md
+- `localpost/hosting/README.md`
+- `localpost/scheduler/README.md`
+- `localpost/di/README.md`
+- `localpost/http/README.md`

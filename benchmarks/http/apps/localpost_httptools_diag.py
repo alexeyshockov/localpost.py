@@ -31,7 +31,7 @@ from localpost.hosting import run_app, service
 from localpost.http import (
     BodyHandler,
     HTTPReqCtx,
-    NativeResponse,
+    Response,
     Routes,
     ServerConfig,
     http_server,
@@ -50,7 +50,7 @@ def _record() -> None:
 
 def _emit(ctx: HTTPReqCtx, body: bytes, content_type: bytes = b"text/plain") -> None:
     ctx.complete(
-        NativeResponse(
+        Response(
             status_code=200,
             headers=[(b"content-type", content_type), (b"content-length", str(len(body)).encode("ascii"))],
         ),

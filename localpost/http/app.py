@@ -10,7 +10,7 @@ and the HTTP server. It provides:
   :data:`localpost.http.HTTPReqCtx` get the request context.
 - Automatic response conversion: ``str`` → ``text/plain``, ``bytes`` →
   ``application/octet-stream``, ``dict`` / ``list`` → ``application/json``,
-  :data:`localpost.http.NativeResponse` → as-is, ``(NativeResponse, bytes)``
+  :data:`localpost.http.Response` → as-is, ``(Response, bytes)``
   tuple → with body, ``None`` → 204.
 - Worker-pool dispatch for matched routes.
 - Two body modes per route:
@@ -46,7 +46,7 @@ Example::
         with open(f"/tmp/{name}.jpg", "wb") as f:
             while chunk := ctx.receive(8192):
                 f.write(chunk)
-        return NativeResponse(status_code=204, headers=[(b"content-length", b"0")])
+        return Response(status_code=204, headers=[(b"content-length", b"0")])
 
 
     sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
@@ -64,7 +64,7 @@ from typing import Any, get_type_hints
 from localpost import hosting
 from localpost.http._pool import _Pool, _pool_context
 from localpost.http._service import http_server
-from localpost.http._types import Response as NativeResponse
+from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
 from localpost.http.server import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose
@@ -119,26 +119,26 @@ def _make_path_arg_resolver(name: str) -> _ParamResolver:
     return lambda ctx: route_match(ctx).path_args[name]
 
 
-def _wrap_response(value: Any) -> tuple[NativeResponse, bytes]:
-    """Convert a handler's return value into ``(NativeResponse, body)``.
+def _wrap_response(value: Any) -> tuple[Response, bytes]:
+    """Convert a handler's return value into ``(Response, body)``.
 
     Supported shapes:
 
     - ``str`` — ``200 text/plain; charset=utf-8``
     - ``bytes`` / ``bytearray`` / ``memoryview`` — ``200 application/octet-stream``
     - ``dict`` / ``list`` — ``200 application/json`` (via ``json.dumps``)
-    - :class:`NativeResponse` — passed through, empty body
-    - ``(NativeResponse, bytes)`` tuple — passed through, with body
+    - :class:`Response` — passed through, empty body
+    - ``(Response, bytes)`` tuple — passed through, with body
     - ``None`` — ``204 No Content``
     """
-    if isinstance(value, NativeResponse):
+    if isinstance(value, Response):
         return value, b""
     if value is None:
         return (
-            NativeResponse(status_code=204, headers=[(b"content-length", b"0")]),
+            Response(status_code=204, headers=[(b"content-length", b"0")]),
             b"",
         )
-    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], NativeResponse):
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], Response):
         response, body = value
         return response, body if isinstance(body, bytes) else bytes(body)
     if isinstance(value, str):
@@ -152,12 +152,12 @@ def _wrap_response(value: Any) -> tuple[NativeResponse, bytes]:
         return _build_response(200, b"application/json", body), body
     raise TypeError(
         f"unsupported return type {type(value).__name__!r} from handler — "
-        f"return str, bytes, dict, list, NativeResponse, (NativeResponse, bytes), or None"
+        f"return str, bytes, dict, list, Response, (Response, bytes), or None"
     )
 
 
-def _build_response(status: int, content_type: bytes, body: bytes) -> NativeResponse:
-    return NativeResponse(
+def _build_response(status: int, content_type: bytes, body: bytes) -> Response:
+    return Response(
         status_code=status,
         headers=[
             (b"content-type", content_type),
