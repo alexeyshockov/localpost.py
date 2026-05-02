@@ -103,6 +103,7 @@ class Operation:
 
         arg_resolvers: list[tuple[str, ArgResolver]] = []
         arg_factories: list[tuple[str, inspect.Parameter, ArgResolverFactory | None]] = []
+        bound_path_vars: set[str] = set()
 
         for name, param in sig.parameters.items():
             if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
@@ -113,15 +114,31 @@ class Operation:
                 arg_resolvers.append((name, _resolve_ctx))
                 arg_factories.append((name, param, None))
             else:
+                if isinstance(factory, FromPath):
+                    bound = factory.name or name
+                    if bound not in path_var_names:
+                        raise ValueError(
+                            f"handler {_qualname(fn)!r}: parameter {name!r} uses FromPath"
+                            f"({bound!r}) but path template {path!r} has no such variable"
+                            f" (available: {sorted(path_var_names) or 'none'})"
+                        )
+                    bound_path_vars.add(bound)
                 arg_resolvers.append((name, factory(param)))
                 arg_factories.append((name, param, factory))
+
+        unbound = path_var_names - bound_path_vars
+        if unbound:
+            raise ValueError(
+                f"handler {_qualname(fn)!r}: path template {path!r} declares variable(s)"
+                f" {sorted(unbound)!r} that no parameter resolves"
+            )
 
         return_shapes = tuple(_extract_response_shapes(sig.return_annotation))
 
         doc = inspect.getdoc(fn) or ""
         summary = doc.split("\n", 1)[0] if doc else f"{method.value} {path}"
         description = doc[len(summary) :].lstrip("\n") if doc else ""
-        operation_id = f"{method.value.lower()}_{_path_to_id(path)}"
+        operation_id = _operation_id(method, path, fn)
 
         return cls(
             method=method,
@@ -245,6 +262,20 @@ def _signature_with_hints(sig: inspect.Signature, hints: dict[str, Any]) -> insp
 def _path_to_id(path: str) -> str:
     cleaned = path.replace("/", "_").replace("{", "").replace("}", "").strip("_")
     return cleaned or "root"
+
+
+def _operation_id(method: HTTPMethod, path: str, fn: Callable[..., Any]) -> str:
+    """Pick an operationId.
+
+    Prefer ``fn.__name__`` when it's a real, non-anonymous identifier — it
+    matches what users see in their codebase (and what FastAPI emits, modulo
+    the path suffix). Fall back to a path-mangled id for lambdas / wrapped
+    callables / anything without a usable name.
+    """
+    name = getattr(fn, "__name__", "") or ""
+    if name and name not in {"<lambda>", "_", ""}:
+        return name
+    return f"{method.value.lower()}_{_path_to_id(path)}"
 
 
 def _pick_factory(

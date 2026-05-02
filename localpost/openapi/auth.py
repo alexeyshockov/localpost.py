@@ -50,9 +50,7 @@ def _read_authorization(ctx: HTTPReqCtx) -> bytes | None:
     return None
 
 
-def _add_security_scheme(
-    doc: spec.OpenAPI, name: str, scheme: spec.SecurityScheme
-) -> spec.OpenAPI:
+def _add_security_scheme(doc: spec.OpenAPI, name: str, scheme: spec.SecurityScheme) -> spec.OpenAPI:
     components = replace(
         doc.components,
         security_schemes={**doc.components.security_schemes, name: scheme},
@@ -60,9 +58,7 @@ def _add_security_scheme(
     return replace(doc, components=components)
 
 
-def _add_security_requirement(
-    op: spec.Operation, scheme_name: str, scopes: tuple[str, ...] = ()
-) -> spec.Operation:
+def _add_security_requirement(op: spec.Operation, scheme_name: str, scopes: tuple[str, ...] = ()) -> spec.Operation:
     requirement: dict[str, tuple[str, ...]] = {scheme_name: scopes}
     return replace(
         op,
@@ -106,9 +102,7 @@ class HttpBearerAuth:
         ctx.attrs[self] = principal
         return None
 
-    def contribute_root(
-        self, doc: spec.OpenAPI, registry: SchemaRegistry, /
-    ) -> spec.OpenAPI:
+    def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
         scheme = spec.SecurityScheme(
             type="http",
             scheme="bearer",
@@ -117,9 +111,7 @@ class HttpBearerAuth:
         )
         return _add_security_scheme(doc, self.scheme_name, scheme)
 
-    def contribute_operation(
-        self, op: spec.Operation, registry: SchemaRegistry, /
-    ) -> spec.Operation:
+    def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
         return _add_security_requirement(op, self.scheme_name)
 
 
@@ -148,9 +140,7 @@ class HttpBasicAuth:
         raw = _read_authorization(ctx)
         challenge = {"WWW-Authenticate": f'Basic realm="{self.realm}"'}
         if raw is None or not raw.startswith(b"Basic "):
-            return Unauthorized(
-                "Missing or malformed Authorization header", headers=challenge
-            )
+            return Unauthorized("Missing or malformed Authorization header", headers=challenge)
         try:
             decoded = base64.b64decode(raw[6:], validate=True).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError):
@@ -164,15 +154,9 @@ class HttpBasicAuth:
         ctx.attrs[self] = principal
         return None
 
-    def contribute_root(
-        self, doc: spec.OpenAPI, registry: SchemaRegistry, /
-    ) -> spec.OpenAPI:
-        scheme = spec.SecurityScheme(
-            type="http", scheme="basic", description=self.description
-        )
+    def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
+        scheme = spec.SecurityScheme(type="http", scheme="basic", description=self.description)
         return _add_security_scheme(doc, self.scheme_name, scheme)
 
-    def contribute_operation(
-        self, op: spec.Operation, registry: SchemaRegistry, /
-    ) -> spec.Operation:
+    def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
         return _add_security_requirement(op, self.scheme_name)

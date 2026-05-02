@@ -15,7 +15,8 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, get_args, get_origin
+from types import NoneType, UnionType
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, Union, get_args, get_origin
 from urllib.parse import parse_qs
 
 import msgspec
@@ -72,8 +73,40 @@ def _unwrap_annotated(t: Any) -> Any:
     return t
 
 
+def _unwrap_optional(t: Any) -> tuple[Any, bool]:
+    """Strip ``T | None`` / ``Optional[T]`` to ``(T, True)``.
+
+    Returns ``(t, False)`` for non-optional types.
+    """
+    origin = get_origin(t)
+    if origin is Union or origin is UnionType:
+        args = [a for a in get_args(t) if a is not NoneType]
+        if len(args) < len(get_args(t)):
+            # ``T | None`` collapses to T; ``T | U | None`` keeps the union.
+            inner: Any = args[0] if len(args) == 1 else Union[tuple(args)]  # noqa: UP007
+            return inner, True
+    return t, False
+
+
 def _has_default(param: inspect.Parameter) -> bool:
     return param.default is not inspect.Parameter.empty
+
+
+def _is_optional_param(param: inspect.Parameter) -> tuple[Any, bool, Any]:
+    """For a param, return ``(target_type, is_optional, default_value)``.
+
+    ``is_optional`` is true if the annotation is ``T | None`` *or* the param
+    has a default. ``default_value`` is the param's default, or ``None`` when
+    the type is optional but no default is supplied.
+    """
+    target = _unwrap_annotated(param.annotation)
+    inner, is_nullable = _unwrap_optional(target)
+    has_default = _has_default(param)
+    if has_default:
+        return inner, True, param.default
+    if is_nullable:
+        return inner, True, None
+    return target, False, None
 
 
 def _cast_str(value: str, target: Any) -> Any:
@@ -189,6 +222,10 @@ class FromQuery:
     For ``list[T]`` / ``Sequence[T]`` annotations all values for the key
     are returned. For scalar annotations the *first* value is taken and
     coerced.
+
+    Optional handling: if the annotation is ``T | None`` *or* the param
+    has a default, the parameter is not required. When absent it returns
+    the default (``None`` if the type was simply made nullable).
     """
 
     name: str | None = None
@@ -196,16 +233,14 @@ class FromQuery:
 
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
         param_name = self.name or param.name
-        target = _unwrap_annotated(param.annotation)
+        target, optional, default = _is_optional_param(param)
         elem_type = _list_element_type(target)
         is_list = elem_type is not None
-        has_default = _has_default(param)
-        default = param.default if has_default else None
 
         def resolve(ctx: HTTPReqCtx) -> object | OpResult:
             values = _query_args(ctx).get(param_name)
             if not values:
-                if has_default:
+                if optional:
                     return default
                 return BadRequest(f"Missing required query parameter: {param_name}")
             try:
@@ -224,12 +259,12 @@ class FromQuery:
         registry: SchemaRegistry,
         /,
     ) -> openapi_spec.Operation:
-        target = _unwrap_annotated(param.annotation)
+        target, optional, _ = _is_optional_param(param)
         schema = registry.schema_for(target) if target is not Any else {"type": "string"}
         parameter = openapi_spec.Parameter(
             name=self.name or param.name,
             location="query",
-            required=not _has_default(param),
+            required=not optional,
             description=self.description,
             schema=schema,
         )
@@ -241,16 +276,18 @@ class FromQuery:
 
 @dataclass(frozen=True, slots=True)
 class FromHeader:
-    """Resolve a parameter from a request header."""
+    """Resolve a parameter from a request header.
+
+    Optional handling: if the annotation is ``T | None`` *or* the param
+    has a default, the header is not required.
+    """
 
     name: str | None = None
     description: str = ""
 
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
         header_name = (self.name or param.name.replace("_", "-")).lower().encode("ascii")
-        target = _unwrap_annotated(param.annotation)
-        has_default = _has_default(param)
-        default = param.default if has_default else None
+        target, optional, default = _is_optional_param(param)
 
         def resolve(ctx: HTTPReqCtx) -> object | OpResult:
             value: str | None = None
@@ -259,7 +296,7 @@ class FromHeader:
                     value = val.decode("iso-8859-1")
                     break
             if value is None:
-                if has_default:
+                if optional:
                     return default
                 return BadRequest(f"Missing required header: {header_name.decode()}")
             try:
@@ -276,12 +313,12 @@ class FromHeader:
         registry: SchemaRegistry,
         /,
     ) -> openapi_spec.Operation:
-        target = _unwrap_annotated(param.annotation)
+        target, optional, _ = _is_optional_param(param)
         schema = registry.schema_for(target) if target is not Any else {"type": "string"}
         parameter = openapi_spec.Parameter(
             name=self.name or param.name.replace("_", "-"),
             location="header",
-            required=not _has_default(param),
+            required=not optional,
             description=self.description,
             schema=schema,
         )

@@ -67,9 +67,7 @@ class TestHttpBearerAuthRuntime:
             return "hello"
 
         op = app.operations[0]
-        ctx = make_ctx(
-            path="/me", headers=[(b"authorization", _basic_header("u", "p"))]
-        )
+        ctx = make_ctx(path="/me", headers=[(b"authorization", _basic_header("u", "p"))])
         status, _, _ = run_op(op, ctx)
         assert status == 401
 
@@ -138,9 +136,7 @@ class TestHttpBearerAuthSpec:
 
 class TestHttpBasicAuthRuntime:
     def test_valid_credentials_pass(self):
-        basic = HttpBasicAuth(
-            validator=lambda u, p: u if (u, p) == ("alice", "wonder") else None
-        )
+        basic = HttpBasicAuth(validator=lambda u, p: u if (u, p) == ("alice", "wonder") else None)
         app = HttpApp(filters=[basic])
 
         @app.get("/me")
