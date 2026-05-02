@@ -202,6 +202,11 @@ class HTTPConn(BaseHTTPConn):
 
     def on_header(self, name: bytes, value: bytes) -> None:
         n = name.lower()
+        # httptools strips leading OWS but leaves trailing SP/HTAB intact;
+        # RFC 7230 §3.2.4 requires both sides stripped, and h11 does so. Trim
+        # trailing OWS here to keep cross-backend parity.
+        if value.endswith((b" ", b"\t")):
+            value = value.rstrip(b" \t")
         self._cur_headers.append((n, value))
         if n == b"expect" and value.lower() == b"100-continue":
             self._cur_expect_100 = True

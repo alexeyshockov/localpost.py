@@ -120,12 +120,14 @@ def _request_wire(draw) -> tuple[bytes, dict]:
     header_block = b"".join(name + b": " + value + b"\r\n" for name, value in headers)
     wire = request_line + header_block + b"\r\n"
 
+    # Per RFC 7230 § 3.2.4, OWS (SP / HTAB) surrounding field-value is stripped
+    # by both backends; mirror that normalisation in the expected shape.
     expected = {
         "method": method,
         "target": target,
         "path": path,
         "query_string": query[1:] if query else b"",
-        "headers": [(name.lower(), value) for name, value in headers],
+        "headers": [(name.lower(), value.strip(b" \t")) for name, value in headers],
         "http_version": b"1.1",
     }
     return wire, expected
