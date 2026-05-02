@@ -789,7 +789,7 @@ requires-dist = [
     { name = "anyio", specifier = "~=4.12" },
     { name = "croniter", marker = "extra == 'cron'", specifier = ">=2.0,<4.0" },
     { name = "h11", marker = "extra == 'http'", specifier = "~=0.16" },
-    { name = "httptools", marker = "extra == 'http-fast'", specifier = ">=0.6,<0.8" },
+    { name = "httptools", marker = "extra == 'http-fast'" },
     { name = "humanize", marker = "extra == 'scheduler'", specifier = ">=3.0,<5.0" },
     { name = "pytimeparse2", marker = "extra == 'scheduler'", specifier = "~=1.6" },
 ]

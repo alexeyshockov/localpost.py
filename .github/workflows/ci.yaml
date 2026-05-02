@@ -27,3 +27,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  tests-free-threaded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python 3.14t
+        run: uv python install 3.14t
+      - name: Install dependencies (FT-clean subset)
+        # --no-default-groups + narrow opt-in: avoid C extensions that
+        # re-enable the GIL on 3.14t (httptools 0.7.x, grpcio, granian,
+        # setproctitle). Covers the pure-Python core that the FT marking
+        # actually claims.
+        run: >
+          uv sync --python 3.14t --no-default-groups
+          --group tests --group tests-unit
+          --extra http --extra scheduler --extra cron
+      - name: pytest
+        timeout-minutes: 5
+        env:
+          PYTHON_GIL: "0"  # fail loudly if any imported C ext re-enables the GIL
+        run: uv run --python 3.14t pytest -v -m "not integration"

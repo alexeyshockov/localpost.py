@@ -13,6 +13,11 @@ Python 3.12+ required.
   operators like `every("1m") // delay((0, 10))`.
 - **HTTP** — small h11-based sync server; wrap any WSGI app.
 - **DI** — `.NET`-style scoped IoC container; optional Flask integration.
+- **Free-threaded ready** — pure Python, no C extensions; runs on free-threaded
+  CPython 3.14t (no-GIL) with the default `[http]` (h11) backend. Verified by
+  the bench: ~3x RPS at `selectors=1`. The optional `[http-fast]` (httptools)
+  backend will be no-GIL-clean once httptools 0.8 lands; the currently-released
+  0.7.x re-enables the GIL on import.
 
 ## Quick start
 

@@ -21,6 +21,7 @@ authors = [
 keywords = [
     "hosting", "scheduler", "cron",
     "http", "wsgi", "anyio",
+    "free-threading", "no-gil",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -59,7 +60,9 @@ http = [
 ]
 http-fast = [
     # C-based HTTP/1.1 parser (llhttp); enables ``start_httptools_server``.
-    "httptools >=0.6,<0.8",
+    # NOTE: under free-threaded CPython, 0.7.x auto-re-enables the GIL on
+    # import; 0.8+ declares Py_mod_gil = Py_MOD_GIL_NOT_USED.
+    "httptools",
 ]
 
 [dependency-groups]
