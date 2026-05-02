@@ -64,6 +64,10 @@ http-fast = [
     # NOTE! Under free-threaded CPython, 0.7.1 and below auto-re-enables the GIL on import.
     "httptools @ git+https://github.com/MagicStack/httptools.git",
 ]
+openapi = [
+#    "localpost[http]",
+    "msgspec ~=0.19",
+]
 
 [dependency-groups]
 dev = [
@@ -81,6 +85,12 @@ dev-hosting-services = [
 dev-http = [
     "flask ~=3.1",
     "httpx",
+]
+dev-openapi = [
+    # Pydantic is supported via localpost.openapi.pydantic but is NOT a runtime
+    # dep of the openapi extra — end users install pydantic themselves. We pull
+    # it in here so our own examples and tests can exercise that path.
+    "pydantic ~=2.7",
 ]
 dev-sentry = [
     "sentry-sdk ~=2.51",
