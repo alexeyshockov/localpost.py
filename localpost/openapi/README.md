@@ -126,19 +126,60 @@ Use the *class* in return annotations (`Book | NotFound[str]`) so the OpenAPI
 doc picks up the body type per status code. Returning a bare
 `localpost.http.Response` is the escape hatch (no schema contribution).
 
-### `OpFilter` (designed; concrete impls land later)
+### `OpFilter`
+
+A filter is middleware that knows how to describe itself in the OpenAPI doc:
 
 ```python
 class OpFilter(Protocol):
     def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult: ...
-    def update_doc(
-        self, doc: spec.OpenAPI, op: spec.Operation | None = None, /
-    ) -> spec.OpenAPI: ...
+    def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI: ...
+    def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation: ...
 ```
 
-App-level filters get `op=None`; per-operation filters get the relevant
-`Operation`. `update_doc` returns a new (immutable) doc. Concrete
-`HttpBasicAuth` / `HttpBearerAuth` / `OpenIDConnectAuth` are a follow-up.
+- `__call__` runs before the resolvers; return an `OpResult` to short-circuit.
+- `contribute_root` is called once at spec-build time (typically to register
+  a `SecurityScheme`).
+- `contribute_operation` is called for each operation that the filter is
+  attached to (typically to add a 401 response and a `security` requirement).
+
+Apply app-wide:
+
+```python
+app = HttpApp(filters=[my_filter])
+```
+
+or per-operation:
+
+```python
+@app.get("/admin", filters=[my_filter])
+def admin() -> str: ...
+```
+
+### Built-in auth filters
+
+```python
+from localpost.openapi import HttpApp, HttpBearerAuth, HttpBasicAuth
+
+def validate_token(token: str) -> dict | None:
+    # Return any truthy principal on success, None on failure.
+    # The principal is stashed on ctx.attrs[<filter>] for handlers to read.
+    return decode_jwt(token)
+
+
+app = HttpApp(filters=[HttpBearerAuth(validator=validate_token)])
+
+
+@app.get("/me")
+def me() -> dict:
+    # Pull the principal from a custom resolver, or just inject the ctx.
+    ...
+```
+
+`HttpBearerAuth` registers an HTTP `bearer` security scheme; `HttpBasicAuth`
+registers `basic` and sends a `WWW-Authenticate` challenge on 401. Both
+attach a 401 response and a `security` requirement to every operation they
+cover. `OpenIDConnectAuth` is a follow-up.
 
 ## Hosting
 
@@ -165,6 +206,7 @@ focused on user-facing concepts.
 | `resolvers.py` | `FromPath`, `FromQuery`, `FromHeader`, `FromBody` factories |
 | `results.py` | `OpResult` hierarchy |
 | `filter.py` | `OpFilter` protocol |
+| `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth filters |
 | `spec.py` | OpenAPI 3.2 dataclasses |
 | `schemas.py` | `SchemaRegistry` — msgspec / pydantic JSON Schema generation |
 | `pydantic.py` | Explicit pydantic helpers (auto-detection in `FromBody` works without this) |

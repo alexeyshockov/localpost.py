@@ -37,6 +37,7 @@ yourself; it isn't a runtime dependency of localpost.
 
 from localpost.openapi import spec
 from localpost.openapi.app import HttpApp
+from localpost.openapi.auth import HttpBasicAuth, HttpBearerAuth
 from localpost.openapi.filter import OpFilter
 from localpost.openapi.operation import Operation
 from localpost.openapi.resolvers import (
@@ -72,6 +73,8 @@ __all__ = [
     "spec",
     # filters
     "OpFilter",
+    "HttpBearerAuth",
+    "HttpBasicAuth",
     # arg resolvers
     "ArgResolver",
     "ArgResolverFactory",
