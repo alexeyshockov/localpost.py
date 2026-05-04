@@ -42,7 +42,7 @@ from localpost.openapi.results import NoContent, NotFound, Ok, OpResult
 from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
 from localpost.openapi.sse import EventStream, iter_events
 
-__all__ = ["Operation"]
+__all__ = ["Operation", "ResponseShape", "build_arg_resolvers", "extract_response_shapes"]
 
 
 # Sentinel — we expose the request ctx for params explicitly typed as HTTPReqCtx.
@@ -51,7 +51,7 @@ def _resolve_ctx(ctx: HTTPReqCtx) -> HTTPReqCtx:
 
 
 @dataclass(frozen=True, slots=True)
-class _ResponseShape:
+class ResponseShape:
     """One branch of the return type — a (status, body type, content type)."""
 
     status_code: int
@@ -76,7 +76,7 @@ class Operation:
     """Filters to run before the resolvers. Includes both app-level filters
     (injected by :class:`HttpApp`) and per-operation filters."""
 
-    return_shapes: tuple[_ResponseShape, ...]
+    return_shapes: tuple[ResponseShape, ...]
     null_is_not_found: bool
     """True when the return annotation was ``T | None`` and we therefore
     map a runtime ``None`` to a 404 instead of a 200 with empty body."""
@@ -98,47 +98,22 @@ class Operation:
         template = URITemplate.parse(path)
         path_var_names = set(template.variable_names)
 
-        # Resolve PEP 563 string annotations (``from __future__ import
-        # annotations`` is in effect for most callers) into the real types
-        # before feeding them to the resolver factories. We build a localns
-        # from the function's closure cells so types defined in an enclosing
-        # scope (common in tests, factories) resolve too.
-        localns = _closure_locals(fn)
-        try:
-            sig = inspect.signature(fn, eval_str=True, locals=localns)
-        except Exception:  # noqa: BLE001
-            sig = inspect.signature(fn)
-        try:
-            hints = get_type_hints(fn, localns=localns, include_extras=True)
-        except Exception:  # noqa: BLE001
-            hints = {}
-        sig = _signature_with_hints(sig, hints)
+        sig, arg_resolvers, arg_factories = build_arg_resolvers(fn, path_var_names=path_var_names)
 
-        arg_resolvers: list[tuple[str, ArgResolver]] = []
-        arg_factories: list[tuple[str, inspect.Parameter, ArgResolverFactory | None]] = []
+        # Validate path bindings: every {var} in the template must be
+        # claimed by a parameter (whether implicitly via name match or
+        # explicitly via Annotated[..., FromPath("var")]).
         bound_path_vars: set[str] = set()
-
-        for name, param in sig.parameters.items():
-            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                raise ValueError(f"handler {_qualname(fn)!r}: *args / **kwargs not supported")
-            factory = _pick_factory(name, param, path_var_names)
-            if factory is None:
-                # HTTPReqCtx pass-through.
-                arg_resolvers.append((name, _resolve_ctx))
-                arg_factories.append((name, param, None))
-            else:
-                if isinstance(factory, FromPath):
-                    bound = factory.name or name
-                    if bound not in path_var_names:
-                        raise ValueError(
-                            f"handler {_qualname(fn)!r}: parameter {name!r} uses FromPath"
-                            f"({bound!r}) but path template {path!r} has no such variable"
-                            f" (available: {sorted(path_var_names) or 'none'})"
-                        )
-                    bound_path_vars.add(bound)
-                arg_resolvers.append((name, factory(param)))
-                arg_factories.append((name, param, factory))
-
+        for _name, param, factory in arg_factories:
+            if isinstance(factory, FromPath):
+                bound = factory.name or param.name
+                if bound not in path_var_names:
+                    raise ValueError(
+                        f"handler {_qualname(fn)!r}: parameter {param.name!r} uses FromPath"
+                        f"({bound!r}) but path template {path!r} has no such variable"
+                        f" (available: {sorted(path_var_names) or 'none'})"
+                    )
+                bound_path_vars.add(bound)
         unbound = path_var_names - bound_path_vars
         if unbound:
             raise ValueError(
@@ -146,7 +121,7 @@ class Operation:
                 f" {sorted(unbound)!r} that no parameter resolves"
             )
 
-        shapes_list, null_is_not_found = _extract_response_shapes(sig.return_annotation)
+        shapes_list, null_is_not_found = extract_response_shapes(sig.return_annotation)
         return_shapes = tuple(shapes_list)
 
         doc = inspect.getdoc(fn) or ""
@@ -245,6 +220,56 @@ def _qualname(fn: Callable[..., Any]) -> str:
     return getattr(fn, "__qualname__", None) or getattr(fn, "__name__", repr(fn))
 
 
+def build_arg_resolvers(
+    fn: Callable[..., Any],
+    *,
+    path_var_names: set[str] | None = None,
+) -> tuple[
+    inspect.Signature,
+    list[tuple[str, ArgResolver]],
+    list[tuple[str, inspect.Parameter, ArgResolverFactory | None]],
+]:
+    """Inspect ``fn`` and return ``(resolved_signature, runtime_resolvers,
+    spec_factories)`` for use by :class:`Operation` or :func:`op_filter`.
+
+    Path-template binding is *not* validated here — pass ``path_var_names``
+    so :class:`FromPath` is auto-picked for matching parameter names; the
+    caller is responsible for any "unbound var" error.
+    """
+    path_vars = path_var_names or set()
+
+    # Resolve PEP 563 string annotations (``from __future__ import
+    # annotations`` is in effect for most callers) into the real types
+    # before feeding them to the resolver factories. We build a localns
+    # from the function's closure cells so types defined in an enclosing
+    # scope (common in tests, factories) resolve too.
+    localns = _closure_locals(fn)
+    try:
+        sig = inspect.signature(fn, eval_str=True, locals=localns)
+    except Exception:  # noqa: BLE001
+        sig = inspect.signature(fn)
+    try:
+        hints = get_type_hints(fn, localns=localns, include_extras=True)
+    except Exception:  # noqa: BLE001
+        hints = {}
+    sig = _signature_with_hints(sig, hints)
+
+    runtime: list[tuple[str, ArgResolver]] = []
+    factories: list[tuple[str, inspect.Parameter, ArgResolverFactory | None]] = []
+    for name, param in sig.parameters.items():
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            raise ValueError(f"handler {_qualname(fn)!r}: *args / **kwargs not supported")
+        factory = _pick_factory(name, param, path_vars)
+        if factory is None:
+            # HTTPReqCtx pass-through.
+            runtime.append((name, _resolve_ctx))
+            factories.append((name, param, None))
+        else:
+            runtime.append((name, factory(param)))
+            factories.append((name, param, factory))
+    return sig, runtime, factories
+
+
 def _closure_locals(fn: Callable[..., Any]) -> dict[str, Any]:
     """Return a name → value dict from ``fn``'s closure cells.
 
@@ -339,15 +364,15 @@ def _is_resolver_factory(arg: Any) -> ArgResolverFactory | None:
     return None
 
 
-def _extract_response_shapes(return_annotation: Any) -> tuple[list[_ResponseShape], bool]:
+def extract_response_shapes(return_annotation: Any) -> tuple[list[ResponseShape], bool]:
     """Return ``(shapes, null_is_not_found)`` from a function's return annotation."""
     if return_annotation is inspect.Signature.empty:
-        return [_ResponseShape(200, "Successful response", None)], False
+        return [ResponseShape(200, "Successful response", None)], False
 
     origin = get_origin(return_annotation)
     members = list(get_args(return_annotation)) if origin is Union or origin is UnionType else [return_annotation]
 
-    shapes: list[_ResponseShape] = []
+    shapes: list[ResponseShape] = []
     seen_codes: set[int] = set()
     has_success = False
     has_none = False
@@ -387,7 +412,7 @@ def _extract_response_shapes(return_annotation: Any) -> tuple[list[_ResponseShap
         if code in seen_codes:
             continue
         seen_codes.add(code)
-        shapes.append(_ResponseShape(code, description, body_type, content_type))
+        shapes.append(ResponseShape(code, description, body_type, content_type))
 
     # ``T | None`` is the implicit "T or 404 NotFound" — only when paired
     # with at least one non-None success type (a bare ``-> None`` annotation
@@ -395,11 +420,11 @@ def _extract_response_shapes(return_annotation: Any) -> tuple[list[_ResponseShap
     # didn't already declare 404 explicitly via ``NotFound[X]``.
     null_is_not_found = has_none and has_success and 404 not in seen_codes
     if null_is_not_found:
-        shapes.append(_ResponseShape(404, "Not Found", None))
+        shapes.append(ResponseShape(404, "Not Found", None))
         seen_codes.add(404)
 
     if not has_success and not shapes:
-        shapes.append(_ResponseShape(200, "Successful response", None))
+        shapes.append(ResponseShape(200, "Successful response", None))
     return shapes, null_is_not_found
 
 
@@ -428,7 +453,7 @@ def _sse_payload_type(annotation: Any) -> Any:
     return args[0] if args else None
 
 
-def _build_responses(shapes: tuple[_ResponseShape, ...], registry: SchemaRegistry) -> dict[str, openapi_spec.Response]:
+def _build_responses(shapes: tuple[ResponseShape, ...], registry: SchemaRegistry) -> dict[str, openapi_spec.Response]:
     responses: dict[str, openapi_spec.Response] = {}
     for shape in shapes:
         if shape.body_type is None:

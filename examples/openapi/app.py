@@ -23,6 +23,7 @@ import sys
 import time
 from collections.abc import Generator
 from dataclasses import dataclass
+from typing import Annotated
 
 from localpost import hosting
 from localpost.http import ServerConfig
@@ -30,8 +31,11 @@ from localpost.openapi import (
     BadRequest,
     Created,
     Event,
+    FromHeader,
     HttpApp,
-    NotFound,
+    TooManyRequests,
+    Unauthorized,
+    op_filter,
     spec,
 )
 
@@ -58,6 +62,30 @@ _LIBRARY: dict[str, Book] = {
 app = HttpApp(info=spec.Info(title="Library API", version="1.0.0"))
 
 
+# A filter as a tiny operation: the framework reads the input
+# (``X-API-Key`` header) and the failure response (``Unauthorized``) from
+# this signature and threads them into every operation that uses it.
+@op_filter
+def require_api_key(
+    x_api_key: Annotated[str, FromHeader("X-API-Key")] = "",
+) -> None | Unauthorized[str]:
+    if x_api_key != "secret":
+        return Unauthorized("Invalid or missing X-API-Key")
+    return None
+
+
+# Another tiny filter — every-N-requests rate limiter, just for the demo.
+_call_counter = {"n": 0}
+
+
+@op_filter
+def rate_limit() -> None | TooManyRequests[str]:
+    _call_counter["n"] += 1
+    if _call_counter["n"] % 10 == 0:
+        return TooManyRequests("Slow down")
+    return None
+
+
 @app.get("/hello/{name}")
 def hello(name: str) -> str | BadRequest[str]:
     """Greet someone."""
@@ -74,9 +102,14 @@ def get_book(book_id: str) -> Book | None:
     return book
 
 
-@app.post("/books")
+@app.post("/books", filters=[require_api_key, rate_limit])
 def create_book(book: Book) -> Created[Book]:
-    """Add a new book to the library."""
+    """Add a new book to the library.
+
+    Requires ``X-API-Key: secret``; subject to a (silly) every-10th-request
+    rate limit. Both filters' input headers and failure responses appear in
+    the OpenAPI doc automatically — no spec annotations needed here.
+    """
     _LIBRARY[book.id] = book
     return Created(book, headers={"Location": f"/books/{book.id}"})
 

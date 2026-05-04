@@ -98,7 +98,10 @@ class TestHttpBearerAuthSpec:
 
         op = app.openapi_doc.to_dict()["paths"]["/me"]["get"]
         assert op["security"] == [{"bearerAuth": []}]
-        assert op["responses"]["401"] == {"description": "Unauthorized"}
+        # 401 response is contributed by the @op_filter wrapper from the
+        # filter's `Unauthorized[str]` return annotation — body schema included.
+        assert op["responses"]["401"]["description"] == "Unauthorized"
+        assert op["responses"]["401"]["content"]["application/json"]["schema"] == {"type": "string"}
 
     def test_per_op_does_not_protect_other_ops(self):
         bearer = HttpBearerAuth(validator=lambda _t: True)
@@ -241,7 +244,8 @@ class TestHttpBasicAuthSpec:
 
         op = app.openapi_doc.to_dict()["paths"]["/me"]["get"]
         assert op["security"] == [{"basicAuth": []}]
-        assert op["responses"]["401"] == {"description": "Unauthorized"}
+        assert op["responses"]["401"]["description"] == "Unauthorized"
+        assert op["responses"]["401"]["content"]["application/json"]["schema"] == {"type": "string"}
 
 
 # --- Integration: mixing two filters in one app --------------------------

@@ -1,13 +1,12 @@
 """Concrete :class:`OpFilter` implementations for HTTP authentication.
 
-Each filter runs at request time *and* contributes to the OpenAPI doc:
+Both filters are thin wrappers around a :func:`@op_filter`-decorated
+inner function that reads the ``Authorization`` header and validates it.
+The OpenAPI parameter (``Authorization``) and the ``401`` response are
+contributed *automatically* by ``@op_filter`` — only the
+:class:`SecurityScheme` registration at the root is custom code here.
 
-- :meth:`contribute_root` registers a ``SecurityScheme`` under
-  ``components.securitySchemes``.
-- :meth:`contribute_operation` adds a ``security`` requirement and a
-  ``401`` response.
-
-Identity (the validated principal) is stashed on ``ctx.attrs[filter]``
+On success the validated principal is stashed on ``ctx.attrs[<filter>]``
 so user code can pull it via a tiny custom resolver — see the README
 for the pattern. The validator is a sync callable returning either the
 principal (any object) on success or ``None`` on rejection.
@@ -27,27 +26,17 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field, replace
+from typing import Annotated, Any
 
+from localpost.http.server import HTTPReqCtx
 from localpost.openapi import spec
+from localpost.openapi.filter import _FunctionFilter, op_filter
+from localpost.openapi.resolvers import FromHeader
 from localpost.openapi.results import OpResult, Unauthorized
-
-if TYPE_CHECKING:
-    from localpost.http.server import HTTPReqCtx
-    from localpost.openapi.schemas import SchemaRegistry
+from localpost.openapi.schemas import SchemaRegistry
 
 __all__ = ["HttpBearerAuth", "HttpBasicAuth"]
-
-
-_AUTHORIZATION_HEADER = b"authorization"
-
-
-def _read_authorization(ctx: HTTPReqCtx) -> bytes | None:
-    for name, value in ctx.request.headers:
-        if name == _AUTHORIZATION_HEADER:
-            return value
-    return None
 
 
 def _add_security_scheme(doc: spec.OpenAPI, name: str, scheme: spec.SecurityScheme) -> spec.OpenAPI:
@@ -60,14 +49,7 @@ def _add_security_scheme(doc: spec.OpenAPI, name: str, scheme: spec.SecuritySche
 
 def _add_security_requirement(op: spec.Operation, scheme_name: str, scopes: tuple[str, ...] = ()) -> spec.Operation:
     requirement: dict[str, tuple[str, ...]] = {scheme_name: scopes}
-    return replace(
-        op,
-        security=(*op.security, requirement),
-        responses={
-            "401": spec.Response(description="Unauthorized"),
-            **op.responses,
-        },
-    )
+    return replace(op, security=(*op.security, requirement))
 
 
 @dataclass(slots=True, eq=False)
@@ -91,16 +73,32 @@ class HttpBearerAuth:
     bearer_format: str = "JWT"
     description: str = ""
 
+    _wrapped: _FunctionFilter = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        validator = self.validator
+        principal_key = self  # stable identity across requests
+
+        @op_filter
+        def _bearer(
+            ctx: HTTPReqCtx,
+            authorization: Annotated[str, FromHeader("Authorization")] = "",
+        ) -> None | Unauthorized[str]:
+            # Default ``""`` makes the header optional at the resolver level so
+            # absence is reported as 401 (with the spec-aware Unauthorized) rather
+            # than a generic 400 from FromHeader's "missing required" branch.
+            if not authorization.startswith("Bearer "):
+                return Unauthorized("Missing or malformed Authorization header")
+            principal = validator(authorization[7:])
+            if principal is None:
+                return Unauthorized("Invalid token")
+            ctx.attrs[principal_key] = principal
+            return None
+
+        self._wrapped = _bearer
+
     def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult:
-        raw = _read_authorization(ctx)
-        if raw is None or not raw.startswith(b"Bearer "):
-            return Unauthorized("Missing or malformed Authorization header")
-        token = raw[7:].decode("ascii", errors="replace")
-        principal = self.validator(token)
-        if principal is None:
-            return Unauthorized("Invalid token")
-        ctx.attrs[self] = principal
-        return None
+        return self._wrapped(ctx)
 
     def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
         scheme = spec.SecurityScheme(
@@ -112,6 +110,10 @@ class HttpBearerAuth:
         return _add_security_scheme(doc, self.scheme_name, scheme)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
+        # ``@op_filter`` already adds the Authorization header parameter
+        # and the 401 response from the wrapped function's signature.
+        # We only add the security requirement on top.
+        op = self._wrapped.contribute_operation(op, registry)
         return _add_security_requirement(op, self.scheme_name)
 
 
@@ -136,27 +138,42 @@ class HttpBasicAuth:
     realm: str = "localpost"
     description: str = ""
 
-    def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult:
-        raw = _read_authorization(ctx)
+    _wrapped: _FunctionFilter = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        validator = self.validator
         challenge = {"WWW-Authenticate": f'Basic realm="{self.realm}"'}
-        if raw is None or not raw.startswith(b"Basic "):
-            return Unauthorized("Missing or malformed Authorization header", headers=challenge)
-        try:
-            decoded = base64.b64decode(raw[6:], validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError):
-            return Unauthorized("Malformed Basic credentials", headers=challenge)
-        username, sep, password = decoded.partition(":")
-        if not sep:
-            return Unauthorized("Malformed Basic credentials", headers=challenge)
-        principal = self.validator(username, password)
-        if principal is None:
-            return Unauthorized("Invalid credentials", headers=challenge)
-        ctx.attrs[self] = principal
-        return None
+        principal_key = self
+
+        @op_filter
+        def _basic(
+            ctx: HTTPReqCtx,
+            authorization: Annotated[str, FromHeader("Authorization")] = "",
+        ) -> None | Unauthorized[str]:
+            if not authorization.startswith("Basic "):
+                return Unauthorized("Missing or malformed Authorization header", headers=challenge)
+            try:
+                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError):
+                return Unauthorized("Malformed Basic credentials", headers=challenge)
+            username, sep, password = decoded.partition(":")
+            if not sep:
+                return Unauthorized("Malformed Basic credentials", headers=challenge)
+            principal = validator(username, password)
+            if principal is None:
+                return Unauthorized("Invalid credentials", headers=challenge)
+            ctx.attrs[principal_key] = principal
+            return None
+
+        self._wrapped = _basic
+
+    def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult:
+        return self._wrapped(ctx)
 
     def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
         scheme = spec.SecurityScheme(type="http", scheme="basic", description=self.description)
         return _add_security_scheme(doc, self.scheme_name, scheme)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
+        op = self._wrapped.contribute_operation(op, registry)
         return _add_security_requirement(op, self.scheme_name)

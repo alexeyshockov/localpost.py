@@ -156,6 +156,39 @@ or per-operation:
 def admin() -> str: ...
 ```
 
+### `@op_filter` — filters as tiny operations
+
+For the common case, write a filter the same way you'd write a handler:
+declare your inputs, declare your possible failure responses in the return
+type, and let the framework do the OpenAPI bookkeeping:
+
+```python
+from typing import Annotated
+
+from localpost.openapi import FromHeader, TooManyRequests, op_filter
+
+
+@op_filter
+def rate_limit(
+    x_client: Annotated[str, FromHeader("X-Client-Id")],
+) -> None | TooManyRequests[str]:
+    if quota_exhausted(x_client):
+        return TooManyRequests("Slow down")
+    return None
+
+
+@app.get("/expensive", filters=[rate_limit])
+def expensive() -> str: ...
+```
+
+Without writing any spec code, every operation that uses this filter gets:
+- the `X-Client-Id` header in its `parameters`,
+- `429 Too Many Requests` in its `responses` (with the body schema for `str`).
+
+The filter's return type union *is* the OpenAPI contract. Filters must
+return `None` or an `OpResult`; anything else raises `TypeError` at
+request time.
+
 ### Server-Sent Events (SSE)
 
 Return a generator (or any iterator) and the operation auto-promotes to an
