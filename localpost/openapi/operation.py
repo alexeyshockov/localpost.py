@@ -22,13 +22,12 @@ from http import HTTPMethod
 from types import UnionType
 from typing import Annotated, Any, Self, Union, get_args, get_origin, get_type_hints
 
-import msgspec
-
 from localpost.http import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
+from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.filter import OpFilter
 from localpost.openapi.resolvers import (
     ArgResolver,
@@ -39,7 +38,7 @@ from localpost.openapi.resolvers import (
     is_body_type,
 )
 from localpost.openapi.results import NoContent, NotFound, Ok, OpResult
-from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
+from localpost.openapi.schemas import SchemaRegistry
 from localpost.openapi.sse import EventStream, iter_events
 
 __all__ = ["Operation", "ResponseShape", "build_arg_resolvers", "extract_response_shapes"]
@@ -85,6 +84,10 @@ class Operation:
     operation_id: str
     description: str
 
+    adapters: AdapterRegistry
+    """Type adapters used at request time for body decode and response
+    encode. Threaded down from :class:`HttpApp`."""
+
     @classmethod
     def create(
         cls,
@@ -94,11 +97,15 @@ class Operation:
         /,
         *,
         filters: tuple[OpFilter, ...] = (),
+        adapters: AdapterRegistry | None = None,
     ) -> Self:
         template = URITemplate.parse(path)
         path_var_names = set(template.variable_names)
+        registry = adapters or default_registry()
 
-        sig, arg_resolvers, arg_factories = build_arg_resolvers(fn, path_var_names=path_var_names)
+        sig, arg_resolvers, arg_factories = build_arg_resolvers(
+            fn, path_var_names=path_var_names, adapters=registry
+        )
 
         # Validate path bindings: every {var} in the template must be
         # claimed by a parameter (whether implicitly via name match or
@@ -142,6 +149,7 @@ class Operation:
             summary=summary,
             operation_id=operation_id,
             description=description,
+            adapters=registry,
         )
 
     # ----- runtime -----
@@ -163,17 +171,18 @@ class Operation:
         return pre_body
 
     def _run(self, ctx: HTTPReqCtx) -> None:
+        registry = self.adapters
         for f in self.filters:
             short_circuit = f(ctx)
             if short_circuit is not None:
-                response, body = _build_http_response(short_circuit)
+                response, body = _build_http_response(short_circuit, registry)
                 ctx.complete(response, body)
                 return
         kwargs: dict[str, object] = {}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)
             if isinstance(value, OpResult):
-                response, body = _build_http_response(value)
+                response, body = _build_http_response(value, registry)
                 ctx.complete(response, body)
                 return
             kwargs[name] = value
@@ -182,7 +191,7 @@ class Operation:
             ctx.complete(result, b"")
             return
         if _is_sse_payload(result):
-            _stream_sse(ctx, result)
+            _stream_sse(ctx, result, registry)
             return
         if isinstance(result, OpResult):
             op_result: OpResult = result
@@ -191,7 +200,7 @@ class Operation:
             op_result = NotFound(None)
         else:
             op_result = Ok(result)
-        response, body = _build_http_response(op_result)
+        response, body = _build_http_response(op_result, registry)
         ctx.complete(response, body)
 
     # ----- spec build -----
@@ -224,6 +233,7 @@ def build_arg_resolvers(
     fn: Callable[..., Any],
     *,
     path_var_names: set[str] | None = None,
+    adapters: AdapterRegistry | None = None,
 ) -> tuple[
     inspect.Signature,
     list[tuple[str, ArgResolver]],
@@ -235,8 +245,14 @@ def build_arg_resolvers(
     Path-template binding is *not* validated here — pass ``path_var_names``
     so :class:`FromPath` is auto-picked for matching parameter names; the
     caller is responsible for any "unbound var" error.
+
+    ``adapters`` flows into auto-picked / un-bound :class:`FromBody`
+    factories so body decoding hits the per-app type adapter registry. If
+    ``None``, falls back to :func:`default_registry` (used by
+    :func:`op_filter`, which is built outside any app).
     """
     path_vars = path_var_names or set()
+    registry = adapters or default_registry()
 
     # Resolve PEP 563 string annotations (``from __future__ import
     # annotations`` is in effect for most callers) into the real types
@@ -259,12 +275,17 @@ def build_arg_resolvers(
     for name, param in sig.parameters.items():
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             raise ValueError(f"handler {_qualname(fn)!r}: *args / **kwargs not supported")
-        factory = _pick_factory(name, param, path_vars)
+        factory = _pick_factory(name, param, path_vars, registry)
         if factory is None:
             # HTTPReqCtx pass-through.
             runtime.append((name, _resolve_ctx))
             factories.append((name, param, None))
         else:
+            # Inject the registry into FromBody so its closure binds the
+            # right adapter at build time. User-supplied factories are left
+            # alone — they're trusted to handle their own decoding.
+            if isinstance(factory, FromBody) and factory.adapters is None:
+                factory = replace(factory, adapters=registry)
             runtime.append((name, factory(param)))
             factories.append((name, param, factory))
     return sig, runtime, factories
@@ -328,6 +349,7 @@ def _pick_factory(
     name: str,
     param: inspect.Parameter,
     path_var_names: set[str],
+    adapters: AdapterRegistry,
 ) -> ArgResolverFactory | None:
     """Return the resolver factory for one parameter, or ``None`` for the
     ``HTTPReqCtx`` pass-through."""
@@ -347,7 +369,7 @@ def _pick_factory(
         return FromPath(name=name)
     if target is HTTPReqCtx:
         return None
-    if is_body_type(target):
+    if is_body_type(target, adapters):
         return FromBody()
     return FromQuery(name=name)
 
@@ -469,16 +491,15 @@ def _build_responses(shapes: tuple[ResponseShape, ...], registry: SchemaRegistry
 
 # --- Response building ---------------------------------------------------
 
-_JSON_CONTENT_TYPE = b"application/json"
 _TEXT_CONTENT_TYPE = b"text/plain; charset=utf-8"
 _OCTET_CONTENT_TYPE = b"application/octet-stream"
 
 
-def _encode_body(value: object) -> tuple[bytes, bytes]:
+def _encode_body(value: object, adapters: AdapterRegistry) -> tuple[bytes, bytes]:
     """Return ``(body_bytes, content_type)`` for ``value``.
 
-    Pass-through for ``bytes`` / ``str``; pydantic models go through
-    ``model_dump_json``; everything else through :func:`msgspec.json.encode`.
+    Pass-through for ``bytes`` / ``str``; structured values go through the
+    :class:`TypeAdapter` that claims ``type(value)``.
     """
     if value is None:
         return b"", b""
@@ -488,13 +509,12 @@ def _encode_body(value: object) -> tuple[bytes, bytes]:
         return bytes(value), _OCTET_CONTENT_TYPE
     if isinstance(value, str):
         return value.encode("utf-8"), _TEXT_CONTENT_TYPE
-    if is_pydantic_model(type(value)):
-        return getattr(value, "model_dump_json")().encode("utf-8"), _JSON_CONTENT_TYPE  # noqa: B009
-    return msgspec.json.encode(value), _JSON_CONTENT_TYPE
+    body, content_type = adapters.for_value(value).encode(value)
+    return body, content_type.encode("ascii")
 
 
-def _build_http_response(result: OpResult) -> tuple[_Response, bytes]:
-    body_bytes, default_ct = _encode_body(result.body)
+def _build_http_response(result: OpResult, adapters: AdapterRegistry) -> tuple[_Response, bytes]:
+    body_bytes, default_ct = _encode_body(result.body, adapters)
     headers: list[tuple[bytes, bytes]] = []
     headers_seen: set[bytes] = set()
     for name, value in _iter_headers(result.headers):
@@ -532,7 +552,7 @@ def _is_sse_payload(value: object) -> bool:
     return isinstance(value, (EventStream, Iterator))
 
 
-def _stream_sse(ctx: HTTPReqCtx, source: object) -> None:
+def _stream_sse(ctx: HTTPReqCtx, source: object, adapters: AdapterRegistry) -> None:
     """Run ``source`` as an SSE stream over ``ctx``.
 
     Sends the SSE response headers (chunked transfer encoding is implicit
@@ -554,7 +574,7 @@ def _stream_sse(ctx: HTTPReqCtx, source: object) -> None:
 
     ctx.start_response(_Response(status_code=200, headers=list(_SSE_RESPONSE_HEADERS)))
     try:
-        for chunk in iter_events(source):
+        for chunk in iter_events(source, adapters):
             if cancel_supported:
                 check_cancelled()
             ctx.send(chunk)

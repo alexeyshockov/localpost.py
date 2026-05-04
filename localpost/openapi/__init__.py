@@ -31,11 +31,13 @@ including return-type unions for response shapes::
 
     sys.exit(hosting.run_app(app.service(ServerConfig(port=8000))))
 
-Pydantic models are recognised automatically — install pydantic
-yourself; it isn't a runtime dependency of localpost.
+Pydantic models are recognised automatically when pydantic is installed.
+To plug in another schema library, supply a custom
+:class:`localpost.openapi.adapters.AdapterRegistry` via ``HttpApp(adapters=...)``.
 """
 
 from localpost.openapi import spec
+from localpost.openapi.adapters import AdapterRegistry, TypeAdapter, default_registry
 from localpost.openapi.app import HttpApp
 from localpost.openapi.auth import HttpBasicAuth, HttpBearerAuth
 from localpost.openapi.filter import OpFilter, op_filter
@@ -63,7 +65,7 @@ from localpost.openapi.results import (
     Unauthorized,
     UnprocessableEntity,
 )
-from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry, is_pydantic_model
+from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry
 from localpost.openapi.sse import Event, EventStream
 
 __all__ = [
@@ -101,7 +103,10 @@ __all__ = [
     # schema utilities
     "SchemaRegistry",
     "REF_TEMPLATE",
-    "is_pydantic_model",
+    # type adapters (pluggable schema libraries)
+    "TypeAdapter",
+    "AdapterRegistry",
+    "default_registry",
     # SSE
     "Event",
     "EventStream",

@@ -1,15 +1,18 @@
-"""Tests for the msgspec-backed JSON Schema registry."""
+"""Tests for the adapter-driven JSON Schema registry."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 import msgspec
 import pytest
 
-from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry, is_pydantic_model
+from localpost.openapi.adapters import AdapterRegistry, default_registry
+from localpost.openapi.adapters._msgspec import MsgspecAdapter
+from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry
 
 
 @dataclass
@@ -99,20 +102,23 @@ class TestComponentCacheInvalidation:
         assert "Author" in components
 
 
-class TestPydanticDetection:
-    def test_dataclass_is_not_pydantic(self):
-        assert is_pydantic_model(Book) is False
+class TestAdapterDispatch:
+    def test_dataclass_routes_to_msgspec(self):
+        registry = default_registry()
+        assert registry.for_type(Book).name == "msgspec"
 
-    def test_msgspec_struct_is_not_pydantic(self):
-        assert is_pydantic_model(Author) is False
+    def test_msgspec_struct_routes_to_msgspec(self):
+        registry = default_registry()
+        assert registry.for_type(Author).name == "msgspec"
 
-    def test_pydantic_model_detected(self):
+    def test_pydantic_model_routes_to_pydantic(self):
         BaseModel = pytest.importorskip("pydantic").BaseModel
 
         class Pet(BaseModel):
             name: str
 
-        assert is_pydantic_model(Pet) is True
+        registry = default_registry()
+        assert registry.for_type(Pet).name == "pydantic"
 
     def test_pydantic_schema_registered_in_components(self):
         BaseModel = pytest.importorskip("pydantic").BaseModel
@@ -128,3 +134,55 @@ class TestPydanticDetection:
         components = registry.components()
         assert "Pet" in components
         assert "name" in components["Pet"]["properties"]
+
+
+class TestCustomAdapter:
+    """Plug a fake adapter ahead of msgspec to confirm dispatch is extensible."""
+
+    class _Marker:
+        """Sentinel type the fake adapter claims."""
+
+    class _FakeAdapter:
+        name = "fake"
+        validation_errors: tuple[type[Exception], ...] = ()
+
+        def __init__(self) -> None:
+            self.schema_calls: list[Any] = []
+            self.components_calls: list[Sequence[Any]] = []
+
+        def claims(self, t: Any, /) -> bool:
+            return t is TestCustomAdapter._Marker
+
+        def is_body_type(self, t: Any, /) -> bool:
+            return self.claims(t)
+
+        def schema(self, t: Any, /, *, ref_template: str) -> dict[str, Any]:
+            self.schema_calls.append(t)
+            return {"$ref": ref_template.format(name="Marker")}
+
+        def components(
+            self, types: Sequence[Any], /, *, ref_template: str
+        ) -> dict[str, dict[str, Any]]:
+            self.components_calls.append(types)
+            return {"Marker": {"type": "object", "x-fake": True}}
+
+        def decode(self, body: bytes, t: Any, /, *, content_type: str) -> object:
+            raise NotImplementedError
+
+        def encode(self, value: object, /) -> tuple[bytes, str]:
+            return b'"fake"', "application/json"
+
+    def test_custom_adapter_wins_over_catch_all(self):
+        fake = self._FakeAdapter()
+        registry = AdapterRegistry([fake, MsgspecAdapter()])
+
+        schema_registry = SchemaRegistry(registry)
+        schema = schema_registry.schema_for(self._Marker)
+        assert schema == {"$ref": REF_TEMPLATE.format(name="Marker")}
+        assert fake.schema_calls == [self._Marker]
+
+        components = schema_registry.components()
+        assert components["Marker"] == {"type": "object", "x-fake": True}
+        # And the catch-all is still active for non-claimed types.
+        schema_registry.schema_for(Book)
+        assert "Book" in schema_registry.components()

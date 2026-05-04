@@ -23,8 +23,9 @@ import msgspec
 
 from localpost.http.router import RouteMatch
 from localpost.openapi import spec as openapi_spec
+from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.results import BadRequest, OpResult
-from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
+from localpost.openapi.schemas import SchemaRegistry
 
 if TYPE_CHECKING:
     from localpost.http import HTTPReqCtx
@@ -32,10 +33,10 @@ if TYPE_CHECKING:
 __all__ = [
     "ArgResolver",
     "ArgResolverFactory",
+    "FromBody",
+    "FromHeader",
     "FromPath",
     "FromQuery",
-    "FromHeader",
-    "FromBody",
     "is_body_type",
 ]
 
@@ -113,7 +114,9 @@ def _cast_str(value: str, target: Any) -> Any:
     """Coerce a single string value into ``target``.
 
     Falls back to :func:`msgspec.convert` with ``strict=False`` for the
-    long tail (UUID, datetime, Decimal, Enum, …).
+    long tail (UUID, datetime, Decimal, Enum, …). URL-borne parameters
+    are always JSON-shaped strings, so msgspec is the right caster
+    regardless of which adapter would otherwise own ``target``.
     """
     if target is str or target is Any or target is inspect.Parameter.empty:
         return value
@@ -137,21 +140,18 @@ def _list_element_type(t: Any) -> Any | None:
     return None
 
 
-def is_body_type(t: Any) -> bool:
+def is_body_type(t: Any, adapters: AdapterRegistry | None = None) -> bool:
     """True if ``t`` looks like something we should parse from the request body.
 
-    Recognises :class:`msgspec.Struct` subclasses, dataclasses, ``TypedDict``,
-    ``NamedTuple``, and pydantic models. Primitives stay as query params.
+    Delegates to the matching :class:`TypeAdapter`'s ``is_body_type``;
+    msgspec recognises :class:`msgspec.Struct`, dataclasses, ``TypedDict``,
+    ``NamedTuple``; pydantic recognises :class:`pydantic.BaseModel`.
+    Primitives stay as query params.
     """
     if not isinstance(t, type):
         return False
-    if issubclass(t, msgspec.Struct):
-        return True
-    if hasattr(t, "__dataclass_fields__"):
-        return True
-    if hasattr(t, "__annotations__") and hasattr(t, "_fields"):  # NamedTuple
-        return True
-    return is_pydantic_model(t)
+    registry = adapters or default_registry()
+    return registry.for_type(t).is_body_type(t)
 
 
 def _route_match(ctx: HTTPReqCtx) -> RouteMatch:
@@ -332,23 +332,46 @@ class FromHeader:
 class FromBody:
     """Resolve a parameter from the request body.
 
-    Defaults to JSON parsing via :func:`msgspec.json.decode`. Raw ``bytes``
-    / ``str`` annotations get the body verbatim. For pydantic models, uses
-    :meth:`BaseModel.model_validate_json`.
+    Decoding is delegated to the :class:`TypeAdapter` that claims the
+    parameter's type (msgspec for the catch-all, pydantic for
+    :class:`pydantic.BaseModel` subclasses, …). Raw ``bytes`` / ``str``
+    annotations get the body verbatim.
+
+    A custom ``converter`` (``(bytes, type) -> object``) bypasses the
+    adapter dispatch entirely.
     """
 
     content_type: str = "application/json"
     description: str = ""
     converter: Callable[[bytes, Any], object] | None = None
+    adapters: AdapterRegistry | None = None
 
     def __call__(self, param: inspect.Parameter, /) -> ArgResolver:
         target = _unwrap_annotated(param.annotation)
-        converter = self.converter or _default_body_converter(target)
+        registry = self.adapters or default_registry()
+        validation_errors = registry.validation_errors
+        content_type = self.content_type
+        converter: Callable[[bytes, Any], object]
+        if self.converter is not None:
+            converter = self.converter
+        elif target is bytes:
+            converter = _bytes_passthrough
+        elif target is str:
+            converter = _str_decode
+        else:
+            adapter = registry.for_type(target)
+
+            def _adapter_decode(body: bytes, _t: Any) -> object:
+                if not body:
+                    raise ValueError("empty request body")
+                return adapter.decode(body, target, content_type=content_type)
+
+            converter = _adapter_decode
 
         def resolve(ctx: HTTPReqCtx) -> object | OpResult:
             try:
                 return converter(ctx.body, target)
-            except msgspec.ValidationError as exc:
+            except validation_errors as exc:
                 return BadRequest(f"Invalid request body: {exc}")
             except (ValueError, TypeError) as exc:
                 return BadRequest(f"Invalid request body: {exc}")
@@ -372,31 +395,9 @@ class FromBody:
         return replace(op, request_body=request_body)
 
 
-def _default_body_converter(target: Any) -> Callable[[bytes, Any], object]:
-    if target is bytes:
-        return _bytes_passthrough
-    if target is str:
-        return _str_decode
-    if is_pydantic_model(target):
-        return _pydantic_decode
-    return _msgspec_decode
-
-
 def _bytes_passthrough(body: bytes, _target: Any) -> object:
     return body
 
 
 def _str_decode(body: bytes, _target: Any) -> object:
     return body.decode("utf-8")
-
-
-def _msgspec_decode(body: bytes, target: Any) -> object:
-    if not body:
-        raise ValueError("empty request body")
-    return msgspec.json.decode(body, type=target)
-
-
-def _pydantic_decode(body: bytes, target: Any) -> object:
-    if not body:
-        raise ValueError("empty request body")
-    return getattr(target, "model_validate_json")(body)  # noqa: B009

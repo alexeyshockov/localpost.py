@@ -39,6 +39,7 @@ from localpost.http.config import ServerConfig
 from localpost.http.router import Routes
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi._docs import redoc_html, scalar_html, swagger_html
+from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.filter import OpFilter
 from localpost.openapi.operation import Operation
 from localpost.openapi.schemas import SchemaRegistry
@@ -70,6 +71,11 @@ class HttpApp:
             under it: ``{docs_path}`` (Swagger), ``{docs_path}/redoc``,
             ``{docs_path}/scalar``. ``None`` to disable all UIs.
         docs_ui: Which doc UIs to mount. Default ``"all"``.
+        adapters: Type adapters used for JSON Schema generation, request
+            body decoding, and response encoding. Defaults to
+            :func:`localpost.openapi.adapters.default_registry` (msgspec
+            as catch-all, plus pydantic if installed). Pass a custom
+            :class:`AdapterRegistry` to plug in attrs / protobuf / etc.
     """
 
     def __init__(
@@ -82,6 +88,7 @@ class HttpApp:
         openapi_path: str | None = "/openapi.json",
         docs_path: str | None = "/docs",
         docs_ui: DocsUI = "all",
+        adapters: AdapterRegistry | None = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -94,6 +101,7 @@ class HttpApp:
         self._openapi_path = openapi_path
         self._docs_path = docs_path
         self._docs_ui = docs_ui
+        self._adapters = adapters or default_registry()
         self._operations: list[Operation] = []
         self._lock = threading.Lock()
         # Cached spec; invalidated whenever an operation is added.
@@ -122,7 +130,7 @@ class HttpApp:
         combined = (*self._filters, *op_filters)
 
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            op = Operation.create(method, path, fn, filters=combined)
+            op = Operation.create(method, path, fn, filters=combined, adapters=self._adapters)
             with self._lock:
                 self._operations.append(op)
                 self._cached_spec = None
@@ -144,7 +152,7 @@ class HttpApp:
             cached = self._cached_spec
             if cached is not None:
                 return cached
-            registry = SchemaRegistry()
+            registry = SchemaRegistry(self._adapters)
             doc = openapi_spec.OpenAPI(info=self._info)
             # Every filter (app-level and per-op) gets its contribute_root
             # called exactly once. We dedupe by identity so the same filter
