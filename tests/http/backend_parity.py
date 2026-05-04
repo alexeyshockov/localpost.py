@@ -238,3 +238,48 @@ def test_unframed_head_response_has_no_body_or_transfer_encoding(serve_backend_i
     assert b"transfer-encoding:" not in headers.lower()
     assert body == b""
     assert extra == b""
+
+
+def test_user_supplied_chunked_te_frames_chunks(serve_backend_in_thread):
+    """Regression: a handler that explicitly sets ``Transfer-Encoding: chunked``
+    must still get its ``send(...)`` chunks framed on the wire. Earlier the
+    httptools backend only set its internal ``_chunked`` flag inside the
+    auto-frame branch, so user-supplied TE bypassed framing and the wire
+    was malformed.
+    """
+    import socket  # noqa: PLC0415
+
+    def handler(ctx: HTTPReqCtx) -> None:
+        ctx.start_response(
+            Response(
+                status_code=200,
+                headers=[
+                    (b"content-type", b"text/plain"),
+                    (b"transfer-encoding", b"chunked"),
+                ],
+            )
+        )
+        ctx.send(b"chunk1")
+        ctx.send(b"chunk2")
+        ctx.finish_response()
+
+    with serve_backend_in_thread(handler) as port, socket.create_connection(
+        ("127.0.0.1", port), timeout=5
+    ) as s:
+        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        s.settimeout(5)
+        buf = b""
+        while True:
+            chunk = s.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+
+    head, _, body = buf.partition(b"\r\n\r\n")
+    assert b"transfer-encoding: chunked" in head.lower()
+    # Each ``send`` produces one chunk on the wire, framed as
+    # ``<hex-size>\r\n<bytes>\r\n``. Verify both are present, then the
+    # zero-length terminator.
+    assert b"6\r\nchunk1\r\n" in body
+    assert b"6\r\nchunk2\r\n" in body
+    assert body.endswith(b"0\r\n\r\n")

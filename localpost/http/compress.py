@@ -344,13 +344,8 @@ def _streaming_rewrite_headers(
 ) -> list[tuple[bytes, bytes]]:
     """Add ``Content-Encoding``, merge ``Vary``. ``Content-Length`` is
     dropped (eligibility already rejected the case where it was set).
-
-    We deliberately **don't** add ``Transfer-Encoding: chunked`` — both
-    backends auto-add it for HTTP/1.1 peers when no framing is present
-    (h11: ``_clean_up_response_headers_for_sending``; httptools: the
-    ``not has_framing`` branch in ``start_response``). Adding it
-    ourselves prevents httptools from setting its internal ``_chunked``
-    flag, which then writes raw bytes instead of chunk-framed ones.
+    ``Transfer-Encoding`` is left to the backend — both auto-add
+    ``chunked`` for HTTP/1.1 peers when no framing is present.
     """
     enc_value = encoding.encode("ascii")
     out: list[tuple[bytes, bytes]] = []

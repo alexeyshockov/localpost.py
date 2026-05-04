@@ -89,20 +89,34 @@ def _serialize_response(r: Response | InformationalResponse) -> bytes:
     return bytes(out)
 
 
-def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool, bool]:
-    """One-pass scan: ``(has_connection_close, has_content_length_or_te)``.
+def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool, bool, bool]:
+    """One-pass scan: ``(has_connection_close, has_framing, has_chunked)``.
 
-    Combined to avoid two walks per response.
+    - ``has_framing`` — either ``Content-Length`` or ``Transfer-Encoding``
+      is set, i.e. the auto-frame branch in :meth:`start_response` should
+      be skipped.
+    - ``has_chunked`` — ``Transfer-Encoding`` carries a ``chunked`` token
+      anywhere in its value (per RFC 7230 §3.3.1, ``chunked`` must be the
+      final encoding). When true, ``_chunked`` must be set so subsequent
+      ``send`` calls actually wrap chunks with ``<size>\\r\\n<data>\\r\\n``
+      framing — otherwise the wire is malformed.
+
+    Combined to avoid multiple walks per response.
     """
     has_close = False
     has_framing = False
+    has_chunked = False
     for name, value in headers:
         n = name.lower()
         if n == b"connection" and b"close" in value.lower():
             has_close = True
-        elif n in {b"content-length", b"transfer-encoding"}:
+        elif n == b"content-length":
             has_framing = True
-    return has_close, has_framing
+        elif n == b"transfer-encoding":
+            has_framing = True
+            if b"chunked" in value.lower():
+                has_chunked = True
+    return has_close, has_framing, has_chunked
 
 
 def _response_allows_body(request_method: bytes, status_code: int) -> bool:
@@ -652,19 +666,27 @@ class _HTTPReqCtx:
             self.response_status = response.status_code
             self.conn._response_started = True
             self._body_allowed = _response_allows_body(self.request.method, response.status_code)
-            has_close, has_framing = _scan_response_headers(response.headers)
+            has_close, has_framing, has_chunked = _scan_response_headers(response.headers)
             if has_close or not self._keep_alive:
                 self.conn._close_after_response = True
-            if not has_framing and self._body_allowed:
-                # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
-                # Without framing, an HTTP/1.1 client would wait for the
-                # connection to close before considering the response done.
-                response = Response(
-                    status_code=response.status_code,
-                    headers=[*response.headers, (b"transfer-encoding", b"chunked")],
-                    reason=response.reason,
-                )
-                self._chunked = True
+            if self._body_allowed:
+                if not has_framing:
+                    # Auto-frame: no Content-Length / Transfer-Encoding → chunked.
+                    # Without framing, an HTTP/1.1 client would wait for the
+                    # connection to close before considering the response done.
+                    response = Response(
+                        status_code=response.status_code,
+                        headers=[*response.headers, (b"transfer-encoding", b"chunked")],
+                        reason=response.reason,
+                    )
+                    self._chunked = True
+                elif has_chunked:
+                    # User / middleware supplied ``Transfer-Encoding: chunked``
+                    # explicitly. Skip auto-add but still flip ``_chunked`` so
+                    # ``send`` frames each chunk — otherwise the header would
+                    # advertise chunked while the body went out raw, corrupting
+                    # the wire.
+                    self._chunked = True
             self._pending_header_bytes = _serialize_response(response)
         else:
             # Informational responses (e.g., 100 Continue) flush immediately.
