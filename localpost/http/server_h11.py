@@ -21,7 +21,7 @@ import time
 from collections.abc import Buffer, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, cast, final
+from typing import Any, BinaryIO, cast, final
 
 import h11
 
@@ -67,6 +67,25 @@ def _content_length(headers) -> int | None:
 
 def _has_response_framing(headers) -> bool:
     return any(name.lower() in {b"content-length", b"transfer-encoding"} for name, _ in headers)
+
+
+@final
+@dataclass(frozen=True, slots=True, eq=False)
+class _SendfilePlaceholder:
+    """Stand-in for body bytes that will be written by ``socket.sendfile``.
+
+    h11 explicitly supports this pattern: from ``h11.Data.data``'s docstring
+    — *"any object that your socket writing code knows what to do with,
+    and for which calling len() returns the number of bytes that will be
+    written"*. Feeding it through ``send_with_data_passthrough`` advances
+    h11's ``ContentLengthWriter`` counter without forcing an allocation
+    of N zero bytes for a multi-MB / GB file.
+    """
+
+    n: int
+
+    def __len__(self) -> int:
+        return self.n
 
 
 @final
@@ -359,6 +378,39 @@ class _HTTPReqCtx:
         self.start_response(response)
         if body is not None:
             self.send(body)
+        self.finish_response()
+
+    def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
+        # ``Content-Length`` framing is required — otherwise h11's writer
+        # state can't reconcile what we wrote out-of-band. The static handler
+        # always sets it; bail loudly if a caller forgets.
+        if _content_length(response.headers) != count:
+            raise ValueError("sendfile requires Content-Length matching ``count``")
+        self.start_response(response)
+        # Advance h11's ContentLengthWriter counter via a placeholder Data
+        # event — h11 only calls ``len(data)`` and ``write(data)``. The
+        # placeholder lands in the returned data list (which we ignore);
+        # the real bytes go on the wire via ``socket.sendfile`` below.
+        # h11 supports placeholders in ``Data`` events for sendfile — see
+        # ``h11.Data.data`` docstring. Type-checkers see ``data: bytes``.
+        placeholder_event = h11.Data(data=_SendfilePlaceholder(count))  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
+        self.conn.parser.send_with_data_passthrough(placeholder_event)
+        if self._pending_header_bytes is not None:
+            self._sock_sendall(self._pending_header_bytes)
+            self._pending_header_bytes = None
+        sock = self.conn.sock
+        sock.settimeout(self.selector.config.rw_timeout)
+        try:
+            sock.sendfile(file, offset=offset, count=count)
+        finally:
+            if self.conn.tracked:
+                try:
+                    sock.settimeout(0)
+                except OSError:
+                    pass
+        # Consume EOM + drain request side + give back via the existing path.
+        # Counter is at 0, so EOM produces no extra wire bytes for
+        # Content-Length framing.
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:

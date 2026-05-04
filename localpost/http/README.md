@@ -189,7 +189,7 @@ thread + N worker selectors) drop in without touching the request hot path.
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
 | `start_http_server(cfg, handler)` | Context manager yielding a `Server` bound to ``handler`` |
-| `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`) |
+| `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`, `sendfile`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
 
 ### Selector / accept-side topology
@@ -226,6 +226,75 @@ thread + N worker selectors) drop in without touching the request hot path.
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
 | `wrap_wsgi(app)`          | Turn a WSGI app into a `RequestHandler`    |
+
+### `localpost.http.static`
+
+Static file serving via `socket.sendfile()` — zero-copy from the page
+cache to the socket. Designed for **CDN-fronted deployments**: pair with
+proper `Cache-Control` headers and origin sees roughly one hit per file
+per edge per cache lifetime, which is why we skip on-the-fly compression
+(the CDN handles `gzip` / `br` at the edge).
+
+| Symbol                                                                              | Notes                                                                       |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `static_handler(root, *, prefix=b"/", cache_control=None, index="index.html")`      | Build a `RequestHandler` that serves files under ``root``.                  |
+
+Behavior:
+
+- **Methods**: `GET` and `HEAD`. Anything else returns 405 + `Allow: GET, HEAD`.
+- **Resolution**: percent-decoded URL path (with ``prefix`` stripped) is
+  joined under ``root``, resolved, and checked with `Path.is_relative_to`.
+  ``..`` segments are rejected before resolution.
+- **Conditional GET**: strong `ETag` (size + mtime in nanoseconds) plus
+  `Last-Modified`. `If-None-Match` (with weak comparison) and
+  `If-Modified-Since` short-circuit to 304 inline on the selector — no
+  worker hop, no file open.
+- **Range**: single byte-range only (`bytes=N-M`, `bytes=N-`, `bytes=-K`).
+  Multi-range / unparseable falls back to 200 (RFC 7233 §3.1 compliant).
+  Out-of-bounds → 416 with `Content-Range: bytes */<size>`.
+- **Body**: 200 / 206 GET returns a `BodyHandler` that calls
+  `ctx.sendfile(...)` — wrap in `thread_pool_handler` to dispatch the
+  syscall to a worker. HEAD success / 304 / 416 / 404 / 405 complete
+  inline on the selector.
+
+#### Recommended composition
+
+A static handler in its own pool, separate from the API pool, so a few
+slow downloads can't pin all the API workers:
+
+```python
+from localpost.http import (
+    Routes, ServerConfig, http_server, static_handler, thread_pool_handler,
+)
+
+routes = Routes()
+# ... register API routes ...
+
+api    = thread_pool_handler(routes.build().as_handler(), max_concurrency=8)
+static = thread_pool_handler(
+    static_handler("/var/www", prefix=b"/static/",
+                   cache_control="public, max-age=31536000, immutable"),
+    max_concurrency=128, backlog=64,
+)
+
+async with api as api_h, static as static_h:
+    def root(ctx):
+        return (static_h if ctx.request.path.startswith(b"/static/") else api_h)(ctx)
+    async with http_server(ServerConfig(), root):
+        ...
+```
+
+The API pool is small and CPU-shaped; the static pool is wide and I/O-shaped.
+See [`examples/http/static_files.py`](../../examples/http/static_files.py).
+
+#### `HTTPReqCtx.sendfile`
+
+The static handler is the typical caller, but `ctx.sendfile(response,
+file, offset, count)` is part of the public `HTTPReqCtx` Protocol and
+can be used directly for any zero-copy body. Requires
+`Content-Length: <count>` on the response (chunked is rejected); both
+backends keep their parser state consistent with what the kernel writes
+out-of-band.
 
 ### `localpost.http.flask`
 

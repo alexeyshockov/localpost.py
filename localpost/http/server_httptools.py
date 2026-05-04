@@ -29,7 +29,7 @@ import time
 from collections.abc import Buffer, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, final
+from typing import Any, BinaryIO, final
 
 import httptools
 
@@ -540,6 +540,40 @@ class _HTTPReqCtx:
         self.start_response(response)
         if body is not None:
             self.send(body)
+        self.finish_response()
+
+    def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
+        # ``Content-Length`` framing is required: chunked needs per-chunk
+        # framing bytes that ``socket.sendfile`` can't produce, and a
+        # mismatched Content-Length corrupts the wire stream.
+        declared: int | None = None
+        for name, value in response.headers:
+            n = name.lower()
+            if n == b"transfer-encoding":
+                raise ValueError("sendfile requires Content-Length framing (no Transfer-Encoding)")
+            if n == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError as e:
+                    raise ValueError("Content-Length is not a valid integer") from e
+        if declared != count:
+            raise ValueError("sendfile requires Content-Length matching ``count``")
+        self.start_response(response)
+        if self._pending_header_bytes is not None:
+            _send_all(self.conn, self._pending_header_bytes)
+            self._pending_header_bytes = None
+        sock = self.conn.sock
+        sock.settimeout(self.selector.config.rw_timeout)
+        try:
+            sock.sendfile(file, offset=offset, count=count)
+        finally:
+            if self.conn.tracked:
+                try:
+                    sock.settimeout(0)
+                except OSError:
+                    pass
+        # No EOM / chunked terminator with Content-Length framing — just
+        # advance the conn lifecycle (give back / close-after-response).
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:

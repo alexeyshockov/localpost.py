@@ -25,6 +25,7 @@ from localpost.http.router import (
     URITemplate,
     route_match,
 )
+from localpost.http.static import static_handler
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = [
@@ -64,6 +65,8 @@ __all__ = [
     "wsgi_server",
     "thread_pool_handler",
     "streaming_pool_handler",
+    # static files
+    "static_handler",
     # cancellation
     "check_cancelled",
     "RequestCancelled",

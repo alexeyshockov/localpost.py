@@ -35,7 +35,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, final
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, final
 
 from localpost.http._types import InformationalResponse, Request, Response
 from localpost.http.config import LOGGER_NAME, ServerConfig
@@ -206,6 +206,18 @@ class HTTPReqCtx(Protocol):
     def send(self, chunk: Buffer, /) -> None: ...
     def finish_response(self) -> None: ...
     def complete(self, response: Response, body: bytes | None = None) -> None: ...
+    def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
+        """Emit ``response`` and stream ``count`` bytes from ``file`` starting
+        at ``offset`` via :func:`socket.sendfile` (zero-copy). Terminal — like
+        :meth:`complete`, no further response calls are valid afterwards.
+
+        Requires the response to declare ``Content-Length: <count>``;
+        the backend uses that framing to keep its parser state consistent
+        with what the kernel actually wrote. The socket is set blocking
+        (with ``rw_timeout``) for the duration of the syscall — restored
+        on selector-thread give-back via :meth:`HTTPReqCtx.finish_response`'s
+        ``_maybe_give_back`` path.
+        """
 
 
 BodyHandler = Callable[[HTTPReqCtx], None]
