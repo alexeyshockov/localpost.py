@@ -8,7 +8,7 @@ from typing import Annotated
 import msgspec
 import pytest
 
-from localpost.openapi import FromHeader, FromPath, FromQuery, HttpApp
+from localpost.openapi import FromHeader, FromPath, FromQuery, HttpApp, NotFound
 from tests.openapi.app import make_ctx, run_op
 
 
@@ -92,6 +92,73 @@ class TestOptionalHeader:
 
 
 # --- operationId derivation ----------------------------------------------
+
+
+class TestOptionalReturnIsNotFound:
+    """``T | None`` return → implicit 404 NotFound when ``None`` is returned."""
+
+    def test_none_return_yields_404(self):
+        app = HttpApp()
+
+        @app.get("/items/{item_id}")
+        def get_item(item_id: str) -> str | None:
+            return None if item_id == "missing" else item_id
+
+        op = app.operations[0]
+        status, body, _ = run_op(op, make_ctx(path="/items/missing", path_args={"item_id": "missing"}))
+        assert status == 404
+        assert body == b""
+
+    def test_value_return_still_yields_200(self):
+        app = HttpApp()
+
+        @app.get("/items/{item_id}")
+        def get_item(item_id: str) -> str | None:
+            return item_id
+
+        op = app.operations[0]
+        status, body, _ = run_op(op, make_ctx(path="/items/x", path_args={"item_id": "x"}))
+        assert status == 200
+        assert body == b"x"
+
+    def test_doc_includes_both_200_and_404(self):
+        app = HttpApp()
+
+        @app.get("/items/{item_id}")
+        def get_item(item_id: str) -> str | None:
+            return item_id
+
+        responses = app.openapi_doc.to_dict()["paths"]["/items/{item_id}"]["get"]["responses"]
+        assert set(responses) == {"200", "404"}
+        assert responses["404"] == {"description": "Not Found"}
+
+    def test_explicit_not_found_takes_precedence(self):
+        # If the user already declared NotFound[X], the implicit None→404
+        # shouldn't overwrite it (and shouldn't add a body-less duplicate).
+        app = HttpApp()
+
+        @app.get("/items/{item_id}")
+        def get_item(item_id: str) -> str | NotFound[str] | None:
+            return None if item_id == "missing" else item_id
+
+        responses = app.openapi_doc.to_dict()["paths"]["/items/{item_id}"]["get"]["responses"]
+        # Only one 404 — the explicit NotFound[str] wins (has a JSON body schema).
+        assert "404" in responses
+        assert "content" in responses["404"]
+        assert responses["404"]["content"]["application/json"]["schema"] == {"type": "string"}
+
+    def test_bare_none_return_is_not_404(self):
+        # ``-> None`` (no Union) should still mean "200 / empty success",
+        # not 404.
+        app = HttpApp()
+
+        @app.get("/ping")
+        def ping() -> None:
+            return None
+
+        op = app.operations[0]
+        status, _, _ = run_op(op, make_ctx(path="/ping"))
+        assert status == 200
 
 
 class TestOperationId:

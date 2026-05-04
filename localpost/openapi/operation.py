@@ -38,7 +38,7 @@ from localpost.openapi.resolvers import (
     FromQuery,
     is_body_type,
 )
-from localpost.openapi.results import NoContent, Ok, OpResult
+from localpost.openapi.results import NoContent, NotFound, Ok, OpResult
 from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
 from localpost.openapi.sse import EventStream, iter_events
 
@@ -77,6 +77,10 @@ class Operation:
     (injected by :class:`HttpApp`) and per-operation filters."""
 
     return_shapes: tuple[_ResponseShape, ...]
+    null_is_not_found: bool
+    """True when the return annotation was ``T | None`` and we therefore
+    map a runtime ``None`` to a 404 instead of a 200 with empty body."""
+
     summary: str
     operation_id: str
     description: str
@@ -142,7 +146,8 @@ class Operation:
                 f" {sorted(unbound)!r} that no parameter resolves"
             )
 
-        return_shapes = tuple(_extract_response_shapes(sig.return_annotation))
+        shapes_list, null_is_not_found = _extract_response_shapes(sig.return_annotation)
+        return_shapes = tuple(shapes_list)
 
         doc = inspect.getdoc(fn) or ""
         summary = doc.split("\n", 1)[0] if doc else f"{method.value} {path}"
@@ -158,6 +163,7 @@ class Operation:
             arg_resolver_factories=tuple(arg_factories),
             filters=filters,
             return_shapes=return_shapes,
+            null_is_not_found=null_is_not_found,
             summary=summary,
             operation_id=operation_id,
             description=description,
@@ -205,6 +211,9 @@ class Operation:
             return
         if isinstance(result, OpResult):
             op_result: OpResult = result
+        elif result is None and self.null_is_not_found:
+            # ``T | None`` returning None → implicit 404.
+            op_result = NotFound(None)
         else:
             op_result = Ok(result)
         response, body = _build_http_response(op_result)
@@ -330,9 +339,10 @@ def _is_resolver_factory(arg: Any) -> ArgResolverFactory | None:
     return None
 
 
-def _extract_response_shapes(return_annotation: Any) -> list[_ResponseShape]:
+def _extract_response_shapes(return_annotation: Any) -> tuple[list[_ResponseShape], bool]:
+    """Return ``(shapes, null_is_not_found)`` from a function's return annotation."""
     if return_annotation is inspect.Signature.empty:
-        return [_ResponseShape(200, "Successful response", None)]
+        return [_ResponseShape(200, "Successful response", None)], False
 
     origin = get_origin(return_annotation)
     members = list(get_args(return_annotation)) if origin is Union or origin is UnionType else [return_annotation]
@@ -340,8 +350,10 @@ def _extract_response_shapes(return_annotation: Any) -> list[_ResponseShape]:
     shapes: list[_ResponseShape] = []
     seen_codes: set[int] = set()
     has_success = False
+    has_none = False
     for member in members:
         if member is type(None):
+            has_none = True
             continue
         member_origin = get_origin(member)
         cls = member_origin if member_origin is not None else member
@@ -377,9 +389,18 @@ def _extract_response_shapes(return_annotation: Any) -> list[_ResponseShape]:
         seen_codes.add(code)
         shapes.append(_ResponseShape(code, description, body_type, content_type))
 
+    # ``T | None`` is the implicit "T or 404 NotFound" — only when paired
+    # with at least one non-None success type (a bare ``-> None`` annotation
+    # still means "204 / empty success", not 404), and only when the user
+    # didn't already declare 404 explicitly via ``NotFound[X]``.
+    null_is_not_found = has_none and has_success and 404 not in seen_codes
+    if null_is_not_found:
+        shapes.append(_ResponseShape(404, "Not Found", None))
+        seen_codes.add(404)
+
     if not has_success and not shapes:
         shapes.append(_ResponseShape(200, "Successful response", None))
-    return shapes
+    return shapes, null_is_not_found
 
 
 # Sentinel: unique object so callers can distinguish "not an SSE return"

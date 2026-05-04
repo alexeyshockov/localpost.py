@@ -67,11 +67,10 @@ def hello(name: str) -> str | BadRequest[str]:
 
 
 @app.get("/books/{book_id}")
-def get_book(book_id: str) -> Book | NotFound[str]:
+def get_book(book_id: str) -> Book | None:
     """Look up a book by ID."""
     book = _LIBRARY.get(book_id)
-    if book is None:
-        return NotFound(f"Book not found: {book_id}")
+    # Optional[Book] is treated like "a book or NotFound"
     return book
 
 
