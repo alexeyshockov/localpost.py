@@ -57,7 +57,7 @@ scheduler = [
 ]
 http = [
     "h11 ~=0.16",
-    "click ~=8.0",
+#    "click ~=8.0",  # HTTP Server CLI
 ]
 http-fast = [
     # C-based HTTP/1.1 parser (llhttp)

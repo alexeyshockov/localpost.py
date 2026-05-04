@@ -23,14 +23,12 @@ class Event[T](msgspec.Struct, eq=False, omit_defaults=True):
     """One SSE event.
 
     Args:
-        data: Payload. Encoded as JSON (msgspec) unless it's already a
-            ``str``.
+        data: Payload. Encoded as JSON (msgspec) unless it's already a ``str``.
         event: Optional event name (``event:`` field).
         id: Optional last event id (``id:`` field).
         retry: Optional reconnection delay in milliseconds (``retry:`` field).
-        comment: Optional comment line. Useful for keep-alives — the spec
-            says comment lines (``: ...``) are ignored by clients but keep
-            the connection alive.
+        comment: Optional comment line. Useful for keep-alives — the spec says comment lines (``: ...``) are ignored
+            by clients but keep the connection alive.
     """
 
     data: T

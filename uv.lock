@@ -699,7 +699,6 @@ cron = [
     { name = "croniter" },
 ]
 http = [
-    { name = "click" },
     { name = "h11" },
 ]
 http-fast = [
@@ -770,7 +769,6 @@ tests-unit = [
 [package.metadata]
 requires-dist = [
     { name = "anyio", specifier = "~=4.12" },
-    { name = "click", marker = "extra == 'http'", specifier = "~=8.0" },
     { name = "croniter", marker = "extra == 'cron'", specifier = ">=2.0,<4.0" },
     { name = "h11", marker = "extra == 'http'", specifier = "~=0.16" },
     { name = "httptools", marker = "extra == 'http-fast'", git = "https://github.com/MagicStack/httptools.git" },
