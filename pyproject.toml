@@ -64,6 +64,10 @@ http-fast = [
     # NOTE! Under free-threaded CPython, 0.7.1 and below auto-re-enables the GIL on import.
     "httptools @ git+https://github.com/MagicStack/httptools.git",
 ]
+http-compress = [
+    # Brotli compression for compress_handler. Gzip is stdlib and always available.
+    "brotli ~=1.1",
+]
 openapi = [
 #    "localpost[http]",
     "msgspec ~=0.19",

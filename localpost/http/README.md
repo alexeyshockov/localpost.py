@@ -296,6 +296,71 @@ can be used directly for any zero-copy body. Requires
 backends keep their parser state consistent with what the kernel writes
 out-of-band.
 
+### `localpost.http.compress`
+
+Response compression middleware for the **dynamic** path —
+`gzip` (stdlib, always available) + `br` (optional via `[http-compress]`).
+Pair with a JSON / HTML / XML API; **not** intended for static files
+(compression and zero-copy `sendfile` are at odds — see
+`plans/compression-middleware.md`).
+
+Behind a CDN you usually don't need this: the CDN compresses at the
+edge from an uncompressed origin. `compress_handler` is for deployments
+*not* behind a CDN, or when the CDN doesn't compress (rare).
+
+| Symbol                                                                                          | Notes                                                                       |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `compress_handler(inner, *, algorithms=("br","gzip"), min_size=1024, compressible_types=...)`   | Wrap a `RequestHandler` so eligible `complete()` responses are compressed. |
+| `DEFAULT_COMPRESSIBLE_TYPES`                                                                    | Frozenset allowlist (text/*, JSON, XML, JS, SVG, YAML, …) used by default.  |
+
+#### Decision matrix
+
+The middleware skips compression when any of these hold (response sent
+verbatim):
+
+- `Accept-Encoding` doesn't list any configured `algorithms` with q>0
+- Method is `HEAD` (no body to compress)
+- `body is None` or `len(body) < min_size`
+- Status is `1xx` / `204` / `304` (no body) or `206` (range — compressing breaks byte semantics)
+- Response already has `Content-Encoding` (other than `identity`)
+- Response has `Cache-Control: no-transform` (RFC 9111)
+- `Content-Type` main-type is not in `compressible_types`
+
+When eligible: body is compressed, `Content-Length` is replaced,
+`Content-Encoding` is added, and `Accept-Encoding` is merged into
+`Vary` (existing `Vary: Cookie` becomes `Vary: Cookie, Accept-Encoding`;
+`Vary: *` is left alone).
+
+#### v1 limitations
+
+- **Only `complete()` is intercepted.** Streaming responses
+  (`start_response` / `send` / `finish_response`) and `sendfile` pass
+  through uncompressed. SSE compression in particular needs per-chunk
+  flushing and is a separate piece of work.
+- **One-shot allocation.** A compressed buffer is allocated per
+  eligible response. Fine for typical JSON sizes; for multi-MB dynamic
+  payloads you want streaming compression instead (follow-up).
+- **Brotli is opt-in.** `pip install localpost[http-compress]`
+  installs `brotli`. If `"br"` is in `algorithms` without the extra,
+  `compress_handler` raises `ImportError` at construction time.
+
+#### Composition with the static handler
+
+`compress_handler` and `static_handler` compose cleanly — the
+compression middleware passes `sendfile` through, so static stays
+zero-copy:
+
+```python
+api    = thread_pool_handler(
+    compress_handler(routes.build().as_handler(), algorithms=("br", "gzip")),
+    max_concurrency=8,
+)
+static = thread_pool_handler(static_handler("/var/www", prefix=b"/static/"),
+                             max_concurrency=128, backlog=64)
+```
+
+See [`examples/http/compressed_api.py`](../../examples/http/compressed_api.py).
+
 ### `localpost.http.flask`
 
 Native Flask adapter — optional extra `[http-flask]`. Bypasses WSGI on both

@@ -16,6 +16,7 @@ from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
+from localpost.http.compress import DEFAULT_COMPRESSIBLE_TYPES, compress_handler
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
     Route,
@@ -67,6 +68,9 @@ __all__ = [
     "streaming_pool_handler",
     # static files
     "static_handler",
+    # compression
+    "compress_handler",
+    "DEFAULT_COMPRESSIBLE_TYPES",
     # cancellation
     "check_cancelled",
     "RequestCancelled",
