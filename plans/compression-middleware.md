@@ -176,13 +176,97 @@ Run via `just unit-tests`.
 - New `examples/http/compressed_api.py` — wraps a small JSON router
   with `compress_handler`.
 
+## Step 4 — Streaming compression (SSE etc.)
+
+`compress_handler` was originally only the `complete()` path. This
+extension adds the streaming-response path through the same call site
+— no new flag, no behavior change for users who don't stream.
+
+### Decision: enable streaming compression when…
+
+`start_response(response)` is called with a **final** Response (not
+1xx) and:
+
+- Method != HEAD
+- No `Content-Length` declared (a known-length response is contractually
+  fixed; compressing it mid-stream would make the declared length wrong)
+- No existing `Content-Encoding`
+- No `Cache-Control: no-transform`
+- Status not in `{1xx, 204, 304, 206}`
+- `Content-Type` main-type is in `compressible_types`
+
+Otherwise: pass `start_response` / `send` / `finish_response` through
+verbatim.
+
+`text/event-stream` is added to `DEFAULT_COMPRESSIBLE_TYPES`.
+
+### Header rewrite (streaming)
+
+- Drop `Content-Length` (only present if user set it, in which case we
+  already passed through; defensive).
+- Ensure `Transfer-Encoding: chunked` (httptools auto-frames; h11
+  needs it explicit to switch the writer).
+- Add `Content-Encoding: <enc>`.
+- Merge `Vary: Accept-Encoding` (same as `_merge_vary`).
+
+### Per-chunk semantics
+
+Each `ctx.send(chunk)` (with non-empty `chunk`) is compressed and
+followed by a `Z_SYNC_FLUSH`-equivalent (`brotli.Compressor.flush()`)
+so the bytes reach the wire promptly:
+
+```
+send(chunk):
+    out = encoder.compress(chunk) + encoder.flush()
+    if out: inner.send(out)
+
+finish_response():
+    tail = encoder.finish()
+    if tail: inner.send(tail)
+    inner.finish_response()
+```
+
+Empty `send(b"")` (sometimes used to flush headers without body bytes)
+passes through verbatim — no sync marker injected.
+
+This is the same approach nginx uses (`gzip on; gzip_types text/event-stream`).
+All major browsers transparently decompress `Content-Encoding: gzip` /
+`br` streams before the EventSource parser sees them.
+
+### Encoder interface
+
+A tiny internal Protocol with two implementations:
+
+```python
+class _StreamEncoder(Protocol):
+    def compress(self, data: bytes) -> bytes: ...
+    def flush(self) -> bytes: ...   # mid-stream, sync flush
+    def finish(self) -> bytes: ...  # final flush
+
+class _GzipStreamEncoder:
+    # zlib.compressobj(level=6, wbits=31)  → gzip-format output
+    # flush(Z_SYNC_FLUSH) for mid-stream, flush(Z_FINISH) for end.
+
+class _BrotliStreamEncoder:
+    # brotli.Compressor(quality=4)
+    # process / flush / finish.
+```
+
+### Tests (additional)
+
+- SSE-shaped round-trip: `Accept-Encoding: gzip` →
+  `Content-Encoding: gzip`, body decompresses to all events
+  concatenated. Same for brotli (skip if dep missing).
+- Per-chunk flushing: read raw socket with timeout between sends;
+  verify the first event's compressed bytes arrive before the second
+  send.
+- Pass-through when Content-Length is set on `start_response`.
+- Pass-through when content type is not compressible.
+- Pass-through when `Cache-Control: no-transform`.
+- Empty `send(b"")` doesn't emit sync-marker bytes.
+
 ## Followups (separate PRs)
 
-- **Streaming compression** — wrap `start_response` / `send` /
-  `finish_response`. For chunked responses, switch to
-  `Transfer-Encoding: chunked` (httptools backend already auto-frames
-  chunked when `Content-Length` is absent). For SSE, per-chunk flush
-  is required so events aren't buffered indefinitely.
 - **zstd** — add when `compression.zstd` (Python 3.14 stdlib) is the
   supported floor, or as a third-party-backed extra
   (`zstandard`) sooner. Same negotiation logic; one more entry in the

@@ -331,15 +331,37 @@ When eligible: body is compressed, `Content-Length` is replaced,
 `Vary` (existing `Vary: Cookie` becomes `Vary: Cookie, Accept-Encoding`;
 `Vary: *` is left alone).
 
-#### v1 limitations
+#### Streaming responses (incl. SSE)
 
-- **Only `complete()` is intercepted.** Streaming responses
-  (`start_response` / `send` / `finish_response`) and `sendfile` pass
-  through uncompressed. SSE compression in particular needs per-chunk
-  flushing and is a separate piece of work.
-- **One-shot allocation.** A compressed buffer is allocated per
-  eligible response. Fine for typical JSON sizes; for multi-MB dynamic
-  payloads you want streaming compression instead (follow-up).
+`compress_handler` also intercepts the streaming-response path
+(`start_response` → `send`* → `finish_response`). The middleware decides
+per-request:
+
+- One-shot path (`complete(response, body)`) → compress the whole body
+  in memory; replace `Content-Length`.
+- Streaming path with **no** `Content-Length` declared → use an
+  incremental compressor; each `send(chunk)` emits the bytes followed
+  by a sync-flush so the decompressor sees each chunk promptly. The
+  backend auto-frames `Transfer-Encoding: chunked` on HTTP/1.1.
+- Streaming path **with** `Content-Length` → pass through (we'd
+  otherwise lie about the declared length).
+
+For SSE (`Content-Type: text/event-stream`, included in
+`DEFAULT_COMPRESSIBLE_TYPES`), each event you `send(...)` reaches the
+client decompressed and parseable by `EventSource` — same approach
+nginx uses with `gzip on; gzip_types text/event-stream`. All major
+browsers transparently decompress `Content-Encoding: gzip` / `br`
+streams before EventSource sees them.
+
+`sendfile` always passes through uncompressed — composition with the
+static handler stays zero-copy.
+
+#### Limitations
+
+- **One-shot path allocates a compressed buffer per response.** Fine for
+  typical JSON; for multi-MB single-shot payloads consider building
+  the response with `start_response` + `send` instead so the streaming
+  compressor handles it incrementally.
 - **Brotli is opt-in.** `pip install localpost[http-compress]`
   installs `brotli`. If `"br"` is in `algorithms` without the extra,
   `compress_handler` raises `ImportError` at construction time.

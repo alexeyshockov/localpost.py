@@ -27,9 +27,10 @@ import functools
 import gzip
 import importlib
 import importlib.util
+import zlib
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, Final
 
 from localpost.http._base import BaseHTTPConn, BodyHandler, HTTPReqCtx, RequestHandler, Selector
@@ -51,6 +52,7 @@ DEFAULT_COMPRESSIBLE_TYPES: Final[frozenset[bytes]] = frozenset({
     b"text/xml",
     b"text/csv",
     b"text/javascript",
+    b"text/event-stream",
     b"application/json",
     b"application/javascript",
     b"application/xml",
@@ -88,6 +90,73 @@ def _compress_brotli(data: bytes) -> bytes:
 _ENCODERS: dict[str, Callable[[bytes], bytes]] = {
     "gzip": _compress_gzip,
     "br": _compress_brotli,
+}
+
+
+# --------------------------------------------------------------------------
+# Streaming encoders (used by the streaming-response path)
+# --------------------------------------------------------------------------
+
+
+class _StreamEncoder:
+    """Per-request streaming compressor.
+
+    ``compress(data)`` is incremental — output may be empty until the
+    encoder has buffered enough. ``flush()`` emits a sync-flush block so
+    the decompressor can produce the bytes seen so far (the SSE
+    invariant: each event reaches the client promptly). ``finish()`` is
+    the terminal flush.
+    """
+
+    def compress(self, data: bytes) -> bytes:  # pragma: no cover — abstract
+        raise NotImplementedError
+
+    def flush(self) -> bytes:  # pragma: no cover — abstract
+        raise NotImplementedError
+
+    def finish(self) -> bytes:  # pragma: no cover — abstract
+        raise NotImplementedError
+
+
+class _GzipStreamEncoder(_StreamEncoder):
+    """``zlib.compressobj(wbits=31)`` produces gzip-format output (header +
+    deflate + trailer). ``Z_SYNC_FLUSH`` between events; ``Z_FINISH`` at end.
+    """
+
+    def __init__(self) -> None:
+        self._cobj = zlib.compressobj(level=6, method=zlib.DEFLATED, wbits=31)
+
+    def compress(self, data: bytes) -> bytes:
+        return self._cobj.compress(data)
+
+    def flush(self) -> bytes:
+        return self._cobj.flush(zlib.Z_SYNC_FLUSH)
+
+    def finish(self) -> bytes:
+        return self._cobj.flush(zlib.Z_FINISH)
+
+
+class _BrotliStreamEncoder(_StreamEncoder):
+    """``brotli.Compressor.flush()`` emits a flush-block (sync-flush
+    semantics); ``finish()`` ends the stream.
+    """
+
+    def __init__(self) -> None:
+        self._c = _brotli().Compressor(quality=4)
+
+    def compress(self, data: bytes) -> bytes:
+        return self._c.process(data)
+
+    def flush(self) -> bytes:
+        return self._c.flush()
+
+    def finish(self) -> bytes:
+        return self._c.finish()
+
+
+_STREAM_ENCODER_FACTORIES: dict[str, Callable[[], _StreamEncoder]] = {
+    "gzip": _GzipStreamEncoder,
+    "br": _BrotliStreamEncoder,
 }
 
 
@@ -230,6 +299,77 @@ def _rewrite_headers(
     return out
 
 
+def _is_streaming_eligible(
+    response: Response,
+    *,
+    method: bytes,
+    compressible_types: frozenset[bytes],
+) -> bool:
+    """Decision matrix for the streaming-response path.
+
+    No body-size check (we don't know it). Otherwise mirrors
+    :func:`_is_compressible_response` plus an additional rule: skip when
+    the handler declared a ``Content-Length`` (a known-length response
+    is contractually fixed; compressing mid-stream would lie about the
+    declared length).
+    """
+    if method == b"HEAD":
+        return False
+    status = response.status_code
+    if status in {204, 304} or 100 <= status < 200 or status == 206:
+        return False
+    has_compressible_type = False
+    for name, value in response.headers:
+        n = name.lower()
+        if n == b"content-length":
+            return False  # known-length stream — pass through verbatim
+        if n == b"content-encoding":
+            v = value.strip().lower()
+            if v and v != b"identity":
+                return False
+        elif n == b"cache-control":
+            if b"no-transform" in value.lower():
+                return False
+        elif n == b"content-type" and not has_compressible_type:
+            main_type = value.split(b";", 1)[0].strip().lower()
+            if main_type in compressible_types:
+                has_compressible_type = True
+    return has_compressible_type
+
+
+def _streaming_rewrite_headers(
+    headers: Sequence[tuple[bytes, bytes]],
+    *,
+    encoding: str,
+) -> list[tuple[bytes, bytes]]:
+    """Add ``Content-Encoding``, merge ``Vary``. ``Content-Length`` is
+    dropped (eligibility already rejected the case where it was set).
+
+    We deliberately **don't** add ``Transfer-Encoding: chunked`` — both
+    backends auto-add it for HTTP/1.1 peers when no framing is present
+    (h11: ``_clean_up_response_headers_for_sending``; httptools: the
+    ``not has_framing`` branch in ``start_response``). Adding it
+    ourselves prevents httptools from setting its internal ``_chunked``
+    flag, which then writes raw bytes instead of chunk-framed ones.
+    """
+    enc_value = encoding.encode("ascii")
+    out: list[tuple[bytes, bytes]] = []
+    vary_seen = False
+    for name, value in headers:
+        n = name.lower()
+        if n == b"content-length":
+            continue  # defensive — eligibility check rejects this case
+        if n == b"vary":
+            vary_seen = True
+            out.append((name, _merge_vary(value)))
+        else:
+            out.append((name, value))
+    if not vary_seen:
+        out.append((b"vary", b"Accept-Encoding"))
+    out.append((b"content-encoding", enc_value))
+    return out
+
+
 def _merge_vary(existing: bytes) -> bytes:
     """Merge ``Accept-Encoding`` into an existing ``Vary`` header value."""
     stripped = existing.strip()
@@ -261,6 +401,9 @@ class _CompressedCtx:
     _encoding: str
     _min_size: int
     _compressible_types: frozenset[bytes]
+    # Streaming-mode state. ``_stream_encoder`` is non-None between a
+    # final ``start_response`` (eligible) and ``finish_response``.
+    _stream_encoder: _StreamEncoder | None = field(default=None, init=False)
 
     # ----- forwarded attributes -----
 
@@ -298,18 +441,52 @@ class _CompressedCtx:
     def receive(self, size: int = 65536, /) -> bytes:
         return self._inner.receive(size)
 
-    # ----- forwarded streaming-response API (uncompressed in v1) -----
+    # ----- intercepted streaming-response API -----
 
     def start_response(self, response: Response | InformationalResponse, /) -> None:
-        self._inner.start_response(response)
+        # 1xx responses pass through verbatim (multiple may precede the final).
+        if isinstance(response, InformationalResponse):
+            self._inner.start_response(response)
+            return
+        # Final Response. Decide streaming compression eligibility.
+        if _is_streaming_eligible(
+            response,
+            method=self._inner.request.method,
+            compressible_types=self._compressible_types,
+        ):
+            self._stream_encoder = _STREAM_ENCODER_FACTORIES[self._encoding]()
+            new_headers = _streaming_rewrite_headers(response.headers, encoding=self._encoding)
+            self._inner.start_response(
+                Response(status_code=response.status_code, headers=new_headers, reason=response.reason),
+            )
+        else:
+            self._inner.start_response(response)
 
     def send(self, chunk: Buffer, /) -> None:
-        self._inner.send(chunk)
+        if self._stream_encoder is None:
+            self._inner.send(chunk)
+            return
+        chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
+        if not chunk_bytes:
+            # Empty send (sometimes used to flush headers): pass through
+            # so we don't emit a sync-marker for nothing.
+            self._inner.send(chunk_bytes)
+            return
+        out = self._stream_encoder.compress(chunk_bytes) + self._stream_encoder.flush()
+        if out:
+            self._inner.send(out)
 
     def finish_response(self) -> None:
+        if self._stream_encoder is not None:
+            tail = self._stream_encoder.finish()
+            self._stream_encoder = None
+            if tail:
+                self._inner.send(tail)
         self._inner.finish_response()
 
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
+        # Pass-through: zero-copy is preserved (compression and sendfile
+        # are at odds; see plans/compression-middleware.md).
         self._inner.sendfile(response, file, offset, count)
 
     # ----- intercepted -----

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import importlib.util
+import zlib
 from pathlib import Path
 
 import httpx
@@ -19,9 +20,11 @@ from localpost.http import (
 from localpost.http.compress import (
     DEFAULT_COMPRESSIBLE_TYPES,
     _is_compressible_response,
+    _is_streaming_eligible,
     _merge_vary,
     _negotiate,
     _rewrite_headers,
+    _streaming_rewrite_headers,
 )
 
 _HAS_BROTLI = importlib.util.find_spec("brotli") is not None
@@ -427,3 +430,274 @@ class TestGzipBytes:
         head, _, raw_body = buf.partition(b"\r\n\r\n")
         assert b"content-encoding: gzip" in head.lower()
         assert gzip.decompress(raw_body) == body
+
+
+# --- Streaming eligibility (unit) ----------------------------------------
+
+
+class TestStreamingEligible:
+    def test_basic_yes(self):
+        r = _r(headers=[(b"content-type", b"text/event-stream")])
+        assert _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    def test_head_no(self):
+        r = _r(headers=[(b"content-type", b"text/event-stream")])
+        assert not _is_streaming_eligible(r, method=b"HEAD", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    def test_known_length_no(self):
+        # Handler declared exact size — must not compress mid-stream.
+        r = _r(headers=[(b"content-type", b"text/event-stream"), (b"content-length", b"100")])
+        assert not _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    def test_no_transform_no(self):
+        r = _r(headers=[(b"content-type", b"text/event-stream"), (b"cache-control", b"no-transform")])
+        assert not _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    def test_existing_encoding_no(self):
+        r = _r(headers=[(b"content-type", b"text/event-stream"), (b"content-encoding", b"gzip")])
+        assert not _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    def test_non_compressible_type_no(self):
+        r = _r(headers=[(b"content-type", b"image/png")])
+        assert not _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+    @pytest.mark.parametrize("status", [100, 199, 204, 304, 206])
+    def test_no_body_status(self, status):
+        r = _r(status, headers=[(b"content-type", b"text/event-stream")])
+        assert not _is_streaming_eligible(r, method=b"GET", compressible_types=DEFAULT_COMPRESSIBLE_TYPES)
+
+
+# --- Streaming header rewrite (unit) -------------------------------------
+
+
+class TestStreamingRewriteHeaders:
+    def test_drops_content_length(self):
+        out = _streaming_rewrite_headers(
+            [(b"content-type", b"text/event-stream"), (b"content-length", b"100")],
+            encoding="gzip",
+        )
+        names = [n for n, _ in out]
+        assert b"content-length" not in names
+
+    def test_does_not_add_transfer_encoding(self):
+        # Backends auto-frame chunked on HTTP/1.1 — adding TE here breaks
+        # httptools' _chunked detection. See _streaming_rewrite_headers' docstring.
+        out = _streaming_rewrite_headers([(b"content-type", b"text/event-stream")], encoding="gzip")
+        names = [n.lower() for n, _ in out]
+        assert b"transfer-encoding" not in names
+
+    def test_adds_content_encoding(self):
+        out = _streaming_rewrite_headers([(b"content-type", b"text/event-stream")], encoding="br")
+        assert (b"content-encoding", b"br") in out
+
+    def test_merges_vary(self):
+        out = _streaming_rewrite_headers(
+            [(b"content-type", b"text/event-stream"), (b"vary", b"Cookie")],
+            encoding="gzip",
+        )
+        d = dict(out)
+        assert d[b"vary"] == b"Cookie, Accept-Encoding"
+
+
+# --- Streaming round-trip ------------------------------------------------
+
+
+def _sse_handler(events: list[bytes]):
+    """Handler that emits each item in ``events`` as a separate ``send`` call."""
+
+    def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        # No Content-Length → streaming path.
+        ctx.start_response(
+            Response(status_code=200, headers=[(b"content-type", b"text/event-stream")])
+        )
+        for ev in events:
+            ctx.send(b"data: " + ev + b"\n\n")
+        ctx.finish_response()
+        return None
+
+    return handler
+
+
+class TestStreamingRoundTripGzip:
+    def test_sse_compressed(self, serve_backend_in_thread):
+        events = [b"hello", b"world", b"x" * 4096, b"final"]
+        h = compress_handler(_sse_handler(events), algorithms=("gzip",))
+        with serve_backend_in_thread(h) as port:
+            r = httpx.get(
+                f"http://127.0.0.1:{port}/",
+                headers={"accept-encoding": "gzip"},
+                timeout=5,
+            )
+        assert r.status_code == 200
+        assert r.headers["content-encoding"] == "gzip"
+        assert "transfer-encoding" in r.headers
+        # httpx auto-decodes; verify all events present in order.
+        decoded = r.content
+        for ev in events:
+            assert b"data: " + ev + b"\n\n" in decoded
+        # Total length ordering preserved.
+        positions = [decoded.find(b"data: " + ev) for ev in events]
+        assert positions == sorted(positions)
+
+    def test_streaming_passthrough_when_content_length_set(self, serve_backend_in_thread):
+        # If the handler set Content-Length, we must not compress (would
+        # corrupt the contract). Pass through verbatim.
+        body_chunk = b"x" * 4096
+
+        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+            ctx.start_response(
+                Response(
+                    status_code=200,
+                    headers=[
+                        (b"content-type", b"text/plain"),
+                        (b"content-length", str(len(body_chunk)).encode("ascii")),
+                    ],
+                )
+            )
+            ctx.send(body_chunk)
+            ctx.finish_response()
+            return None
+
+        h = compress_handler(handler, algorithms=("gzip",))
+        with serve_backend_in_thread(h) as port:
+            r = httpx.get(
+                f"http://127.0.0.1:{port}/",
+                headers={"accept-encoding": "gzip"},
+                timeout=5,
+            )
+        assert r.status_code == 200
+        assert "content-encoding" not in r.headers
+        assert r.content == body_chunk
+
+    def test_streaming_passthrough_when_no_transform(self, serve_backend_in_thread):
+        events = [b"a", b"b", b"c"]
+
+        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+            ctx.start_response(
+                Response(
+                    status_code=200,
+                    headers=[
+                        (b"content-type", b"text/event-stream"),
+                        (b"cache-control", b"no-transform"),
+                    ],
+                )
+            )
+            for ev in events:
+                ctx.send(b"data: " + ev + b"\n\n")
+            ctx.finish_response()
+            return None
+
+        h = compress_handler(handler, algorithms=("gzip",))
+        with serve_backend_in_thread(h) as port:
+            r = httpx.get(
+                f"http://127.0.0.1:{port}/",
+                headers={"accept-encoding": "gzip"},
+                timeout=5,
+            )
+        assert "content-encoding" not in r.headers
+        assert b"data: a" in r.content
+
+
+@pytest.mark.skipif(not _HAS_BROTLI, reason="brotli optional extra not installed")
+class TestStreamingRoundTripBrotli:
+    def test_sse_compressed(self, serve_backend_in_thread):
+        events = [b"hello", b"world", b"x" * 4096]
+        h = compress_handler(_sse_handler(events), algorithms=("br",))
+        with serve_backend_in_thread(h) as port:
+            r = httpx.get(
+                f"http://127.0.0.1:{port}/",
+                headers={"accept-encoding": "br"},
+                timeout=5,
+            )
+        assert r.status_code == 200
+        assert r.headers["content-encoding"] == "br"
+        for ev in events:
+            assert b"data: " + ev in r.content
+
+
+# --- Per-event flushing (raw socket) -------------------------------------
+
+
+class TestStreamingFlush:
+    """Verify SYNC_FLUSH semantics: the first event must be decodable
+    *before* the handler emits the second event. If we relied on the
+    full-stream end-flush, the test would deadlock — the handler is
+    holding a gate that only releases once the test reads the first event.
+    """
+
+    def test_first_event_decodes_before_stream_ends(self, serve_backend_in_thread):
+        import socket  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+
+        gate = threading.Event()
+
+        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+            ctx.start_response(
+                Response(status_code=200, headers=[(b"content-type", b"text/event-stream")])
+            )
+            ctx.send(b"data: first\n\n")
+            # Block until the test has read+decoded "data: first". If
+            # SYNC_FLUSH didn't happen, this deadlocks at the 5s timeout.
+            gate.wait(timeout=5)
+            ctx.send(b"data: second\n\n")
+            ctx.finish_response()
+            return None
+
+        h = compress_handler(handler, algorithms=("gzip",))
+        with serve_backend_in_thread(h) as port, socket.create_connection(
+            ("127.0.0.1", port), timeout=5
+        ) as s:
+            s.sendall(
+                b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+            )
+            buf = bytearray()
+            s.settimeout(5)
+            while b"\r\n\r\n" not in buf:
+                buf.extend(s.recv(8192))
+            head, _, after = bytes(buf).partition(b"\r\n\r\n")
+            assert b"content-encoding: gzip" in head.lower()
+            assert b"transfer-encoding: chunked" in head.lower()
+
+            decompressor = zlib.decompressobj(wbits=31)
+            decoded = bytearray()
+            stream = bytearray(after)
+
+            while b"data: first" not in decoded:
+                consumed = _consume_one_chunk(stream)
+                if consumed is None:
+                    stream.extend(s.recv(8192))
+                    continue
+                decoded.extend(decompressor.decompress(consumed))
+
+            assert b"data: first" in decoded
+            gate.set()
+            # Drain remaining bytes (best-effort) so server-side loop
+            # logging stays clean for other tests.
+            try:
+                while s.recv(8192):
+                    pass
+            except OSError:
+                pass
+
+
+def _consume_one_chunk(stream: bytearray) -> bytes | None:
+    """Pop one HTTP/1.1 chunked-transfer chunk from ``stream``. Returns
+    the chunk's payload bytes, or ``None`` if a full chunk isn't present
+    yet (caller should ``recv`` more).
+    """
+    idx = stream.find(b"\r\n")
+    if idx <= 0:
+        return None
+    try:
+        size = int(stream[:idx], 16)
+    except ValueError:
+        return None
+    if size == 0:
+        return None
+    start = idx + 2
+    end = start + size
+    if len(stream) < end + 2:
+        return None
+    payload = bytes(stream[start:end])
+    del stream[: end + 2]
+    return payload
