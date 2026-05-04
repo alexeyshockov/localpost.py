@@ -54,7 +54,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from localpost.http.server import HTTPReqCtx
+    from localpost.http import HTTPReqCtx
     from localpost.openapi import spec
     from localpost.openapi.results import OpResult
     from localpost.openapi.schemas import SchemaRegistry

@@ -1,16 +1,21 @@
 from localpost.http._base import (
+    BodyHandler,
     ConnFactory,
     ConnHandler,
+    HTTPReqCtx,
+    Middleware,
+    RequestHandler,
     RoundRobinAcceptor,
     Selector,
     SelectorCallback,
     TrackHere,
+    compose,
+    start_http_server,
 )
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
-from localpost.http.app import HttpApp
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
     Route,
@@ -20,7 +25,6 @@ from localpost.http.router import (
     URITemplate,
     route_match,
 )
-from localpost.http.server import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose, start_http_server
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = [
@@ -53,9 +57,7 @@ __all__ = [
     "RouteMatch",
     "URITemplate",
     "route_match",
-    # framework
-    "HttpApp",
-    # wsgi
+    # WSGI adapter
     "wrap_wsgi",
     # hosting
     "http_server",

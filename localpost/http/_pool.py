@@ -37,11 +37,14 @@ from localpost.http._base import (
     PAYLOAD_TOO_LARGE_RESPONSE,
     SERVICE_UNAVAILABLE_BODY,
     SERVICE_UNAVAILABLE_RESPONSE,
+    BodyHandler,
+    HTTPReqCtx,
+    RequestHandler,
+    emit_handler_error,
 )
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
 from localpost.http._types import BodyTooLarge
 from localpost.http.config import LOGGER_NAME
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler, emit_handler_error
 
 # --------------------------------------------------------------------------
 # Internal pool primitive

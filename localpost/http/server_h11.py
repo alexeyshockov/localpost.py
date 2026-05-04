@@ -44,7 +44,7 @@ from localpost.http._base import (
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
 
-__all__ = ["HTTPConn", "HTTPReqCtxH11"]
+__all__ = ["HTTPConn"]
 
 
 def _to_h11_response(r: Response | InformationalResponse) -> h11.Response | h11.InformationalResponse:
@@ -109,7 +109,7 @@ class HTTPConn(BaseHTTPConn):
     # current request context shared with the handler; ``_continuation``
     # is the post-body callback (None if the pre-body handler completed
     # inline or borrowed).
-    _ctx: HTTPReqCtxH11 | None = None
+    _ctx: _HTTPReqCtx | None = None
     _continuation: BodyHandler | None = None
     _body_buf: bytearray = field(default_factory=bytearray)
 
@@ -243,7 +243,7 @@ class HTTPConn(BaseHTTPConn):
                     headers=list(event.headers),
                     http_version=event.http_version,
                 )
-                ctx = HTTPReqCtxH11(self.selector, self, req)
+                ctx = _HTTPReqCtx(self.selector, self, req)
                 self._ctx = ctx
                 self._body_buf = bytearray()
                 self._continuation = None
@@ -303,7 +303,7 @@ class HTTPConn(BaseHTTPConn):
 
 
 @dataclass(slots=True, eq=False)
-class HTTPReqCtxH11:
+class _HTTPReqCtx:
     """Per-request context for the h11 backend.
 
     Structurally satisfies :class:`localpost.http._base.HTTPReqCtx`.
@@ -328,7 +328,7 @@ class HTTPReqCtxH11:
         return not self.conn.tracked
 
     @contextmanager
-    def borrow(self) -> Iterator[HTTPReqCtxH11]:
+    def borrow(self) -> Iterator[_HTTPReqCtx]:
         """Switch the conn out of selector tracking for the duration of the block."""
         assert not self.borrowed
         self.selector.stop_tracking(self.conn)

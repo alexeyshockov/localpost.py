@@ -9,7 +9,7 @@ from localpost.openapi import HttpApp, OpFilter, Unauthorized, spec
 from tests.openapi.app import make_ctx, run_op
 
 if TYPE_CHECKING:
-    from localpost.http.server import HTTPReqCtx
+    from localpost.http import HTTPReqCtx
     from localpost.openapi.results import OpResult
     from localpost.openapi.schemas import SchemaRegistry
 

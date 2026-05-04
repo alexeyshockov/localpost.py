@@ -24,6 +24,7 @@ from localpost.http import (
     HTTPReqCtx,
     Request,
     RequestCancelled,
+    RequestHandler,
     Response,
     Routes,
     ServerConfig,
@@ -33,7 +34,6 @@ from localpost.http import (
     streaming_pool_handler,
     thread_pool_handler,
 )
-from localpost.http.server import RequestHandler
 from tests.http._helpers import read_http_response
 
 pytestmark = pytest.mark.anyio

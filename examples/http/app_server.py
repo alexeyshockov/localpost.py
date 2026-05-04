@@ -2,7 +2,8 @@ import json
 import sys
 
 from localpost import hosting
-from localpost.http import HttpApp, HTTPReqCtx, ServerConfig
+from localpost.http import HTTPReqCtx, ServerConfig
+from localpost.http.app import HttpApp
 
 app = HttpApp()
 

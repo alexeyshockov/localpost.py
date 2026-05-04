@@ -71,7 +71,8 @@ The recommended path is `HttpApp`:
 ```python
 import sys
 from localpost.hosting import run_app
-from localpost.http import HttpApp, HTTPReqCtx, ServerConfig
+from localpost.http import HTTPReqCtx, ServerConfig
+from localpost.http.app import HttpApp
 
 
 app = HttpApp()
@@ -96,8 +97,7 @@ Or stay close to the wire — `start_http_server` directly:
 
 ```python
 import h11
-from localpost.http.config import ServerConfig
-from localpost.http.server import HTTPReqCtx, start_http_server
+from localpost.http import HTTPReqCtx, ServerConfig, start_http_server
 
 
 def simple_app(ctx: HTTPReqCtx):
@@ -184,7 +184,7 @@ thread + N worker selectors) drop in without touching the request hot path.
 
 ## Public API
 
-### `localpost.http.server`
+### Server core (`localpost.http`)
 
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |

@@ -29,8 +29,8 @@ import sentry_sdk
 from flask import Flask
 from flask import request as flask_request
 
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http.flask import _write_response
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http.wsgi import _build_environ
 
 __all__ = ["sentry_flask_handler"]

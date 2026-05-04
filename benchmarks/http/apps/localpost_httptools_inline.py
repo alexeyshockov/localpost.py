@@ -12,7 +12,8 @@ import time
 from benchmarks.http.apps._cli import parse_args
 from benchmarks.http.scenarios import PING_BODY, PROFILE_WORK_DELAYS_S, hello_body, profile_update_body
 from localpost.hosting import run_app
-from localpost.http import HttpApp, HTTPReqCtx, Response, ServerConfig
+from localpost.http import HTTPReqCtx, Response, ServerConfig
+from localpost.http.app import HttpApp
 
 
 def main() -> int:

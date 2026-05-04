@@ -23,7 +23,6 @@ from anyio import to_thread
 from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
     BodyHandler,
-    HttpApp,
     HTTPReqCtx,
     Middleware,
     RequestHandler,
@@ -32,6 +31,7 @@ from localpost.http import (
     http_server,
     start_http_server,
 )
+from localpost.http.app import HttpApp
 from tests.http._helpers import drain_socket
 
 pytestmark = pytest.mark.anyio

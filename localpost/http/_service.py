@@ -15,12 +15,12 @@ from localpost._utils import AnyEventView
 from localpost.hosting import ServiceLifetime
 from localpost.http._base import (
     BaseServer,
+    RequestHandler,
     RoundRobinAcceptor,
     Selector,
     start_http_server,
 )
 from localpost.http.config import LOGGER_NAME, ServerConfig
-from localpost.http.server import RequestHandler
 from localpost.http.wsgi import wrap_wsgi
 
 __all__ = ["http_server", "wsgi_server"]

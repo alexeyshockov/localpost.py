@@ -62,12 +62,12 @@ from http import HTTPMethod
 from typing import Any, get_type_hints
 
 from localpost import hosting
+from localpost.http._base import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose
 from localpost.http._pool import _Pool, _pool_context
 from localpost.http._service import http_server
 from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
-from localpost.http.server import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose
 
 __all__ = ["HttpApp"]
 

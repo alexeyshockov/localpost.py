@@ -37,8 +37,8 @@ import sys
 
 import sentry_sdk
 
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http.router import Router, _MatchOk
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 
 __all__ = ["sentry_router_handler"]
 

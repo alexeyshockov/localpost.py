@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any
 
-from localpost.http.server import HTTPReqCtx
+from localpost.http import HTTPReqCtx
 from localpost.openapi import spec
 from localpost.openapi.filter import _FunctionFilter, op_filter
 from localpost.openapi.resolvers import FromHeader

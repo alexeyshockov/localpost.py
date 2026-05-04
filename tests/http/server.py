@@ -1,4 +1,4 @@
-"""Tests for the HTTP server (localpost.http.server)."""
+"""Tests for the HTTP server (localpost.http)."""
 
 from __future__ import annotations
 

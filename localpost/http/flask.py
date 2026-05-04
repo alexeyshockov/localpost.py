@@ -20,10 +20,10 @@ from __future__ import annotations
 
 from flask import Flask
 
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http._service import http_server
 from localpost.http._types import Response as _Response
 from localpost.http.config import ServerConfig
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http.wsgi import _build_environ
 
 __all__ = ["flask_handler", "flask_server"]

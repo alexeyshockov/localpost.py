@@ -9,8 +9,7 @@ import sys
 import click
 
 from localpost import hosting
-from localpost.http import ServerConfig, http_server, thread_pool_handler
-from localpost.http.server import RequestHandler
+from localpost.http import RequestHandler, ServerConfig, http_server, thread_pool_handler
 
 
 def _load_handler(app_str: str) -> RequestHandler:

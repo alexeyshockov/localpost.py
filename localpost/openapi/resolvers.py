@@ -27,7 +27,7 @@ from localpost.openapi.results import BadRequest, OpResult
 from localpost.openapi.schemas import SchemaRegistry, is_pydantic_model
 
 if TYPE_CHECKING:
-    from localpost.http.server import HTTPReqCtx
+    from localpost.http import HTTPReqCtx
 
 __all__ = [
     "ArgResolver",

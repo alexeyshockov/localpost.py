@@ -47,7 +47,7 @@ from localpost.http._base import (
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
 
-__all__ = ["HTTPConn", "HTTPReqCtxHttptools"]
+__all__ = ["HTTPConn"]
 
 
 # RFC 7231 §6.1 reason phrases for the codes the server-side actually emits.
@@ -154,7 +154,7 @@ class HTTPConn(BaseHTTPConn):
     # ``_ctx`` is built in ``on_headers_complete`` and the pre-body handler is
     # invoked inline. If it returns a continuation, ``_continuation`` is set
     # and ``on_body`` accumulates into ``_body_buf`` until ``on_message_complete``.
-    _ctx: HTTPReqCtxHttptools | None = None
+    _ctx: _HTTPReqCtx | None = None
     _continuation: BodyHandler | None = None
     _body_buf: bytearray = field(default_factory=bytearray)
     _message_complete: bool = False
@@ -261,7 +261,7 @@ class HTTPConn(BaseHTTPConn):
             headers=self._cur_headers,
             http_version=version,
         )
-        ctx = HTTPReqCtxHttptools(
+        ctx = _HTTPReqCtx(
             self.selector,
             self,
             req,
@@ -461,7 +461,7 @@ class _ProtocolError(Exception):
 
 
 @dataclass(slots=True, eq=False)
-class HTTPReqCtxHttptools:
+class _HTTPReqCtx:
     """Per-request context for the httptools backend.
 
     The response-write path auto-buffers: ``start_response`` stores the
@@ -498,7 +498,7 @@ class HTTPReqCtxHttptools:
         return not self.conn.tracked
 
     @contextmanager
-    def borrow(self) -> Iterator[HTTPReqCtxHttptools]:
+    def borrow(self) -> Iterator[_HTTPReqCtx]:
         assert not self.borrowed
         self.selector.stop_tracking(self.conn)
         try:
@@ -506,7 +506,7 @@ class HTTPReqCtxHttptools:
         finally:
             self._maybe_give_back()
 
-    def _defer_streaming_dispatch(self, dispatcher: Callable[[HTTPReqCtxHttptools], None]) -> None:
+    def _defer_streaming_dispatch(self, dispatcher: Callable[[_HTTPReqCtx], None]) -> None:
         """Start a streaming worker after the current parser feed returns.
 
         httptools fires callbacks from inside ``parser.feed_data``. Starting

@@ -23,9 +23,9 @@ from http import HTTPMethod
 from http.client import responses as _http_phrases
 from typing import Self, final
 
+from localpost.http._base import BodyHandler, HTTPReqCtx
+from localpost.http._base import RequestHandler as NativeRequestHandler
 from localpost.http._types import Response as _Response
-from localpost.http.server import BodyHandler, HTTPReqCtx
-from localpost.http.server import RequestHandler as NativeRequestHandler
 
 __all__ = [
     "URITemplate",

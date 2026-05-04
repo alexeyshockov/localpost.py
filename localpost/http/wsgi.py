@@ -7,8 +7,8 @@ from typing import Any, final, override
 from urllib.parse import unquote_to_bytes
 from wsgiref.types import WSGIApplication
 
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http._types import Response as _Response
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 
 __all__ = ["wrap_wsgi"]
 

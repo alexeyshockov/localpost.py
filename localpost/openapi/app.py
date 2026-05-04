@@ -31,12 +31,12 @@ from http import HTTPMethod
 from typing import Any, Literal
 
 from localpost import hosting
+from localpost.http import HTTPReqCtx, RequestHandler
 from localpost.http._pool import thread_pool_handler
 from localpost.http._service import http_server
 from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes
-from localpost.http.server import HTTPReqCtx, RequestHandler
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi._docs import redoc_html, scalar_html, swagger_html
 from localpost.openapi.filter import OpFilter

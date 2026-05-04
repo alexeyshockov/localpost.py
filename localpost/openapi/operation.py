@@ -24,10 +24,10 @@ from typing import Annotated, Any, Self, Union, get_args, get_origin, get_type_h
 
 import msgspec
 
+from localpost.http import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
-from localpost.http.server import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi.filter import OpFilter
 from localpost.openapi.resolvers import (
