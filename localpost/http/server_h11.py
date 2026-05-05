@@ -40,6 +40,7 @@ from localpost.http._base import (
     Selector,
     _send_all,
     emit_handler_error,
+    native_stream,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
@@ -343,6 +344,21 @@ class _HTTPReqCtx:
     _pending_header_bytes: bytes | None = None
 
     @property
+    def remote_addr(self) -> str | None:
+        host, port = self.conn.addr
+        return f"{host}:{port}" if host else None
+
+    @property
+    def local_addr(self) -> str:
+        sel = self.selector
+        return f"{sel.config.host}:{sel.port}"
+
+    @property
+    def scheme(self) -> str:
+        # No TLS support today; native server is plain HTTP.
+        return "http"
+
+    @property
     def borrowed(self) -> bool:
         return not self.conn.tracked
 
@@ -379,6 +395,9 @@ class _HTTPReqCtx:
         if body is not None:
             self.send(body)
         self.finish_response()
+
+    def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
+        native_stream(self, response, chunks)
 
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
         # ``Content-Length`` framing is required — otherwise h11's writer

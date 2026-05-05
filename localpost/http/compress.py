@@ -28,12 +28,12 @@ import gzip
 import importlib
 import importlib.util
 import zlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, Final
 
-from localpost.http._base import BaseHTTPConn, BodyHandler, HTTPReqCtx, RequestHandler, Selector
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler, native_stream
 from localpost.http._types import InformationalResponse, Request, Response
 
 if TYPE_CHECKING:
@@ -419,12 +419,16 @@ class _CompressedCtx:
         return self._inner.response_status
 
     @property
-    def selector(self) -> Selector:
-        return self._inner.selector
+    def remote_addr(self) -> str | None:
+        return self._inner.remote_addr
 
     @property
-    def conn(self) -> BaseHTTPConn:
-        return self._inner.conn
+    def local_addr(self) -> str:
+        return self._inner.local_addr
+
+    @property
+    def scheme(self) -> str:
+        return self._inner.scheme
 
     @property
     def borrowed(self) -> bool:
@@ -483,6 +487,11 @@ class _CompressedCtx:
         # Pass-through: zero-copy is preserved (compression and sendfile
         # are at odds; see plans/compression-middleware.md).
         self._inner.sendfile(response, file, offset, count)
+
+    def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
+        # Default impl: drives the imperative trio on ``self``, which the
+        # compression middleware already intercepts per-chunk.
+        native_stream(self, response, chunks)
 
     # ----- intercepted -----
 

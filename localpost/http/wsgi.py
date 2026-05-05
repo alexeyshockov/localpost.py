@@ -132,6 +132,10 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
     path = unquote_to_bytes(request.path).decode("iso-8859-1")
     query_string = request.query_string.decode("iso-8859-1")
 
+    server_host, _, server_port = ctx.local_addr.rpartition(":")
+    if not server_host:
+        server_host, server_port = ctx.local_addr, ""
+
     environ: dict[str, Any] = {
         "REQUEST_METHOD": request.method.decode("ascii"),
         "SCRIPT_NAME": "",
@@ -139,17 +143,24 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
         "QUERY_STRING": query_string,
         "CONTENT_TYPE": "",
         "CONTENT_LENGTH": "",
-        "SERVER_NAME": ctx.selector.config.host,
-        "SERVER_PORT": str(ctx.selector.port),
+        "SERVER_NAME": server_host,
+        "SERVER_PORT": server_port,
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
         "wsgi.version": (1, 0),
-        "wsgi.url_scheme": "http",
+        "wsgi.url_scheme": ctx.scheme,
         "wsgi.input": _RequestBodyStream(ctx.body),
         "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
         "wsgi.multiprocess": False,
         "wsgi.run_once": False,
     }
+    if ctx.remote_addr is not None:
+        client_host, _, client_port = ctx.remote_addr.rpartition(":")
+        if client_host:
+            environ["REMOTE_ADDR"] = client_host
+            environ["REMOTE_PORT"] = client_port
+        else:
+            environ["REMOTE_ADDR"] = ctx.remote_addr
 
     # Single header pass: h11 normalizes names to lowercase bytes, so we can
     # work with bytes directly and decode each name/value exactly once.

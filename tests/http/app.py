@@ -614,8 +614,8 @@ class TestStreamingRoutes:
 
         def handler(ctx: HTTPReqCtx):
             def dispatch(req_ctx: HTTPReqCtx) -> None:
-                req_ctx.conn.selector.stop_tracking(req_ctx.conn)
-                conn = cast(Any, req_ctx.conn)
+                conn = cast(Any, req_ctx).conn
+                conn.selector.stop_tracking(conn)
                 captured["buffer_before_receive"] = bytes(conn._streaming_body_buf)
                 captured["eom_before_receive"] = conn._streaming_eom
                 chunks: list[bytes] = []

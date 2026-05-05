@@ -74,7 +74,7 @@ def rate_limit(max_requests: int = 10, window_seconds: float = 1.0) -> Middlewar
 
     def middleware(inner: RequestHandler) -> RequestHandler:
         def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
-            client_ip = ctx.conn.sock.getpeername()[0]
+            client_ip = (ctx.remote_addr or "").rpartition(":")[0] or "unknown"
             if not counter.is_allowed(client_ip):
                 ctx.complete(_TOO_MANY, b"")
                 return None

@@ -28,6 +28,7 @@ import logging
 import threading
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
+from typing import cast
 
 from anyio import to_thread
 
@@ -38,6 +39,7 @@ from localpost.http._base import (
     BodyHandler,
     HTTPReqCtx,
     RequestHandler,
+    _NativeReqCtx,
     emit_handler_error,
 )
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
@@ -49,7 +51,7 @@ from localpost.http.config import LOGGER_NAME
 # --------------------------------------------------------------------------
 
 
-_WorkFn = Callable[[HTTPReqCtx], None]
+_WorkFn = Callable[[_NativeReqCtx], None]
 
 
 class _Pool:
@@ -70,8 +72,12 @@ class _Pool:
     def dispatch_buffered(self, body_handler: BodyHandler) -> BodyHandler:
         """Wrap a :data:`BodyHandler` so when it's invoked post-body it
         borrows the conn and queues for a worker. The worker runs
-        ``body_handler(ctx)`` with ``ctx.body`` already populated."""
-        return self._make_dispatcher(body_handler)
+        ``body_handler(ctx)`` with ``ctx.body`` already populated.
+
+        Native-only: the returned ``BodyHandler`` is cast at the boundary
+        — at runtime the ctx is always a :class:`_NativeReqCtx` because
+        the pool is composed under :func:`http_server`."""
+        return cast(BodyHandler, self._make_dispatcher(body_handler))
 
     def dispatch_streaming(self, handler: _WorkFn) -> RequestHandler:
         """Wrap a streaming handler so it runs in a worker on a borrowed
@@ -83,7 +89,7 @@ class _Pool:
         via ``ctx.receive(...)`` and completes the response."""
         dispatcher = self._make_dispatcher(handler)
 
-        def pre_body(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def pre_body(ctx: _NativeReqCtx) -> BodyHandler | None:
             defer = getattr(ctx, "_defer_streaming_dispatch", None)
             if defer is not None:
                 defer(dispatcher)
@@ -91,13 +97,13 @@ class _Pool:
                 dispatcher(ctx)
             return None  # we borrowed; selector free
 
-        return pre_body
+        return cast(RequestHandler, pre_body)
 
     def _make_dispatcher(self, fn: _WorkFn) -> _WorkFn:
         tg = self._tg
         shutdown_event = self._shutdown_event
 
-        def dispatched(ctx: HTTPReqCtx) -> None:
+        def dispatched(ctx: _NativeReqCtx) -> None:
             ctx.conn.selector.stop_tracking(ctx.conn)
             cancel = RequestCancel(_sock=ctx.conn.sock, _shutdown_event=shutdown_event)
             tg.start_soon(_run_request, ctx, cancel, fn)
@@ -105,7 +111,7 @@ class _Pool:
         return dispatched
 
 
-def _run_request(ctx: HTTPReqCtx, cancel: RequestCancel, fn: _WorkFn) -> None:
+def _run_request(ctx: _NativeReqCtx, cancel: RequestCancel, fn: _WorkFn) -> None:
     """Run a single request on the worker thread.
 
     Mirrors the failure handling the previous worker loop performed:
@@ -176,7 +182,7 @@ async def _pool_context() -> AsyncGenerator[_Pool]:
         await to_thread.run_sync(tg.__exit__, None, None, None)
 
 
-def _emit_body_too_large(ctx: HTTPReqCtx) -> None:
+def _emit_body_too_large(ctx: _NativeReqCtx) -> None:
     """Map worker-side body-limit failures to 413 instead of generic 500."""
     if ctx.response_status is None:
         with suppress(Exception):

@@ -23,7 +23,6 @@ from types import UnionType
 from typing import Annotated, Any, Self, Union, get_args, get_origin, get_type_hints
 
 from localpost.http import BodyHandler, HTTPReqCtx, RequestHandler
-from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
@@ -576,26 +575,15 @@ def _wrap_middleware(mw: OpMiddleware, call_next: ApiOperation) -> ApiOperation:
 def _stream_sse(ctx: HTTPReqCtx, result: EventStreamResult[Any], adapters: AdapterRegistry) -> None:
     """Run ``result``'s body as an SSE stream over ``ctx``.
 
-    Sends the SSE response headers (chunked transfer encoding is implicit
-    — we don't set ``content-length`` so h11 picks chunked), then writes
-    one event per yielded item until the iterator exhausts or the client
-    disconnects (signalled via :func:`localpost.http.check_cancelled`).
-    Any user-set headers on ``result`` are merged in (without overriding
-    the framework-set ``content-type`` / ``cache-control`` /
+    Builds the SSE response (chunked transfer encoding is implicit — we
+    don't set ``content-length`` so h11 picks chunked) and hands the
+    event iterator to :meth:`HTTPReqCtx.stream`. The transport owns
+    iteration: the native server interleaves cancellation checks per
+    chunk, the WSGI bridge hands the iterator straight to the WSGI
+    server. Any user-set headers on ``result`` are merged in (without
+    overriding the framework-set ``content-type`` / ``cache-control`` /
     ``x-accel-buffering``).
     """
-    # ``check_cancelled`` only works when a request context is active —
-    # i.e. when the handler runs under the worker pool. When the SSE op
-    # runs directly on the selector (no pool, e.g. in tests), skip the
-    # check; the handler's iteration is bounded by the generator itself.
-    try:
-        check_cancelled()
-        cancel_supported = True
-    except LookupError:
-        cancel_supported = False
-    except RequestCancelled:
-        return
-
     headers = list(_SSE_RESPONSE_HEADERS)
     seen = {name for name, _ in headers}
     for name, value in _iter_headers(result.headers):
@@ -603,14 +591,7 @@ def _stream_sse(ctx: HTTPReqCtx, result: EventStreamResult[Any], adapters: Adapt
             continue
         headers.append((name, value))
 
-    ctx.start_response(_Response(status_code=result.status_code, headers=headers))
-    try:
-        for chunk in iter_events(result.body, adapters):
-            if cancel_supported:
-                check_cancelled()
-            ctx.send(chunk)
-    except RequestCancelled:
-        # Client went away; stop iterating. Don't try to finish_response
-        # — the connection state is uncertain.
-        return
-    ctx.finish_response()
+    ctx.stream(
+        _Response(status_code=result.status_code, headers=headers),
+        iter_events(result.body, adapters),
+    )

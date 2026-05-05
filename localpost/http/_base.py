@@ -56,7 +56,9 @@ __all__ = [
     "Selector",
     "SelectorCallback",
     "TrackHere",
+    "_NativeReqCtx",
     "compose",
+    "native_stream",
     "start_http_server",
 ]
 
@@ -168,22 +170,28 @@ REQUEST_TIMEOUT_RESPONSE, REQUEST_TIMEOUT_WIRE = _build_canned(408, REQUEST_TIME
 class HTTPReqCtx(Protocol):
     """Per-request context handed to a :data:`RequestHandler`.
 
-    Both server backends populate concrete implementations of this Protocol
-    with the same observable surface. ``selector`` and ``conn`` give access
-    to the underlying selector / connection for advanced use cases — e.g.
-    :func:`thread_pool_handler` reaches into them to borrow the connection
-    for a worker. They're declared as read-only properties so covariant
-    subtypes (each backend's concrete ``HTTPConn`` from ``server_h11`` /
-    ``server_httptools``) satisfy the Protocol.
+    Transport-agnostic surface — implemented by both the native
+    ``localpost.http`` server backends and external transports
+    (e.g. :func:`localpost.http.wsgi.to_wsgi`'s WSGI bridge).
 
-    The ``body`` attribute is empty when a :data:`RequestHandler` runs
-    (pre-body phase). It is populated by the selector with the fully
-    buffered request body before invoking a returned :data:`BodyHandler`.
+    ``body`` is empty when a :data:`RequestHandler` runs (pre-body phase).
+    It is populated by the selector / WSGI adapter with the fully
+    buffered request body before a returned :data:`BodyHandler` runs.
 
-    The ``attrs`` mapping is per-request mutable state for cross-cutting
-    concerns to thread information through. :class:`localpost.http.Router`
-    writes the matched ``RouteMatch`` here; middlewares can attach auth
-    info, tracing transactions, etc.
+    ``attrs`` is per-request mutable state for cross-cutting concerns
+    to thread information through. :class:`localpost.http.Router` writes
+    the matched ``RouteMatch`` here; middlewares can attach auth info,
+    tracing transactions, etc.
+
+    The ``remote_addr`` / ``local_addr`` / ``scheme`` fields mirror
+    Granian RSGI's ``scope.client`` / ``scope.server`` / ``scope.scheme``
+    — addresses are formatted as ``"host:port"``. ``remote_addr`` is
+    ``None`` when the peer address isn't available (rare; e.g. some
+    UNIX-domain transports).
+
+    ``borrowed`` / :meth:`borrow` are degenerate on transports that
+    don't manage their own connection lifetime (the WSGI bridge always
+    reports ``borrowed=True`` and :meth:`borrow` is a no-op CM).
     """
 
     request: Request
@@ -192,9 +200,11 @@ class HTTPReqCtx(Protocol):
     attrs: dict[Any, Any]
 
     @property
-    def selector(self) -> Selector: ...
+    def remote_addr(self) -> str | None: ...
     @property
-    def conn(self) -> BaseHTTPConn: ...
+    def local_addr(self) -> str: ...
+    @property
+    def scheme(self) -> str: ...
     @property
     def borrowed(self) -> bool: ...
     def borrow(self) -> AbstractContextManager[HTTPReqCtx]: ...
@@ -203,6 +213,19 @@ class HTTPReqCtx(Protocol):
     def send(self, chunk: Buffer, /) -> None: ...
     def finish_response(self) -> None: ...
     def complete(self, response: Response, body: bytes | None = None) -> None: ...
+    def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
+        """Emit ``response`` then drain ``chunks`` to the wire.
+
+        Declarative streaming — the transport owns iteration, so it can
+        choose its own pacing / cancellation policy. The native server
+        checks :func:`localpost.http.check_cancelled` between chunks and
+        returns silently if the client has gone away. External transports
+        (WSGI bridge) hand the iterator straight to their host server.
+
+        Sugar over :meth:`start_response` + :meth:`send` (per-chunk) +
+        :meth:`finish_response`. Pure-imperative callers still have the
+        trio available; ``stream`` is the path most operations want.
+        """
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
         """Emit ``response`` and stream ``count`` bytes from ``file`` starting
         at ``offset`` via :func:`socket.sendfile` (zero-copy). Terminal — like
@@ -215,6 +238,18 @@ class HTTPReqCtx(Protocol):
         on selector-thread give-back via :meth:`HTTPReqCtx.finish_response`'s
         ``_maybe_give_back`` path.
         """
+
+
+class _NativeReqCtx(HTTPReqCtx, Protocol):
+    """Internal Protocol — the native ``localpost.http`` ctx.
+
+    Adds back the connection handle that internal callers (worker pool,
+    handler-error recovery) need. External transports (WSGI / ASGI) do
+    not implement this — they only satisfy :class:`HTTPReqCtx`.
+    """
+
+    @property
+    def conn(self) -> BaseHTTPConn: ...
 
 
 BodyHandler = Callable[[HTTPReqCtx], None]
@@ -319,13 +354,44 @@ def _send_all(conn: BaseHTTPConn, payload: bytes | bytearray | memoryview) -> No
         sent += n
 
 
-def emit_handler_error(ctx: HTTPReqCtx) -> None:
+def native_stream(ctx: HTTPReqCtx, response: Response, chunks: Iterator[bytes]) -> None:
+    """Default :meth:`HTTPReqCtx.stream` impl on top of the imperative trio.
+
+    Delegates to ``ctx.start_response`` / ``ctx.send`` / ``ctx.finish_response``,
+    interleaving :func:`localpost.http.check_cancelled` between chunks. On
+    a clean disconnect (``RequestCancelled``) returns silently — the conn
+    is in an uncertain state and will be closed by the worker pool.
+
+    ``LookupError`` from ``check_cancelled`` (no request context active —
+    e.g. on the selector thread) is treated as "no cancellation
+    available" and silently skipped.
+    """
+    # Local import to avoid the import cycle (cancel imports HTTPReqCtx).
+    from localpost.http._cancel import RequestCancelled, check_cancelled  # noqa: PLC0415
+
+    ctx.start_response(response)
+    try:
+        for chunk in chunks:
+            try:
+                check_cancelled()
+            except LookupError:
+                pass
+            ctx.send(chunk)
+    except RequestCancelled:
+        return
+    ctx.finish_response()
+
+
+def emit_handler_error(ctx: _NativeReqCtx) -> None:
     """Best-effort recovery when a request handler raises.
 
     Emits a 500 response if no headers have been sent yet; otherwise closes
     the connection (we can't go back and prepend a status line to bytes
     already on the wire). All I/O failures are swallowed — the goal is to
     avoid amplifying one error into another.
+
+    Native-only. WSGI / ASGI transports surface handler errors through
+    their own protocol-level error path, not through ``ctx.conn.close()``.
     """
     logger = logging.getLogger(LOGGER_NAME)
     if ctx.response_status is None:
