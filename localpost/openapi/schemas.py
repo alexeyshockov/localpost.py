@@ -65,7 +65,7 @@ class SchemaRegistry:
             bucket = self._types_by_adapter.setdefault(adapter, [])
             if t not in bucket:
                 bucket.append(t)
-        return adapter.schema(t, ref_template=REF_TEMPLATE)
+        return adapter.schema(t, ref_template=REF_TEMPLATE, schema_for=self.schema_for)
 
     def components(self) -> dict[str, dict[str, Any]]:
         """Return the resolved ``components.schemas`` dict for every type
@@ -78,6 +78,6 @@ class SchemaRegistry:
                 return self._components
             schemas: dict[str, dict[str, Any]] = {}
             for adapter, types in self._types_by_adapter.items():
-                schemas.update(adapter.components(types, ref_template=REF_TEMPLATE))
+                schemas.update(adapter.components(types, ref_template=REF_TEMPLATE, schema_for=self.schema_for))
             self._components = schemas
             return schemas

@@ -9,6 +9,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from localpost.openapi.adapters import SchemaFor
+
 __all__ = ["PydanticAdapter"]
 
 
@@ -25,12 +27,21 @@ class PydanticAdapter:
     def is_body_type(self, t: Any, /) -> bool:
         return self.claims(t)
 
-    def schema(self, t: Any, /, *, ref_template: str) -> dict[str, Any]:
-        # Body emitted in components(); inline ref keeps the schema fragment
-        # consistent with msgspec's $ref-for-named-types behaviour.
+    def schema(self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None) -> dict[str, Any]:
+        del schema_for  # Pydantic models are self-contained; no recursion needed.
+        # Body emitted in components(); inline ref keeps the schema fragment consistent with
+        # msgspec's $ref-for-named-types behaviour.
         return {"$ref": ref_template.format(name=t.__name__)}
 
-    def components(self, types: Sequence[Any], /, *, ref_template: str) -> dict[str, dict[str, Any]]:
+    def components(
+        self,
+        types: Sequence[Any],
+        /,
+        *,
+        ref_template: str,
+        schema_for: SchemaFor | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        del schema_for
         # Pydantic's placeholder is ``{model}``, not ``{name}``.
         pydantic_template = ref_template.replace("{name}", "{model}")
         out: dict[str, dict[str, Any]] = {}

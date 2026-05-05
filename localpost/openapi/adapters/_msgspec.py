@@ -14,6 +14,8 @@ from typing import Any
 
 import msgspec
 
+from localpost.openapi.adapters import SchemaFor
+
 __all__ = ["MsgspecAdapter"]
 
 
@@ -40,7 +42,8 @@ class MsgspecAdapter:
         # NamedTuple: subclass of tuple with class-level field metadata.
         return hasattr(t, "__annotations__") and hasattr(t, "_fields")
 
-    def schema(self, t: Any, /, *, ref_template: str) -> dict[str, Any]:
+    def schema(self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None) -> dict[str, Any]:
+        del schema_for  # msgspec owns its full type universe; no recursion needed.
         try:
             (schema,), _ = msgspec.json.schema_components([t], ref_template=ref_template)
         except (TypeError, RuntimeError):
@@ -48,7 +51,15 @@ class MsgspecAdapter:
             return {}
         return schema
 
-    def components(self, types: Sequence[Any], /, *, ref_template: str) -> dict[str, dict[str, Any]]:
+    def components(
+        self,
+        types: Sequence[Any],
+        /,
+        *,
+        ref_template: str,
+        schema_for: SchemaFor | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        del schema_for
         if not types:
             return {}
         _, components = msgspec.json.schema_components(list(types), ref_template=ref_template)

@@ -20,14 +20,24 @@ a custom adapter (e.g. attrs, protobuf), pass an explicit registry to
 from __future__ import annotations
 
 import functools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 __all__ = [
     "AdapterRegistry",
+    "SchemaFor",
     "TypeAdapter",
     "default_registry",
 ]
+
+
+SchemaFor = Callable[[Any], dict[str, Any]]
+"""Registry callback an adapter can use to delegate nested-type schemas back to the registry.
+
+Returns a JSON Schema fragment (a ``$ref`` for named types, inline for primitives / unions),
+exactly like :meth:`SchemaRegistry.schema_for`. Adapters that don't recurse into foreign types
+can ignore the kwarg.
+"""
 
 
 class TypeAdapter(Protocol):
@@ -57,17 +67,31 @@ class TypeAdapter(Protocol):
         """
         ...
 
-    def schema(self, t: Any, /, *, ref_template: str) -> dict[str, Any]:
+    def schema(self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None) -> dict[str, Any]:
         """Return the JSON Schema fragment for ``t``.
 
         For named types, return ``{"$ref": ...}`` and let
         :meth:`components` produce the body.
+
+        ``schema_for`` is the registry's own :meth:`SchemaRegistry.schema_for`,
+        passed when the adapter may need to recurse into types it doesn't
+        own (e.g. an attrs class with a nested :class:`msgspec.Struct`
+        field). Adapters that own a closed type universe can ignore it.
         """
         ...
 
-    def components(self, types: Sequence[Any], /, *, ref_template: str) -> dict[str, dict[str, Any]]:
+    def components(
+        self,
+        types: Sequence[Any],
+        /,
+        *,
+        ref_template: str,
+        schema_for: SchemaFor | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Return the ``components.schemas`` entries for every type
         previously passed to :meth:`schema`.
+
+        ``schema_for`` has the same meaning as in :meth:`schema`.
         """
         ...
 

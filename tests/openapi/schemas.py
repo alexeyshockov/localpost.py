@@ -10,7 +10,7 @@ from typing import Any, Literal
 import msgspec
 import pytest
 
-from localpost.openapi.adapters import AdapterRegistry, default_registry
+from localpost.openapi.adapters import AdapterRegistry, SchemaFor, default_registry
 from localpost.openapi.adapters._msgspec import MsgspecAdapter
 from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry
 
@@ -156,11 +156,22 @@ class TestCustomAdapter:
         def is_body_type(self, t: Any, /) -> bool:
             return self.claims(t)
 
-        def schema(self, t: Any, /, *, ref_template: str) -> dict[str, Any]:
+        def schema(
+            self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None
+        ) -> dict[str, Any]:
+            del schema_for
             self.schema_calls.append(t)
             return {"$ref": ref_template.format(name="Marker")}
 
-        def components(self, types: Sequence[Any], /, *, ref_template: str) -> dict[str, dict[str, Any]]:
+        def components(
+            self,
+            types: Sequence[Any],
+            /,
+            *,
+            ref_template: str,
+            schema_for: SchemaFor | None = None,
+        ) -> dict[str, dict[str, Any]]:
+            del schema_for
             self.components_calls.append(types)
             return {"Marker": {"type": "object", "x-fake": True}}
 
