@@ -32,20 +32,7 @@ from hypothesis.stateful import (
     rule,
 )
 
-from localpost import threadtools
 from localpost.threadtools import Channel
-
-
-def _noop_check_cancelled() -> None:
-    return None
-
-
-@pytest.fixture
-def no_anyio(monkeypatch: pytest.MonkeyPatch):
-    # The channel calls ``threadtools.check_cancelled()`` (an alias of
-    # ``anyio.from_thread.check_cancelled``); outside an anyio thread context
-    # that raises. Stub it for the duration of the test.
-    monkeypatch.setattr(threadtools, "check_cancelled", _noop_check_cancelled)
 
 
 class _ChannelMachine(RuleBasedStateMachine):
@@ -234,30 +221,24 @@ class _SingleProducerBounded4Machine(_ChannelMachine):
     single_producer: ClassVar[bool] = True
 
 
-# Expose the auto-generated unittest TestCases to pytest. ``usefixtures``
-# applies ``no_anyio`` for the lifetime of each Hypothesis test method.
+# Expose the auto-generated unittest TestCases to pytest.
 
 
-@pytest.mark.usefixtures("no_anyio")
 class TestChannelUnbounded(_UnboundedMachine.TestCase):
     pass
 
 
-@pytest.mark.usefixtures("no_anyio")
 class TestChannelBounded1(_Bounded1Machine.TestCase):
     pass
 
 
-@pytest.mark.usefixtures("no_anyio")
 class TestChannelBounded4(_Bounded4Machine.TestCase):
     pass
 
 
-@pytest.mark.usefixtures("no_anyio")
 class TestChannelSingleProducerUnbounded(_SingleProducerUnboundedMachine.TestCase):
     pass
 
 
-@pytest.mark.usefixtures("no_anyio")
 class TestChannelSingleProducerBounded4(_SingleProducerBounded4Machine.TestCase):
     pass

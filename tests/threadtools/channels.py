@@ -4,21 +4,10 @@ import time
 import pytest
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
-from localpost import threadtools
 from localpost.threadtools import Channel, SendChannel
 
 
-@pytest.fixture
-def no_anyio():
-    original_check_cancelled = threadtools.check_cancelled
-    threadtools.check_cancelled = lambda: None
-    try:
-        yield
-    finally:
-        threadtools.check_cancelled = original_check_cancelled
-
-
-def test_basic_send_receive(no_anyio):
+def test_basic_send_receive():
     """Test basic send and receive operations."""
     sender, receiver = Channel.create()
 
@@ -37,7 +26,7 @@ def test_basic_send_receive(no_anyio):
     receiver.close()
 
 
-def test_multiple_senders_single_receiver(no_anyio):
+def test_multiple_senders_single_receiver():
     """Test multiple senders with a single receiver."""
     sender, receiver = Channel.create()
     results = []
@@ -79,7 +68,7 @@ def test_multiple_senders_single_receiver(no_anyio):
         assert len(sender_msgs) == messages_per_sender
 
 
-def test_single_sender_multiple_receivers(no_anyio):
+def test_single_sender_multiple_receivers():
     """Test single sender with multiple receivers."""
     sender, receiver = Channel.create()
     results = {i: [] for i in range(3)}
@@ -123,7 +112,7 @@ def test_single_sender_multiple_receivers(no_anyio):
         assert len(receiver_results) > 0
 
 
-def test_no_receivers_error(no_anyio):
+def test_no_receivers_error():
     """Test that sending without receivers raises ClosedResourceError."""
     sender, receiver = Channel.create()
     receiver.close()
@@ -134,7 +123,7 @@ def test_no_receivers_error(no_anyio):
     sender.close()
 
 
-def test_end_of_channel(no_anyio):
+def test_end_of_channel():
     """Test that receivers get EndOfStream when all senders close."""
     sender1, receiver = Channel.create()
     sender2 = sender1.clone()
@@ -158,7 +147,7 @@ def test_end_of_channel(no_anyio):
     receiver.close()
 
 
-def test_closed_channel_errors(no_anyio):
+def test_closed_channel_errors():
     """Test operations on closed channels raise errors."""
     sender, receiver = Channel.create()
 
@@ -173,7 +162,7 @@ def test_closed_channel_errors(no_anyio):
         receiver.get()
 
 
-def test_blocking_receive(no_anyio):
+def test_blocking_receive():
     """Test that receive blocks until item is available."""
     sender, receiver = Channel.create()
     result = []
@@ -205,13 +194,13 @@ def test_blocking_receive(no_anyio):
     assert result == ["delayed message"]
 
 
-def test_negative_capacity_rejected(no_anyio):
+def test_negative_capacity_rejected():
     """Channel capacities are None, 0, or a positive integer."""
     with pytest.raises(ValueError, match="capacity"):
         Channel.create(capacity=-1)
 
 
-def test_rendezvous_put_nowait_requires_waiting_receiver(no_anyio):
+def test_rendezvous_put_nowait_requires_waiting_receiver():
     """A capacity=0 channel has no spare buffer slot for put_nowait."""
     sender, receiver = Channel.create(capacity=0)
     try:
@@ -222,7 +211,7 @@ def test_rendezvous_put_nowait_requires_waiting_receiver(no_anyio):
         receiver.close()
 
 
-def test_rendezvous_put_nowait_hands_off_to_waiting_receiver(no_anyio):
+def test_rendezvous_put_nowait_hands_off_to_waiting_receiver():
     sender, receiver = Channel.create(capacity=0)
     received: list[str] = []
 
@@ -247,7 +236,7 @@ def test_rendezvous_put_nowait_hands_off_to_waiting_receiver(no_anyio):
         receiver.close()
 
 
-def test_rendezvous_put_blocks_until_receiver_consumes(no_anyio):
+def test_rendezvous_put_blocks_until_receiver_consumes():
     sender, receiver = Channel.create(capacity=0)
     sent = threading.Event()
 
@@ -279,7 +268,7 @@ def _wait_for(predicate, timeout: float = 1.0) -> bool:
     return predicate()
 
 
-def test_rendezvous_put_nowait_with_multiple_receivers(no_anyio):
+def test_rendezvous_put_nowait_with_multiple_receivers():
     """N concurrent put_nowait calls succeed when N receivers are waiting."""
     n = 4
     sender, receiver = Channel.create(capacity=0)
@@ -318,7 +307,7 @@ def test_rendezvous_put_nowait_with_multiple_receivers(no_anyio):
         sender.close()
 
 
-def test_rendezvous_put_nowait_decrements_after_consume(no_anyio):
+def test_rendezvous_put_nowait_decrements_after_consume():
     """pending_handoffs returns to 0 after each successful handoff."""
     sender, receiver = Channel.create(capacity=0)
 
@@ -342,7 +331,7 @@ def test_rendezvous_put_nowait_decrements_after_consume(no_anyio):
         receiver.close()
 
 
-def test_rendezvous_concurrent_blocking_puts_pair_with_receivers(no_anyio):
+def test_rendezvous_concurrent_blocking_puts_pair_with_receivers():
     """N concurrent put() calls all return when N receivers are waiting."""
     n = 4
     sender, receiver = Channel.create(capacity=0)
@@ -402,7 +391,7 @@ def test_rendezvous_concurrent_blocking_puts_pair_with_receivers(no_anyio):
                 pass
 
 
-def test_rendezvous_put_returns_when_its_own_item_consumed(no_anyio):
+def test_rendezvous_put_returns_when_its_own_item_consumed():
     """Blocking put waits for *its* item, not just any buffer drain."""
     sender, receiver = Channel.create(capacity=0)
     sender_b = sender.clone()
@@ -454,7 +443,7 @@ def test_rendezvous_put_returns_when_its_own_item_consumed(no_anyio):
         receiver.close()
 
 
-def test_concurrent_stress(no_anyio):
+def test_concurrent_stress():
     """Stress test with many concurrent senders and receivers."""
     num_senders = 5
     num_receivers = 3
@@ -519,7 +508,7 @@ def test_concurrent_stress(no_anyio):
     assert sorted(received) == sorted(expected)
 
 
-def test_channel_cleanup(no_anyio):
+def test_channel_cleanup():
     """Test that channels clean up properly when references are dropped."""
     for _ in range(10):
         sender, receiver = Channel.create()

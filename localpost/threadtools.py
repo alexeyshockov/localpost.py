@@ -13,7 +13,6 @@ from anyio import (
     ClosedResourceError,
     EndOfStream,
     WouldBlock,
-    from_thread,
 )
 
 __all__ = [
@@ -27,8 +26,12 @@ __all__ = [
 CHECK_TIMEOUT: float = 1.0
 """Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
 
-# Alias, so it's possible to override if needed
-check_cancelled = from_thread.check_cancelled
+def _noop_check() -> None:
+    """Default cancellation probe — a no-op.
+
+    Pass ``anyio.from_thread.check_cancelled`` (or any custom callable) to a
+    primitive's ``check_cancelled`` argument to opt in to cancellation.
+    """
 
 current_time = time.monotonic
 
@@ -49,13 +52,28 @@ class CancellableLock:
     these names. This is intentional, not a leaky abstraction.
     """
 
-    __slots__ = ("__exit__", "_acquire_restore", "_is_owned", "_release_save", "locked", "release", "source")
+    __slots__ = (
+        "__exit__",
+        "_acquire_restore",
+        "_check_cancelled",
+        "_is_owned",
+        "_release_save",
+        "locked",
+        "release",
+        "source",
+    )
 
-    def __init__(self, lock: threading.Lock | threading.RLock | None = None) -> None:
+    def __init__(
+        self,
+        lock: threading.Lock | threading.RLock | None = None,
+        *,
+        check_cancelled: Callable[[], None] = _noop_check,
+    ) -> None:
         lock = lock or threading.Lock()
         self.source = lock
         self.release = lock.release
         self.__exit__ = lock.__exit__
+        self._check_cancelled = check_cancelled
         if hasattr(self.source, "locked"):
             self.locked = lock.locked  # type: ignore
         if hasattr(lock, "_release_save"):
@@ -71,22 +89,29 @@ class CancellableLock:
         if timeout is None or timeout < 0:
             # No timeout — loop until acquired, checking for cancellation
             while not self.source.acquire(timeout=CHECK_TIMEOUT):
-                check_cancelled()
+                self._check_cancelled()
             return True
         # Finite timeout — respect the deadline
         deadline = current_time() + timeout
         while (remaining := deadline - current_time()) > 0:
             if self.source.acquire(timeout=min(CHECK_TIMEOUT, remaining)):
                 return True
-            check_cancelled()
+            self._check_cancelled()
         return False
 
     __enter__ = acquire
 
 
-def cancellable_condition(lock: CancellableLock | None = None) -> threading.Condition:
+def cancellable_condition(
+    lock: CancellableLock | None = None,
+    *,
+    check_cancelled: Callable[[], None] = _noop_check,
+) -> threading.Condition:
     # ``Condition`` accepts any duck-typed lock with the right private attrs;
     # ``CancellableLock`` mirrors them (see its docstring).
+    # Note: ``check_cancelled`` controls the condition's ``wait`` loop only.
+    # The lock keeps whatever probe it was constructed with — pass a lock built
+    # with the same callable if you want a single coherent policy.
     cond = threading.Condition(lock or CancellableLock(threading.RLock()))  # type: ignore
     orig_wait = cond.wait
 
@@ -111,12 +136,14 @@ def cancellable_condition(lock: CancellableLock | None = None) -> threading.Cond
     return cond
 
 
-def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
+def cancellable_semaphore(
+    value: int = 1, *, check_cancelled: Callable[[], None] = _noop_check
+) -> threading.BoundedSemaphore:
     # ``Semaphore`` / ``BoundedSemaphore`` use a private ``_cond`` for blocking
     # waits; swap it for our cancellable variant so the semaphore's blocking
     # ``acquire`` becomes cancellation-aware.
     source = threading.BoundedSemaphore(value)
-    source._cond = cancellable_condition()  # type: ignore
+    source._cond = cancellable_condition(check_cancelled=check_cancelled)  # type: ignore
     return source
 
 
@@ -128,14 +155,22 @@ def cancellable_semaphore(value: int = 1) -> threading.BoundedSemaphore:
 @final
 class Channel[T]:
     @staticmethod
-    def create(capacity: int | None = None) -> tuple[SendChannel[T], ReceiveChannel[T]]:
+    def create(
+        capacity: int | None = None,
+        *,
+        check_cancelled: Callable[[], None] = _noop_check,
+    ) -> tuple[SendChannel[T], ReceiveChannel[T]]:
         """Create a channel sender/receiver pair.
 
         Args:
             capacity: Buffer size. None means unbounded, 0 means rendezvous
                 (put blocks until a receiver consumes the item), N>0 means bounded.
+            check_cancelled: Cancellation probe invoked from blocking lock /
+                condition waits. Defaults to a no-op; pass
+                ``anyio.from_thread.check_cancelled`` to make the channel
+                cancellation-aware from inside an anyio worker thread.
         """
-        with ChannelState(capacity) as state:
+        with ChannelState(capacity, check_cancelled=check_cancelled) as state:
             state.open_send_channels += 1
             tx = SendChannel(state)
             state.open_receive_channels += 1
@@ -214,7 +249,9 @@ class ChannelState[T]:
     not_empty: threading.Condition
     not_full: threading.Condition
 
-    def __init__(self, capacity: int | None = None):
+    def __init__(
+        self, capacity: int | None = None, *, check_cancelled: Callable[[], None] = _noop_check
+    ):
         if capacity is not None and capacity < 0:
             raise ValueError("capacity must be >= 0 or None")
         self.buffer = deque()
@@ -235,9 +272,9 @@ class ChannelState[T]:
         # holds other in-flight items.
         self.pending_handoffs = 0
         self.items_consumed = 0
-        self._lock = CancellableLock(threading.RLock())
-        self.not_empty = cancellable_condition(self._lock)
-        self.not_full = cancellable_condition(self._lock)
+        self._lock = CancellableLock(threading.RLock(), check_cancelled=check_cancelled)
+        self.not_empty = cancellable_condition(self._lock, check_cancelled=check_cancelled)
+        self.not_full = cancellable_condition(self._lock, check_cancelled=check_cancelled)
 
     @property
     def can_put(self) -> bool:
@@ -301,8 +338,9 @@ class SendChannel[T](BaseSendChannel[T]):
         # Phase 1: wait for space in the buffer.
         # Body of ``put_nowait`` is inlined here to avoid re-entering the lock
         # and to skip the ``WouldBlock`` exception on the contended path.
+        # Cancellation is observed inside ``state.__enter__`` (cancellable lock
+        # acquire) and ``state.not_full.wait`` (cancellable condition).
         while True:
-            check_cancelled()
             with state:
                 if self._closed:
                     raise ClosedResourceError("send channel has been closed")
@@ -330,7 +368,6 @@ class SendChannel[T](BaseSendChannel[T]):
                     if state.open_receive_channels == 0:
                         return  # No receivers left
                     state.not_full.wait()
-                check_cancelled()
 
     def close(self) -> None:
         with self._state as state:
@@ -357,8 +394,9 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
 
     @override
     def get(self) -> T:
+        # Cancellation is observed inside ``state.__enter__`` (cancellable lock
+        # acquire) and ``state.not_empty.wait`` (cancellable condition).
         state = self._state
-        check_cancelled()
         while not self._closed:
             with state:
                 if state.buffer:
