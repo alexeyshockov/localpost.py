@@ -1,5 +1,6 @@
 """Tests for ``localpost.threadtools.ThreadTaskGroup``."""
 
+import contextvars
 import threading
 import time
 from concurrent.futures import Future
@@ -297,3 +298,71 @@ def test_start_soon_from_arbitrary_thread():
 def _record(i: int, sink: list[int], lock: threading.Lock) -> None:
     with lock:
         sink.append(i)
+
+
+# ---------------------------------------------------------------------------
+# ContextVar propagation
+# ---------------------------------------------------------------------------
+
+
+def test_task_sees_caller_context():
+    """A ContextVar set in the caller is visible inside the task."""
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("test_var")
+    var.set("caller-value")
+
+    with ThreadTaskGroup() as tg:
+        fut = tg.start_soon(var.get)
+
+    assert fut.result(timeout=5) == "caller-value"
+
+
+def test_task_mutation_does_not_leak_to_caller():
+    """ContextVar.set inside a task is confined to the task's context copy."""
+    var: contextvars.ContextVar[str] = contextvars.ContextVar("test_var", default="original")
+
+    def mutate():
+        var.set("task-mutated")
+        return var.get()
+
+    with ThreadTaskGroup() as tg:
+        fut = tg.start_soon(mutate)
+
+    assert fut.result(timeout=5) == "task-mutated"
+    assert var.get() == "original"  # caller's view unchanged
+
+
+def test_each_start_soon_captures_independently():
+    """Two ``start_soon`` calls see different values when the body mutates
+    the ContextVar between them — capture is per-call, not per-group."""
+    var: contextvars.ContextVar[int] = contextvars.ContextVar("test_var", default=0)
+
+    with ThreadTaskGroup() as tg:
+        var.set(1)
+        f1 = tg.start_soon(var.get)
+        var.set(2)
+        f2 = tg.start_soon(var.get)
+
+    assert f1.result(timeout=5) == 1
+    assert f2.result(timeout=5) == 2
+
+
+def test_concurrent_tasks_see_their_own_context():
+    """N concurrent tasks each captured a different ContextVar value;
+    each must see its own, not another task's."""
+    var: contextvars.ContextVar[int] = contextvars.ContextVar("test_var")
+
+    barrier = threading.Barrier(10)
+
+    def observe() -> int:
+        # Sync all tasks at the same wall-clock moment so they're guaranteed
+        # to be running concurrently when they read the ContextVar.
+        barrier.wait(timeout=5)
+        return var.get()
+
+    with ThreadTaskGroup() as tg:
+        futs: list[Future[int]] = []
+        for i in range(10):
+            var.set(i)
+            futs.append(tg.start_soon(observe))
+
+    assert sorted(f.result(timeout=5) for f in futs) == list(range(10))

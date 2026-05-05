@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import dataclasses as dc
 import threading
 import time
@@ -400,11 +401,14 @@ class _Task:
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     group: ThreadTaskGroup
+    context: contextvars.Context
+    """Snapshot of the caller's ContextVars at ``start_soon`` time. The user
+    callable runs inside this context; mutations are confined to the task."""
 
     def run(self) -> None:
         try:
             try:
-                result = self.fn(*self.args, **self.kwargs)
+                result = self.context.run(self.fn, *self.args, **self.kwargs)
             except BaseException as exc:  # noqa: BLE001 — Trio-style: capture everything
                 self.future.set_exception(exc)
                 self.group._record_error(exc)
@@ -498,6 +502,12 @@ class ThreadTaskGroup:
     or exception. Reading the future is optional — a task exception is
     surfaced via the ``ExceptionGroup`` raised at ``__exit__`` even if
     the future is discarded.
+
+    ``contextvars`` are propagated: each ``start_soon`` snapshots the
+    caller's context with :func:`contextvars.copy_context`, and the task
+    runs inside that snapshot. Mutations the task makes to ContextVars
+    stay confined to its copy — same semantics as
+    :func:`asyncio.to_thread` and Trio / AnyIO task spawn.
     """
 
     __slots__ = ("_closed", "_cv", "_errors", "_lock", "_name", "_pending")
@@ -547,7 +557,9 @@ class ThreadTaskGroup:
                 raise RuntimeError("ThreadTaskGroup is closed")
             self._pending += 1
         fut: Future[R] = Future()
-        task = _Task(fut, fn, args, kwargs, self)
+        # Snapshot the caller's context now (matches Trio / AnyIO / asyncio
+        # ``to_thread`` semantics); each ``start_soon`` captures independently.
+        task = _Task(fut, fn, args, kwargs, self, contextvars.copy_context())
         while True:
             try:
                 w = _idle.pop()
