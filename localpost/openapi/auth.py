@@ -1,23 +1,24 @@
-"""Concrete :class:`OpFilter` implementations for HTTP authentication.
+"""Concrete :class:`OpMiddleware` implementations for HTTP authentication.
 
-Both filters are thin wrappers around a :func:`@op_filter`-decorated
-inner function that reads the ``Authorization`` header and validates it.
-The OpenAPI parameter (``Authorization``) and the ``401`` response are
-contributed *automatically* by ``@op_filter`` — only the
+Both middlewares are thin wrappers around an
+:func:`@op_middleware`-decorated inner function that reads the
+``Authorization`` header and validates it. The OpenAPI parameter
+(``Authorization``) and the ``401`` response are contributed
+*automatically* by ``@op_middleware`` — only the
 :class:`SecurityScheme` registration at the root is custom code here.
 
-On success the validated principal is stashed on ``ctx.attrs[<filter>]``
+On success the validated principal is stashed on ``ctx.attrs[<middleware>]``
 so user code can pull it via a tiny custom resolver — see the README
 for the pattern. The validator is a sync callable returning either the
 principal (any object) on success or ``None`` on rejection.
 
 Use either app-wide:
 
-    app = HttpApp(filters=[HttpBearerAuth(validate_token)])
+    app = HttpApp(middlewares=[HttpBearerAuth(validate_token)])
 
 or per-operation:
 
-    @app.get("/me", filters=[HttpBearerAuth(validate_token)])
+    @app.get("/me", middlewares=[HttpBearerAuth(validate_token)])
     def me(ctx: HTTPReqCtx) -> dict: ...
 """
 
@@ -31,7 +32,7 @@ from typing import Annotated, Any
 
 from localpost.http import HTTPReqCtx
 from localpost.openapi import spec
-from localpost.openapi.filter import _FunctionFilter, op_filter
+from localpost.openapi.middleware import ApiOperation, _FunctionMiddleware, op_middleware
 from localpost.openapi.resolvers import FromHeader
 from localpost.openapi.results import OpResult, Unauthorized
 from localpost.openapi.schemas import SchemaRegistry
@@ -54,7 +55,7 @@ def _add_security_requirement(op: spec.Operation, scheme_name: str, scopes: tupl
 
 @dataclass(slots=True, eq=False)
 class HttpBearerAuth:
-    """``Authorization: Bearer <token>`` filter.
+    """``Authorization: Bearer <token>`` middleware.
 
     Args:
         validator: ``token_str -> principal | None``. Called for every
@@ -73,17 +74,18 @@ class HttpBearerAuth:
     bearer_format: str = "JWT"
     description: str = ""
 
-    _wrapped: _FunctionFilter = field(init=False, repr=False)
+    _wrapped: _FunctionMiddleware = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         validator = self.validator
         principal_key = self  # stable identity across requests
 
-        @op_filter
+        @op_middleware
         def _bearer(
             ctx: HTTPReqCtx,
+            call_next: ApiOperation,
             authorization: Annotated[str, FromHeader("Authorization")] = "",
-        ) -> None | Unauthorized[str]:
+        ) -> Unauthorized[str] | OpResult:
             # Default ``""`` makes the header optional at the resolver level so
             # absence is reported as 401 (with the spec-aware Unauthorized) rather
             # than a generic 400 from FromHeader's "missing required" branch.
@@ -93,12 +95,12 @@ class HttpBearerAuth:
             if principal is None:
                 return Unauthorized("Invalid token")
             ctx.attrs[principal_key] = principal
-            return None
+            return call_next(ctx)
 
         self._wrapped = _bearer
 
-    def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult:
-        return self._wrapped(ctx)
+    def __call__(self, ctx: HTTPReqCtx, call_next: ApiOperation, /) -> OpResult:
+        return self._wrapped(ctx, call_next)
 
     def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
         scheme = spec.SecurityScheme(
@@ -110,7 +112,7 @@ class HttpBearerAuth:
         return _add_security_scheme(doc, self.scheme_name, scheme)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
-        # ``@op_filter`` already adds the Authorization header parameter
+        # ``@op_middleware`` already adds the Authorization header parameter
         # and the 401 response from the wrapped function's signature.
         # We only add the security requirement on top.
         op = self._wrapped.contribute_operation(op, registry)
@@ -119,7 +121,7 @@ class HttpBearerAuth:
 
 @dataclass(slots=True, eq=False)
 class HttpBasicAuth:
-    """``Authorization: Basic <base64(user:pass)>`` filter.
+    """``Authorization: Basic <base64(user:pass)>`` middleware.
 
     Args:
         validator: ``(username, password) -> principal | None``. Called
@@ -138,18 +140,19 @@ class HttpBasicAuth:
     realm: str = "localpost"
     description: str = ""
 
-    _wrapped: _FunctionFilter = field(init=False, repr=False)
+    _wrapped: _FunctionMiddleware = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         validator = self.validator
         challenge = {"WWW-Authenticate": f'Basic realm="{self.realm}"'}
         principal_key = self
 
-        @op_filter
+        @op_middleware
         def _basic(
             ctx: HTTPReqCtx,
+            call_next: ApiOperation,
             authorization: Annotated[str, FromHeader("Authorization")] = "",
-        ) -> None | Unauthorized[str]:
+        ) -> Unauthorized[str] | OpResult:
             if not authorization.startswith("Basic "):
                 return Unauthorized("Missing or malformed Authorization header", headers=challenge)
             try:
@@ -163,12 +166,12 @@ class HttpBasicAuth:
             if principal is None:
                 return Unauthorized("Invalid credentials", headers=challenge)
             ctx.attrs[principal_key] = principal
-            return None
+            return call_next(ctx)
 
         self._wrapped = _basic
 
-    def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult:
-        return self._wrapped(ctx)
+    def __call__(self, ctx: HTTPReqCtx, call_next: ApiOperation, /) -> OpResult:
+        return self._wrapped(ctx, call_next)
 
     def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI:
         scheme = spec.SecurityScheme(type="http", scheme="basic", description=self.description)

@@ -15,10 +15,13 @@ the schema generator knows the body type per status code::
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from localpost.openapi.sse import Event, EventStream
 
 __all__ = [
     "OpResult",
@@ -26,6 +29,7 @@ __all__ = [
     "Created",
     "Accepted",
     "NoContent",
+    "EventStreamResult",
     "BadRequest",
     "Unauthorized",
     "Forbidden",
@@ -120,6 +124,37 @@ class NoContent(OpResult):
 
     def __init__(self, *, headers: Mapping[str, str] | None = None) -> None:
         object.__setattr__(self, "body", None)
+        object.__setattr__(self, "headers", _normalize_headers(headers))
+
+
+@dataclass(frozen=True, eq=False, slots=True, init=False)
+class EventStreamResult[T](OpResult):
+    """Server-Sent Events response.
+
+    Body is the stream source — an :class:`~localpost.openapi.sse.EventStream`,
+    a generator/iterator of payloads, or an iterable of
+    :class:`~localpost.openapi.sse.Event` instances. The response is sent
+    with ``Content-Type: text/event-stream`` and chunked transfer encoding;
+    one wire event per yielded item.
+
+    Returning a generator/iterator/``EventStream`` directly from an operation
+    is auto-promoted to ``EventStreamResult`` — you only construct one
+    explicitly to attach extra response headers.
+    """
+
+    body: EventStream[T] | Iterator[T] | Iterator[Event[T]] | Iterable[T] | Iterable[Event[T]]
+
+    _status_code: ClassVar[int] = 200
+    _description: ClassVar[str] = "Successful response"
+
+    def __init__(
+        self,
+        body: Any,
+        /,
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        object.__setattr__(self, "body", body)
         object.__setattr__(self, "headers", _normalize_headers(headers))
 
 

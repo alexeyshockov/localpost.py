@@ -18,7 +18,7 @@ def _basic_header(user: str, password: str) -> bytes:
 class TestHttpBearerAuthRuntime:
     def test_valid_token_passes(self):
         bearer = HttpBearerAuth(validator=lambda t: {"sub": t} if t == "good" else None)
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -33,7 +33,7 @@ class TestHttpBearerAuthRuntime:
 
     def test_invalid_token_returns_401(self):
         bearer = HttpBearerAuth(validator=lambda _t: None)
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -47,7 +47,7 @@ class TestHttpBearerAuthRuntime:
 
     def test_missing_header_returns_401(self):
         bearer = HttpBearerAuth(validator=lambda _t: True)
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -60,7 +60,7 @@ class TestHttpBearerAuthRuntime:
 
     def test_non_bearer_scheme_returns_401(self):
         bearer = HttpBearerAuth(validator=lambda _t: True)
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -75,7 +75,7 @@ class TestHttpBearerAuthRuntime:
 class TestHttpBearerAuthSpec:
     def test_security_scheme_in_components(self):
         bearer = HttpBearerAuth(validator=lambda _t: True, bearer_format="opaque")
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -90,7 +90,7 @@ class TestHttpBearerAuthSpec:
 
     def test_operation_gets_security_and_401(self):
         bearer = HttpBearerAuth(validator=lambda _t: True)
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -98,8 +98,9 @@ class TestHttpBearerAuthSpec:
 
         op = app.openapi_doc.to_dict()["paths"]["/me"]["get"]
         assert op["security"] == [{"bearerAuth": []}]
-        # 401 response is contributed by the @op_filter wrapper from the
-        # filter's `Unauthorized[str]` return annotation — body schema included.
+        # 401 response is contributed by the @op_middleware wrapper from
+        # the middleware's `Unauthorized[str]` return annotation — body
+        # schema included.
         assert op["responses"]["401"]["description"] == "Unauthorized"
         assert op["responses"]["401"]["content"]["application/json"]["schema"] == {"type": "string"}
 
@@ -107,7 +108,7 @@ class TestHttpBearerAuthSpec:
         bearer = HttpBearerAuth(validator=lambda _t: True)
         app = HttpApp()
 
-        @app.get("/protected", filters=[bearer])
+        @app.get("/protected", middlewares=[bearer])
         def protected() -> str:
             return "x"
 
@@ -123,7 +124,7 @@ class TestHttpBearerAuthSpec:
 
     def test_custom_scheme_name(self):
         bearer = HttpBearerAuth(validator=lambda _t: True, scheme_name="apiToken")
-        app = HttpApp(filters=[bearer])
+        app = HttpApp(middlewares=[bearer])
 
         @app.get("/me")
         def me() -> str:
@@ -140,7 +141,7 @@ class TestHttpBearerAuthSpec:
 class TestHttpBasicAuthRuntime:
     def test_valid_credentials_pass(self):
         basic = HttpBasicAuth(validator=lambda u, p: u if (u, p) == ("alice", "wonder") else None)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -158,7 +159,7 @@ class TestHttpBasicAuthRuntime:
 
     def test_invalid_credentials_returns_401_with_challenge(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: None)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -175,7 +176,7 @@ class TestHttpBasicAuthRuntime:
 
     def test_missing_header_returns_401_with_challenge(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -188,7 +189,7 @@ class TestHttpBasicAuthRuntime:
 
     def test_malformed_base64_returns_401(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -202,7 +203,7 @@ class TestHttpBasicAuthRuntime:
 
     def test_credentials_without_colon_returns_401(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -222,7 +223,7 @@ class TestHttpBasicAuthRuntime:
 class TestHttpBasicAuthSpec:
     def test_security_scheme_in_components(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -236,7 +237,7 @@ class TestHttpBasicAuthSpec:
 
     def test_operation_gets_security_and_401(self):
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
-        app = HttpApp(filters=[basic])
+        app = HttpApp(middlewares=[basic])
 
         @app.get("/me")
         def me() -> str:
@@ -248,20 +249,20 @@ class TestHttpBasicAuthSpec:
         assert op["responses"]["401"]["content"]["application/json"]["schema"] == {"type": "string"}
 
 
-# --- Integration: mixing two filters in one app --------------------------
+# --- Integration: mixing two middlewares in one app ---------------------
 
 
 class TestMixedAuth:
-    def test_two_filters_register_both_schemes(self):
+    def test_two_middlewares_register_both_schemes(self):
         bearer = HttpBearerAuth(validator=lambda _t: True)
         basic = HttpBasicAuth(validator=lambda _u, _p: True)
         app = HttpApp()
 
-        @app.get("/jwt", filters=[bearer])
+        @app.get("/jwt", middlewares=[bearer])
         def jwt() -> str:
             return "j"
 
-        @app.get("/basic", filters=[basic])
+        @app.get("/basic", middlewares=[basic])
         def b() -> str:
             return "b"
 

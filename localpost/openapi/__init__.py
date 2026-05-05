@@ -40,7 +40,7 @@ from localpost.openapi import spec
 from localpost.openapi.adapters import AdapterRegistry, TypeAdapter, default_registry
 from localpost.openapi.app import HttpApp
 from localpost.openapi.auth import HttpBasicAuth, HttpBearerAuth
-from localpost.openapi.filter import OpFilter, op_filter
+from localpost.openapi.middleware import ApiOperation, OpMiddleware, op_middleware
 from localpost.openapi.operation import Operation
 from localpost.openapi.resolvers import (
     ArgResolver,
@@ -55,6 +55,7 @@ from localpost.openapi.results import (
     BadRequest,
     Conflict,
     Created,
+    EventStreamResult,
     Forbidden,
     InternalServerError,
     NoContent,
@@ -74,9 +75,10 @@ __all__ = [
     "Operation",
     # spec sub-module (advanced; not all symbols flattened)
     "spec",
-    # filters
-    "OpFilter",
-    "op_filter",
+    # middleware
+    "ApiOperation",
+    "OpMiddleware",
+    "op_middleware",
     "HttpBearerAuth",
     "HttpBasicAuth",
     # arg resolvers
@@ -92,6 +94,7 @@ __all__ = [
     "Created",
     "Accepted",
     "NoContent",
+    "EventStreamResult",
     "BadRequest",
     "Unauthorized",
     "Forbidden",

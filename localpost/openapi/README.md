@@ -10,7 +10,7 @@ Type-driven HTTP framework with built-in **OpenAPI 3.2** generation, on top of
   ```
   Both branches end up in the OpenAPI doc with proper schemas; the runtime
   short-circuits to the right status code.
-- **OpenAPI-aware middleware (filters).** Filters and auth contribute to the
+- **OpenAPI-aware middleware.** Middlewares and auth contribute to the
   spec themselves (security schemes, extra parameters, extra response codes)
   via an `update_doc` hook. There's no second place to declare auth.
 - **msgspec-first.** [msgspec](https://jcristharif.com/msgspec/) does request
@@ -113,6 +113,7 @@ failure → `BadRequest`).
 | `Created[T]` | 201 | |
 | `Accepted[T]` | 202 | |
 | `NoContent` | 204 | No body. |
+| `EventStreamResult[T]` | 200 | SSE stream — see below. |
 | `BadRequest[T]` | 400 | |
 | `Unauthorized[T]` | 401 | |
 | `Forbidden[T]` | 403 | |
@@ -123,71 +124,96 @@ failure → `BadRequest`).
 | `InternalServerError[T]` | 500 | |
 
 Use the *class* in return annotations (`Book | NotFound[str]`) so the OpenAPI
-doc picks up the body type per status code. Returning a bare
-`localpost.http.Response` is the escape hatch (no schema contribution).
+doc picks up the body type per status code.
 
-### `OpFilter`
+### `OpMiddleware`
 
-A filter is middleware that knows how to describe itself in the OpenAPI doc:
+A middleware wraps the operation core. It receives the request context and
+a `call_next` callable that runs the rest of the chain — and knows how to
+describe itself in the OpenAPI doc:
 
 ```python
-class OpFilter(Protocol):
-    def __call__(self, ctx: HTTPReqCtx, /) -> None | OpResult: ...
+ApiOperation = Callable[[HTTPReqCtx], OpResult]
+
+
+class OpMiddleware(Protocol):
+    def __call__(self, ctx: HTTPReqCtx, call_next: ApiOperation, /) -> OpResult: ...
     def contribute_root(self, doc: spec.OpenAPI, registry: SchemaRegistry, /) -> spec.OpenAPI: ...
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation: ...
 ```
 
-- `__call__` runs before the resolvers; return an `OpResult` to short-circuit.
+- `__call__` runs around the operation. Return `call_next(ctx)` to forward
+  (optionally post-processing the result), or short-circuit by returning
+  any other `OpResult`.
 - `contribute_root` is called once at spec-build time (typically to register
   a `SecurityScheme`).
-- `contribute_operation` is called for each operation that the filter is
+- `contribute_operation` is called for each operation that the middleware is
   attached to (typically to add a 401 response and a `security` requirement).
 
 Apply app-wide:
 
 ```python
-app = HttpApp(filters=[my_filter])
+app = HttpApp(middlewares=[my_middleware])
 ```
 
 or per-operation:
 
 ```python
-@app.get("/admin", filters=[my_filter])
+@app.get("/admin", middlewares=[my_middleware])
 def admin() -> str: ...
 ```
 
-### `@op_filter` — filters as tiny operations
+### `@op_middleware` — middlewares as tiny operations
 
-For the common case, write a filter the same way you'd write a handler:
-declare your inputs, declare your possible failure responses in the return
-type, and let the framework do the OpenAPI bookkeeping:
+For the common case, write a middleware the same way you'd write a handler:
+declare your inputs (plus the `call_next` parameter), declare your possible
+failure responses in the return type, and let the framework do the OpenAPI
+bookkeeping:
 
 ```python
 from typing import Annotated
 
-from localpost.openapi import FromHeader, TooManyRequests, op_filter
+from localpost.http import HTTPReqCtx
+from localpost.openapi import (
+    ApiOperation,
+    FromHeader,
+    OpResult,
+    TooManyRequests,
+    op_middleware,
+)
 
 
-@op_filter
+@op_middleware
 def rate_limit(
+    ctx: HTTPReqCtx,
+    call_next: ApiOperation,
     x_client: Annotated[str, FromHeader("X-Client-Id")],
-) -> None | TooManyRequests[str]:
+) -> TooManyRequests[str] | OpResult:
     if quota_exhausted(x_client):
         return TooManyRequests("Slow down")
-    return None
+    return call_next(ctx)
 
 
-@app.get("/expensive", filters=[rate_limit])
+@app.get("/expensive", middlewares=[rate_limit])
 def expensive() -> str: ...
 ```
 
-Without writing any spec code, every operation that uses this filter gets:
+Without writing any spec code, every operation that uses this middleware
+gets:
 - the `X-Client-Id` header in its `parameters`,
 - `429 Too Many Requests` in its `responses` (with the body schema for `str`).
 
-The filter's return type union *is* the OpenAPI contract. Filters must
-return `None` or an `OpResult`; anything else raises `TypeError` at
-request time.
+The return-type union *is* the OpenAPI contract. Bare `OpResult` in the
+union is the *passthrough* sentinel and contributes nothing; subclasses
+contribute their response code. Middlewares must return an `OpResult`
+(typically by calling `call_next(ctx)`); anything else raises `TypeError`
+at request time.
+
+> **SSE caveat.** When the wrapped operation streams an SSE response,
+> `call_next` returns an `EventStreamResult` whose body is an iterator. A
+> middleware can wrap that iterator (transforming/dropping events) but
+> can't post-process headers after streaming has started — they're sent
+> before the first event.
 
 ### Server-Sent Events (SSE)
 
@@ -230,18 +256,18 @@ without leaking workers — provided the app runs under
 For an iterator you've already constructed, wrap it in `EventStream(...)`
 to be explicit; otherwise just return the generator directly.
 
-### Built-in auth filters
+### Built-in auth middlewares
 
 ```python
 from localpost.openapi import HttpApp, HttpBearerAuth, HttpBasicAuth
 
 def validate_token(token: str) -> dict | None:
     # Return any truthy principal on success, None on failure.
-    # The principal is stashed on ctx.attrs[<filter>] for handlers to read.
+    # The principal is stashed on ctx.attrs[<middleware>] for handlers to read.
     return decode_jwt(token)
 
 
-app = HttpApp(filters=[HttpBearerAuth(validator=validate_token)])
+app = HttpApp(middlewares=[HttpBearerAuth(validator=validate_token)])
 
 
 @app.get("/me")
@@ -278,9 +304,9 @@ focused on user-facing concepts.
 | `app.py` | `HttpApp`, registration, hosting entrypoint, built-in `/openapi.json` + `/docs` UIs |
 | `operation.py` | `Operation`: signature parsing, return-type inference, runtime closure |
 | `resolvers.py` | `FromPath`, `FromQuery`, `FromHeader`, `FromBody` factories |
-| `results.py` | `OpResult` hierarchy |
-| `filter.py` | `OpFilter` protocol |
-| `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth filters |
+| `results.py` | `OpResult` hierarchy (incl. `EventStreamResult`) |
+| `middleware.py` | `OpMiddleware` protocol, `@op_middleware`, `ApiOperation` |
+| `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth middlewares |
 | `sse.py` | `Event`, `EventStream`, encoder — Server-Sent Events |
 | `spec.py` | OpenAPI 3.2 dataclasses |
 | `schemas.py` | `SchemaRegistry` — msgspec / pydantic JSON Schema generation |

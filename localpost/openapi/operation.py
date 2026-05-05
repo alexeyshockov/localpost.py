@@ -1,5 +1,5 @@
 """Per-operation wiring: signature parsing, return-type inference, the
-``(ctx) -> Response`` closure that runs at request time.
+``(ctx) -> OpResult`` closure that runs at request time.
 
 An :class:`Operation` is built once at decoration time and used in two
 places: its :meth:`as_handler` populates the :class:`localpost.http.Routes`
@@ -28,7 +28,7 @@ from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi.adapters import AdapterRegistry, default_registry
-from localpost.openapi.filter import OpFilter
+from localpost.openapi.middleware import ApiOperation, OpMiddleware
 from localpost.openapi.resolvers import (
     ArgResolver,
     ArgResolverFactory,
@@ -37,7 +37,7 @@ from localpost.openapi.resolvers import (
     FromQuery,
     is_body_type,
 )
-from localpost.openapi.results import NoContent, NotFound, Ok, OpResult
+from localpost.openapi.results import EventStreamResult, NoContent, NotFound, Ok, OpResult
 from localpost.openapi.schemas import SchemaRegistry
 from localpost.openapi.sse import EventStream, iter_events
 
@@ -71,9 +71,11 @@ class Operation:
     ``None`` for the ``HTTPReqCtx`` pass-through, which contributes nothing to
     the OpenAPI doc."""
 
-    filters: tuple[OpFilter, ...]
-    """Filters to run before the resolvers. Includes both app-level filters
-    (injected by :class:`HttpApp`) and per-operation filters."""
+    middlewares: tuple[OpMiddleware, ...]
+    """Middlewares wrapping the operation core. Includes both app-level
+    middlewares (injected by :class:`HttpApp`) and per-operation middlewares.
+    Outermost first; the chain is built in :meth:`_run` so each middleware's
+    ``call_next`` invokes the next one."""
 
     return_shapes: tuple[ResponseShape, ...]
     null_is_not_found: bool
@@ -96,7 +98,7 @@ class Operation:
         fn: Callable[..., Any],
         /,
         *,
-        filters: tuple[OpFilter, ...] = (),
+        middlewares: tuple[OpMiddleware, ...] = (),
         adapters: AdapterRegistry | None = None,
     ) -> Self:
         template = URITemplate.parse(path)
@@ -143,7 +145,7 @@ class Operation:
             target=fn,
             arg_resolvers=tuple(arg_resolvers),
             arg_resolver_factories=tuple(arg_factories),
-            filters=filters,
+            middlewares=middlewares,
             return_shapes=return_shapes,
             null_is_not_found=null_is_not_found,
             summary=summary,
@@ -160,8 +162,8 @@ class Operation:
         The pre-body phase returns a ``BodyHandler`` so that
         :func:`localpost.http.thread_pool_handler` offloads execution to a
         worker after the request body is buffered. The body handler runs the
-        full operation pipeline: arg resolvers → user fn → response build →
-        ``ctx.complete``.
+        full operation pipeline: middleware chain → arg resolvers → user fn →
+        response build → ``ctx.complete``.
         """
         run = self._run
 
@@ -171,36 +173,38 @@ class Operation:
         return pre_body
 
     def _run(self, ctx: HTTPReqCtx) -> None:
-        registry = self.adapters
-        for f in self.filters:
-            short_circuit = f(ctx)
-            if short_circuit is not None:
-                response, body = _build_http_response(short_circuit, registry)
-                ctx.complete(response, body)
-                return
+        chain: ApiOperation = self._run_core
+        for mw in reversed(self.middlewares):
+            chain = _wrap_middleware(mw, chain)
+        result = chain(ctx)
+        self._write_response(ctx, result)
+
+    def _run_core(self, ctx: HTTPReqCtx) -> OpResult:
+        """Resolve args, invoke the target, normalise the return value to
+        an :class:`OpResult`. SSE-shaped returns (generator, iterator,
+        :class:`EventStream`) are wrapped in :class:`EventStreamResult`
+        so middleware can post-process / wrap the stream uniformly."""
         kwargs: dict[str, object] = {}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)
             if isinstance(value, OpResult):
-                response, body = _build_http_response(value, registry)
-                ctx.complete(response, body)
-                return
+                return value
             kwargs[name] = value
         result = self.target(**kwargs)
-        if isinstance(result, _Response):
-            ctx.complete(result, b"")
-            return
-        if _is_sse_payload(result):
-            _stream_sse(ctx, result, registry)
-            return
         if isinstance(result, OpResult):
-            op_result: OpResult = result
-        elif result is None and self.null_is_not_found:
+            return result
+        if _is_sse_payload(result):
+            return EventStreamResult(result)
+        if result is None and self.null_is_not_found:
             # ``T | None`` returning None → implicit 404.
-            op_result = NotFound(None)
-        else:
-            op_result = Ok(result)
-        response, body = _build_http_response(op_result, registry)
+            return NotFound(None)
+        return Ok(result)
+
+    def _write_response(self, ctx: HTTPReqCtx, result: OpResult) -> None:
+        if isinstance(result, EventStreamResult):
+            _stream_sse(ctx, result, self.adapters)
+            return
+        response, body = _build_http_response(result, self.adapters)
         ctx.complete(response, body)
 
     # ----- spec build -----
@@ -217,8 +221,8 @@ class Operation:
             op = factory.update_doc(param, op, registry)
         responses = _build_responses(self.return_shapes, registry)
         op = replace(op, responses=responses)
-        for f in self.filters:
-            op = f.contribute_operation(op, registry)
+        for mw in self.middlewares:
+            op = mw.contribute_operation(op, registry)
         return op
 
 
@@ -234,13 +238,14 @@ def build_arg_resolvers(
     *,
     path_var_names: set[str] | None = None,
     adapters: AdapterRegistry | None = None,
+    exclude: set[str] | None = None,
 ) -> tuple[
     inspect.Signature,
     list[tuple[str, ArgResolver]],
     list[tuple[str, inspect.Parameter, ArgResolverFactory | None]],
 ]:
     """Inspect ``fn`` and return ``(resolved_signature, runtime_resolvers,
-    spec_factories)`` for use by :class:`Operation` or :func:`op_filter`.
+    spec_factories)`` for use by :class:`Operation` or :func:`op_middleware`.
 
     Path-template binding is *not* validated here — pass ``path_var_names``
     so :class:`FromPath` is auto-picked for matching parameter names; the
@@ -249,10 +254,14 @@ def build_arg_resolvers(
     ``adapters`` flows into auto-picked / un-bound :class:`FromBody`
     factories so body decoding hits the per-app type adapter registry. If
     ``None``, falls back to :func:`default_registry` (used by
-    :func:`op_filter`, which is built outside any app).
+    :func:`op_middleware`, which is built outside any app).
+
+    ``exclude`` skips parameters by name — used by :func:`op_middleware`
+    to drop the ``call_next`` parameter from resolver inspection.
     """
     path_vars = path_var_names or set()
     registry = adapters or default_registry()
+    skip = exclude or set()
 
     # Resolve PEP 563 string annotations (``from __future__ import
     # annotations`` is in effect for most callers) into the real types
@@ -273,6 +282,8 @@ def build_arg_resolvers(
     runtime: list[tuple[str, ArgResolver]] = []
     factories: list[tuple[str, inspect.Parameter, ArgResolverFactory | None]] = []
     for name, param in sig.parameters.items():
+        if name in skip:
+            continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             raise ValueError(f"handler {_qualname(fn)!r}: *args / **kwargs not supported")
         factory = _pick_factory(name, param, path_vars, registry)
@@ -411,6 +422,13 @@ def extract_response_shapes(return_annotation: Any) -> tuple[list[ResponseShape]
             body_type = sse_payload
             content_type = "text/event-stream"
             has_success = True
+        elif isinstance(cls, type) and issubclass(cls, EventStreamResult):
+            code = cls._status_code
+            description = cls._description
+            generic_args = get_args(member) if member_origin is not None else ()
+            body_type = generic_args[0] if generic_args else None
+            content_type = "text/event-stream"
+            has_success = True
         elif isinstance(cls, type) and issubclass(cls, OpResult):
             code = cls._status_code
             description = cls._description
@@ -421,10 +439,6 @@ def extract_response_shapes(return_annotation: Any) -> tuple[list[ResponseShape]
                 body_type = generic_args[0] if generic_args else None
             if code < 400:
                 has_success = True
-        elif isinstance(cls, type) and issubclass(cls, _Response):
-            # Bare ``Response`` escape hatch — emit nothing for this branch.
-            has_success = True
-            continue
         else:
             code = 200
             description = "Successful response"
@@ -552,13 +566,23 @@ def _is_sse_payload(value: object) -> bool:
     return isinstance(value, (EventStream, Iterator))
 
 
-def _stream_sse(ctx: HTTPReqCtx, source: object, adapters: AdapterRegistry) -> None:
-    """Run ``source`` as an SSE stream over ``ctx``.
+def _wrap_middleware(mw: OpMiddleware, call_next: ApiOperation) -> ApiOperation:
+    def wrapped(ctx: HTTPReqCtx) -> OpResult:
+        return mw(ctx, call_next)
+
+    return wrapped
+
+
+def _stream_sse(ctx: HTTPReqCtx, result: EventStreamResult[Any], adapters: AdapterRegistry) -> None:
+    """Run ``result``'s body as an SSE stream over ``ctx``.
 
     Sends the SSE response headers (chunked transfer encoding is implicit
     — we don't set ``content-length`` so h11 picks chunked), then writes
     one event per yielded item until the iterator exhausts or the client
     disconnects (signalled via :func:`localpost.http.check_cancelled`).
+    Any user-set headers on ``result`` are merged in (without overriding
+    the framework-set ``content-type`` / ``cache-control`` /
+    ``x-accel-buffering``).
     """
     # ``check_cancelled`` only works when a request context is active —
     # i.e. when the handler runs under the worker pool. When the SSE op
@@ -572,9 +596,16 @@ def _stream_sse(ctx: HTTPReqCtx, source: object, adapters: AdapterRegistry) -> N
     except RequestCancelled:
         return
 
-    ctx.start_response(_Response(status_code=200, headers=list(_SSE_RESPONSE_HEADERS)))
+    headers = list(_SSE_RESPONSE_HEADERS)
+    seen = {name for name, _ in headers}
+    for name, value in _iter_headers(result.headers):
+        if name.lower() in seen:
+            continue
+        headers.append((name, value))
+
+    ctx.start_response(_Response(status_code=result.status_code, headers=headers))
     try:
-        for chunk in iter_events(source, adapters):
+        for chunk in iter_events(result.body, adapters):
             if cancel_supported:
                 check_cancelled()
             ctx.send(chunk)

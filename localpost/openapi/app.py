@@ -40,7 +40,7 @@ from localpost.http.router import Routes
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi._docs import redoc_html, scalar_html, swagger_html
 from localpost.openapi.adapters import AdapterRegistry, default_registry
-from localpost.openapi.filter import OpFilter
+from localpost.openapi.middleware import OpMiddleware
 from localpost.openapi.operation import Operation
 from localpost.openapi.schemas import SchemaRegistry
 
@@ -56,10 +56,10 @@ class HttpApp:
 
     Args:
         info: Top-level OpenAPI :class:`Info` block.
-        filters: App-level :class:`OpFilter` s. Run before the per-operation
-            resolvers on every request, in order. Their
-            :meth:`OpFilter.contribute_root` is called once at spec build;
-            their :meth:`OpFilter.contribute_operation` is called for every
+        middlewares: App-level :class:`OpMiddleware` s. Wrap every operation,
+            outermost first. Their :meth:`OpMiddleware.contribute_root` is
+            called once at spec build; their
+            :meth:`OpMiddleware.contribute_operation` is called for every
             operation.
         max_concurrency: Worker-pool size used by :func:`thread_pool_handler`.
             Default 32.
@@ -82,7 +82,7 @@ class HttpApp:
         self,
         *,
         info: openapi_spec.Info | None = None,
-        filters: Sequence[OpFilter] = (),
+        middlewares: Sequence[OpMiddleware] = (),
         max_concurrency: int = 32,
         backlog: int = 0,
         openapi_path: str | None = "/openapi.json",
@@ -95,7 +95,7 @@ class HttpApp:
         if backlog < 0:
             raise ValueError("backlog must be >= 0")
         self._info = info or openapi_spec.Info()
-        self._filters = tuple(filters)
+        self._middlewares = tuple(middlewares)
         self._max_concurrency = max_concurrency
         self._backlog = backlog
         self._openapi_path = openapi_path
@@ -110,27 +110,27 @@ class HttpApp:
 
     # ----- Decorators -----
 
-    def get(self, path: str, *, filters: Sequence[OpFilter] = ()) -> _FluentDecorator:
-        return self._decorator(HTTPMethod.GET, path, filters)
+    def get(self, path: str, *, middlewares: Sequence[OpMiddleware] = ()) -> _FluentDecorator:
+        return self._decorator(HTTPMethod.GET, path, middlewares)
 
-    def post(self, path: str, *, filters: Sequence[OpFilter] = ()) -> _FluentDecorator:
-        return self._decorator(HTTPMethod.POST, path, filters)
+    def post(self, path: str, *, middlewares: Sequence[OpMiddleware] = ()) -> _FluentDecorator:
+        return self._decorator(HTTPMethod.POST, path, middlewares)
 
-    def put(self, path: str, *, filters: Sequence[OpFilter] = ()) -> _FluentDecorator:
-        return self._decorator(HTTPMethod.PUT, path, filters)
+    def put(self, path: str, *, middlewares: Sequence[OpMiddleware] = ()) -> _FluentDecorator:
+        return self._decorator(HTTPMethod.PUT, path, middlewares)
 
-    def delete(self, path: str, *, filters: Sequence[OpFilter] = ()) -> _FluentDecorator:
-        return self._decorator(HTTPMethod.DELETE, path, filters)
+    def delete(self, path: str, *, middlewares: Sequence[OpMiddleware] = ()) -> _FluentDecorator:
+        return self._decorator(HTTPMethod.DELETE, path, middlewares)
 
-    def patch(self, path: str, *, filters: Sequence[OpFilter] = ()) -> _FluentDecorator:
-        return self._decorator(HTTPMethod.PATCH, path, filters)
+    def patch(self, path: str, *, middlewares: Sequence[OpMiddleware] = ()) -> _FluentDecorator:
+        return self._decorator(HTTPMethod.PATCH, path, middlewares)
 
-    def _decorator(self, method: HTTPMethod, path: str, op_filters: Sequence[OpFilter]) -> _FluentDecorator:
-        # App-level filters run first; per-op filters extend them.
-        combined = (*self._filters, *op_filters)
+    def _decorator(self, method: HTTPMethod, path: str, op_middlewares: Sequence[OpMiddleware]) -> _FluentDecorator:
+        # App-level middlewares wrap outermost; per-op middlewares are inside.
+        combined = (*self._middlewares, *op_middlewares)
 
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
-            op = Operation.create(method, path, fn, filters=combined, adapters=self._adapters)
+            op = Operation.create(method, path, fn, middlewares=combined, adapters=self._adapters)
             with self._lock:
                 self._operations.append(op)
                 self._cached_spec = None
@@ -154,34 +154,35 @@ class HttpApp:
                 return cached
             registry = SchemaRegistry(self._adapters)
             doc = openapi_spec.OpenAPI(info=self._info)
-            # Every filter (app-level and per-op) gets its contribute_root
-            # called exactly once. We dedupe by identity so the same filter
-            # attached to several ops registers its securityScheme just once.
+            # Every middleware (app-level and per-op) gets its
+            # contribute_root called exactly once. We dedupe by identity so
+            # the same middleware attached to several ops registers its
+            # securityScheme just once.
             seen: set[int] = set()
-            for f in self._all_filters():
-                key = id(f)
+            for mw in self._all_middlewares():
+                key = id(mw)
                 if key in seen:
                     continue
                 seen.add(key)
-                doc = f.contribute_root(doc, registry)
+                doc = mw.contribute_root(doc, registry)
             for op in self._operations:
                 spec_op = op.build_spec(registry)
                 doc = doc.add_operation(op.path, op.method.value, spec_op)
-            # Merge in the schemas the registry collected. Filters may have
-            # already populated other Components fields above; preserve them
-            # by replacing only ``schemas``.
+            # Merge in the schemas the registry collected. Middlewares may
+            # have already populated other Components fields above;
+            # preserve them by replacing only ``schemas``.
             doc = doc.with_components(
                 replace(doc.components, schemas={**doc.components.schemas, **registry.components()})
             )
             self._cached_spec = doc
             return doc
 
-    def _all_filters(self):
-        """Yield every filter that participates in the doc — app-level
+    def _all_middlewares(self):
+        """Yield every middleware that participates in the doc — app-level
         first, then per-op (in registration order)."""
-        yield from self._filters
+        yield from self._middlewares
         for op in self._operations:
-            yield from op.filters
+            yield from op.middlewares
 
     def _openapi_bytes(self) -> bytes:
         with self._lock:
