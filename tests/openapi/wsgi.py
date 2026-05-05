@@ -109,9 +109,7 @@ class TestHttpAppAsWsgiBasic:
             return pet
 
         wsgi_app = app.as_wsgi()
-        status, _headers, body, _ = _drive(
-            wsgi_app, _post_json("/pets", b'{"name":"Rex","age":3}')
-        )
+        status, _headers, body, _ = _drive(wsgi_app, _post_json("/pets", b'{"name":"Rex","age":3}'))
         assert status.startswith("200 ")
         assert json.loads(body) == {"name": "Rex", "age": 3}
 

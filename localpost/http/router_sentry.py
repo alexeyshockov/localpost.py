@@ -35,9 +35,8 @@ from __future__ import annotations
 
 import sys
 
-import sentry_sdk
-
 from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._sentry import request_transaction
 from localpost.http.router import Router, _MatchOk
 
 __all__ = ["sentry_router_handler"]
@@ -68,18 +67,15 @@ def sentry_router_handler(router: Router, *, op: str = "http.server") -> Request
             tx_name = f"{method} {path}"
             source = "url"
 
-        scope_cm = sentry_sdk.isolation_scope()
-        scope_cm.__enter__()
-        tx_cm = sentry_sdk.start_transaction(op=op, name=tx_name, source=source)
+        # Manual __enter__/__exit__ because the transaction may need to
+        # span a deferred body handler returned below.
+        tx_cm = request_transaction(op=op, name=tx_name, source=source, method=method, url=target)
         tx = tx_cm.__enter__()
-        tx.set_tag("http.method", method)
-        tx.set_data("http.url", target)
 
         def finalize(exc_info: tuple = (None, None, None)) -> None:
             if ctx.response_status is not None:
                 tx.set_http_status(ctx.response_status)
             tx_cm.__exit__(*exc_info)
-            scope_cm.__exit__(*exc_info)
 
         try:
             result = inner(ctx)

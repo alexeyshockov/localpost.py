@@ -263,9 +263,7 @@ def test_user_supplied_chunked_te_frames_chunks(serve_backend_in_thread):
         ctx.send(b"chunk2")
         ctx.finish_response()
 
-    with serve_backend_in_thread(handler) as port, socket.create_connection(
-        ("127.0.0.1", port), timeout=5
-    ) as s:
+    with serve_backend_in_thread(handler) as port, socket.create_connection(("127.0.0.1", port), timeout=5) as s:
         s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
         s.settimeout(5)
         buf = b""

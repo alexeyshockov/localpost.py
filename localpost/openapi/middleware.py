@@ -65,10 +65,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from localpost.openapi.results import OpResult
+
 if TYPE_CHECKING:
     from localpost.http import HTTPReqCtx
     from localpost.openapi import spec
-    from localpost.openapi.results import OpResult
     from localpost.openapi.schemas import SchemaRegistry
 
 __all__ = ["ApiOperation", "OpMiddleware", "op_middleware"]
@@ -138,16 +139,14 @@ class _FunctionMiddleware:
     root_contribution: Callable[[spec.OpenAPI, SchemaRegistry], spec.OpenAPI] | None = field(default=None)
 
     def __call__(self, ctx: HTTPReqCtx, call_next: ApiOperation, /) -> OpResult:
-        from localpost.openapi.results import OpResult as _OpResult  # noqa: PLC0415
-
         kwargs: dict[str, object] = {self.call_next_param: call_next}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)
-            if isinstance(value, _OpResult):
+            if isinstance(value, OpResult):
                 return value
             kwargs[name] = value
         result = self.target(**kwargs)
-        if isinstance(result, _OpResult):
+        if isinstance(result, OpResult):
             return result
         name = getattr(self.target, "__qualname__", None) or repr(self.target)
         raise TypeError(
@@ -178,9 +177,7 @@ class _FunctionMiddleware:
             op = replace(op, responses={**op.responses, code: response})
         return op
 
-    def with_root(
-        self, contribution: Callable[[spec.OpenAPI, SchemaRegistry], spec.OpenAPI]
-    ) -> _FunctionMiddleware:
+    def with_root(self, contribution: Callable[[spec.OpenAPI, SchemaRegistry], spec.OpenAPI]) -> _FunctionMiddleware:
         """Return a copy that also contributes ``contribution`` at the root.
 
         Used by auth middlewares to register their ``SecurityScheme``

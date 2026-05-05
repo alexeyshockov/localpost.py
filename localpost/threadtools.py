@@ -570,9 +570,7 @@ class ThreadTaskGroup:
             # — matches Trio semantics for ``KeyboardInterrupt`` / ``SystemExit``.
             raise BaseExceptionGroup(label, all_errors)
 
-    def start_soon[**P, R](
-        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
-    ) -> Future[R]:
+    def start_soon[**P, R](self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
         """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future."""
         with self._lock:
             if self._closed:

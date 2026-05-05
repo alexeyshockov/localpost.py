@@ -507,9 +507,7 @@ def _sse_handler(events: list[bytes]):
 
     def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
         # No Content-Length → streaming path.
-        ctx.start_response(
-            Response(status_code=200, headers=[(b"content-type", b"text/event-stream")])
-        )
+        ctx.start_response(Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]))
         for ev in events:
             ctx.send(b"data: " + ev + b"\n\n")
         ctx.finish_response()
@@ -632,9 +630,7 @@ class TestStreamingFlush:
         gate = threading.Event()
 
         def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-            ctx.start_response(
-                Response(status_code=200, headers=[(b"content-type", b"text/event-stream")])
-            )
+            ctx.start_response(Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]))
             ctx.send(b"data: first\n\n")
             # Block until the test has read+decoded "data: first". If
             # SYNC_FLUSH didn't happen, this deadlocks at the 5s timeout.
@@ -644,12 +640,8 @@ class TestStreamingFlush:
             return None
 
         h = compress_handler(handler, algorithms=("gzip",))
-        with serve_backend_in_thread(h) as port, socket.create_connection(
-            ("127.0.0.1", port), timeout=5
-        ) as s:
-            s.sendall(
-                b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
-            )
+        with serve_backend_in_thread(h) as port, socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n")
             buf = bytearray()
             s.settimeout(5)
             while b"\r\n\r\n" not in buf:

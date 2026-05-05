@@ -29,7 +29,6 @@ from localpost.openapi import (
 )
 from localpost.openapi.operation import Operation
 
-
 # --- Fakes ---------------------------------------------------------------
 
 
@@ -192,7 +191,7 @@ class TestReturnTypeInference:
         app = HttpApp()
 
         @app.get("/b/{id}")
-        def get(id: str) -> Book | NotFound[str]:
+        def get(id: str) -> Book | NotFound[str]:  # noqa: A002
             return NotFound(f"missing: {id}")
 
         op = app.operations[0]
@@ -205,7 +204,7 @@ class TestReturnTypeInference:
         app = HttpApp()
 
         @app.delete("/b/{id}")
-        def delete(id: str) -> NoContent:
+        def delete(id: str) -> NoContent:  # noqa: A002
             return NoContent()
 
         op = app.operations[0]
@@ -368,7 +367,7 @@ class TestOpenAPIDocStructure:
         app = HttpApp()
 
         @app.get("/b/{id}")
-        def get(id: str) -> Book | NotFound[str] | BadRequest[str]:
+        def get(id: str) -> Book | NotFound[str] | BadRequest[str]:  # noqa: A002
             return Book(id=id, title="x")
 
         doc = app.openapi_doc.to_dict()
@@ -394,7 +393,7 @@ class TestOpenAPIDocStructure:
         app = HttpApp()
 
         @app.get("/b/{id}")
-        def get(id: str) -> Book:
+        def get(id: str) -> Book:  # noqa: A002
             return Book(id=id, title="x")
 
         doc = app.openapi_doc.to_dict()

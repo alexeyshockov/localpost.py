@@ -98,7 +98,7 @@ class TestSecurityScheme:
             flows=spec.OAuthFlows(
                 device_authorization=spec.OAuthFlow(
                     device_authorization_url="https://auth.example/device",
-                    token_url="https://auth.example/token",
+                    token_url="https://auth.example/token",  # noqa: S106
                     scopes={"read": "Read access"},
                 )
             ),

@@ -61,6 +61,10 @@ class _RequestBodyStream(RawIOBase):
         return take
 
 
+def _wsgi_write_unsupported(_: bytes) -> None:
+    raise NotImplementedError("The WSGI write() callable is deprecated and not supported")
+
+
 def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
     """Wrap a WSGI application as a native :class:`RequestHandler`.
 
@@ -93,7 +97,7 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
                 headers=wire_headers,
                 reason=reason.encode("iso-8859-1") if reason else b"",
             )
-            return _wsgi_write_deprecated
+            return _wsgi_write_unsupported
 
         body_iter = app(environ, start_response)
         try:
@@ -124,10 +128,6 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
         return run_wsgi
 
     return pre_body
-
-
-def _wsgi_write_deprecated(_: bytes) -> None:
-    raise NotImplementedError("The WSGI write() callable is deprecated and not supported")
 
 
 def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
@@ -342,9 +342,11 @@ def to_wsgi(handler: RequestHandler) -> WSGIApplication:
 
         app = HttpApp()
 
+
         @app.get("/hello/{name}")
         def hello(name: str) -> str:
             return f"Hello, {name}!"
+
 
         wsgi_app = to_wsgi(app._build_router_handler())  # or app.as_wsgi()
 

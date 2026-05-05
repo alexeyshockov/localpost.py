@@ -15,7 +15,7 @@ from localpost.threadtools import ThreadTaskGroup, warmup
 def fast_idle_timeout(monkeypatch: pytest.MonkeyPatch):
     """Make idle-timeout tests fast: 100 ms instead of 60 s."""
     monkeypatch.setattr(threadtools, "_IDLE_TIMEOUT", 0.1)
-    yield 0.1
+    return 0.1
 
 
 def _drain_idle_workers() -> None:
@@ -73,7 +73,7 @@ def test_task_exception_captured_in_future_and_raised_at_exit():
     def bad():
         raise Boom("nope")
 
-    with pytest.raises(ExceptionGroup) as ei:
+    with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
         with ThreadTaskGroup() as tg:
             fut = tg.start_soon(bad)
             # Future records the exception too
@@ -104,7 +104,7 @@ def test_body_and_task_exceptions_are_merged():
     def bad():
         raise Task("task")
 
-    with pytest.raises(ExceptionGroup) as ei:
+    with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
         with ThreadTaskGroup() as tg:
             tg.start_soon(bad)
             time.sleep(0.05)  # let the task land
@@ -313,7 +313,7 @@ def test_warmup_adds_workers_to_idle_pool():
     # Each entry is a distinct, alive worker.
     workers = list(threadtools._idle)
     assert all(w._alive for w in workers)
-    assert len(set(id(w) for w in workers)) == 4
+    assert len({id(w) for w in workers}) == 4
 
 
 def test_warmup_workers_are_used_by_dispatch():

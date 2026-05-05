@@ -104,9 +104,7 @@ class Operation:
         path_var_names = set(template.variable_names)
         registry = adapters or default_registry()
 
-        sig, arg_resolvers, arg_factories = build_arg_resolvers(
-            fn, path_var_names=path_var_names, adapters=registry
-        )
+        sig, arg_resolvers, arg_factories = build_arg_resolvers(fn, path_var_names=path_var_names, adapters=registry)
 
         # Validate path bindings: every {var} in the template must be
         # claimed by a parameter (whether implicitly via name match or

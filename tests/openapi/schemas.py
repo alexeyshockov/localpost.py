@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 import msgspec
@@ -26,7 +26,7 @@ class Author(msgspec.Struct):
     age: int
 
 
-class Status(str, Enum):
+class Status(StrEnum):
     OPEN = "open"
     CLOSED = "closed"
 
@@ -160,9 +160,7 @@ class TestCustomAdapter:
             self.schema_calls.append(t)
             return {"$ref": ref_template.format(name="Marker")}
 
-        def components(
-            self, types: Sequence[Any], /, *, ref_template: str
-        ) -> dict[str, dict[str, Any]]:
+        def components(self, types: Sequence[Any], /, *, ref_template: str) -> dict[str, dict[str, Any]]:
             self.components_calls.append(types)
             return {"Marker": {"type": "object", "x-fake": True}}
 

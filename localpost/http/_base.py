@@ -99,6 +99,56 @@ _Op = _OpTrack | _OpClose | _OpCleanup
 
 
 # --------------------------------------------------------------------------
+# Header-scanning helpers (parser-agnostic; both backends use them)
+# --------------------------------------------------------------------------
+
+
+def content_length(headers: Any) -> int | None:
+    """Return the ``Content-Length`` value as an int, or ``None`` if absent / malformed.
+
+    Both parsers normalise header names to lowercase bytes, so a direct
+    equality check is enough.
+    """
+    for name, value in headers:
+        if name == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
+
+
+def scan_response_headers(headers: Any) -> tuple[bool, bool, bool]:
+    """One-pass scan: ``(has_connection_close, has_framing, has_chunked)``.
+
+    - ``has_framing`` — either ``Content-Length`` or ``Transfer-Encoding``
+      is set, i.e. the auto-frame branch in ``start_response`` should be
+      skipped.
+    - ``has_chunked`` — ``Transfer-Encoding`` carries a ``chunked`` token
+      anywhere in its value (per RFC 7230 §3.3.1, ``chunked`` must be the
+      final encoding). When true, the httptools backend's ``_chunked``
+      flag must be set so subsequent ``send`` calls actually wrap chunks
+      with ``<size>\\r\\n<data>\\r\\n`` framing.
+
+    Combined to avoid multiple walks per response.
+    """
+    has_close = False
+    has_framing = False
+    has_chunked = False
+    for name, value in headers:
+        n = name.lower()
+        if n == b"connection" and b"close" in value.lower():
+            has_close = True
+        elif n == b"content-length":
+            has_framing = True
+        elif n == b"transfer-encoding":
+            has_framing = True
+            if b"chunked" in value.lower():
+                has_chunked = True
+    return has_close, has_framing, has_chunked
+
+
+# --------------------------------------------------------------------------
 # Canned protocol-error responses
 # --------------------------------------------------------------------------
 
@@ -108,14 +158,29 @@ _Op = _OpTrack | _OpClose | _OpCleanup
 # response — see ``_PRESERIALIZED`` below — so error paths skip
 # ``_serialize_response`` entirely.
 
-# Reason phrases used by the pre-serialised wire form below. Kept here (not
-# in the httptools backend) so it stays parser-agnostic and the constants
-# below resolve at module import time even when httptools isn't installed.
-_CANNED_REASONS: dict[int, bytes] = {
+# RFC 7231 §6.1 reason phrases for the codes the server side actually emits.
+# Single source of truth for both the canned-error wire form below and
+# the httptools backend's response writer (``_serialize_response``). Kept
+# here so it resolves at module import time even when httptools isn't
+# installed.
+REASON_PHRASES: dict[int, bytes] = {
+    100: b"Continue",
+    200: b"OK",
+    204: b"No Content",
+    301: b"Moved Permanently",
+    302: b"Found",
+    304: b"Not Modified",
     400: b"Bad Request",
+    401: b"Unauthorized",
+    403: b"Forbidden",
+    404: b"Not Found",
+    405: b"Method Not Allowed",
     408: b"Request Timeout",
     413: b"Payload Too Large",
+    417: b"Expectation Failed",
     500: b"Internal Server Error",
+    501: b"Not Implemented",
+    502: b"Bad Gateway",
     503: b"Service Unavailable",
 }
 
@@ -138,7 +203,7 @@ def _build_canned(status_code: int, body: bytes) -> tuple[Response, bytes]:
     prelude = bytearray(b"HTTP/1.1 ")
     prelude += str(status_code).encode("ascii")
     prelude += b" "
-    prelude += _CANNED_REASONS[status_code]
+    prelude += REASON_PHRASES[status_code]
     prelude += b"\r\n"
     for name, value in response.headers:
         prelude += name
@@ -226,6 +291,7 @@ class HTTPReqCtx(Protocol):
         :meth:`finish_response`. Pure-imperative callers still have the
         trio available; ``stream`` is the path most operations want.
         """
+
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
         """Emit ``response`` and stream ``count`` bytes from ``file`` starting
         at ``offset`` via :func:`socket.sendfile` (zero-copy). Terminal — like

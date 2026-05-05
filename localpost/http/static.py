@@ -66,8 +66,7 @@ def static_handler(
         from localpost.http.static import static_handler
 
         h = thread_pool_handler(
-            static_handler("/var/www", prefix=b"/static/",
-                           cache_control="public, max-age=31536000, immutable"),
+            static_handler("/var/www", prefix=b"/static/", cache_control="public, max-age=31536000, immutable"),
         )
     """
     root_path = Path(os.fspath(root)).resolve(strict=True)
@@ -97,7 +96,7 @@ def static_handler(
             _send_not_found(ctx, method)
             return None
 
-        target = _resolve(root_path, url_path[len(prefix):], index=index)
+        target = _resolve(root_path, url_path[len(prefix) :], index=index)
         if target is None:
             _send_not_found(ctx, method)
             return None
@@ -380,5 +379,3 @@ def _send_range_not_satisfiable(
         ),
         None if method == b"HEAD" else _RANGE_NOT_SATISFIABLE_BODY,
     )
-
-

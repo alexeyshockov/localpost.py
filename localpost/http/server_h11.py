@@ -39,8 +39,10 @@ from localpost.http._base import (
     RequestHandler,
     Selector,
     _send_all,
+    content_length,
     emit_handler_error,
     native_stream,
+    scan_response_headers,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
@@ -53,21 +55,6 @@ def _to_h11_response(r: Response | InformationalResponse) -> h11.Response | h11.
     if isinstance(r, Response):
         return h11.Response(status_code=r.status_code, headers=headers, reason=r.reason)
     return h11.InformationalResponse(status_code=r.status_code, headers=headers, reason=r.reason)
-
-
-def _content_length(headers) -> int | None:
-    # h11 normalizes header names to lowercase bytes — direct equality is enough.
-    for name, value in headers:
-        if name == b"content-length":
-            try:
-                return int(value)
-            except ValueError:
-                return None
-    return None
-
-
-def _has_response_framing(headers) -> bool:
-    return any(name.lower() in {b"content-length", b"transfer-encoding"} for name, _ in headers)
 
 
 @final
@@ -232,7 +219,7 @@ class HTTPConn(BaseHTTPConn):
                     if not self.tracked:
                         return
             elif isinstance(event, h11.Request):
-                cl = _content_length(event.headers)
+                cl = content_length(event.headers)
                 if cl is not None and cl > self.selector.config.max_body_size:
                     raise BodyTooLarge(cl)
                 # h11 hands us ``bytes`` for method/target/version and a list
@@ -403,7 +390,7 @@ class _HTTPReqCtx:
         # ``Content-Length`` framing is required — otherwise h11's writer
         # state can't reconcile what we wrote out-of-band. The static handler
         # always sets it; bail loudly if a caller forgets.
-        if _content_length(response.headers) != count:
+        if content_length(response.headers) != count:
             raise ValueError("sendfile requires Content-Length matching ``count``")
         self.start_response(response)
         # Advance h11's ContentLengthWriter counter via a placeholder Data
@@ -474,7 +461,7 @@ class _HTTPReqCtx:
     def start_response(self, response: Response | InformationalResponse, /) -> None:
         if isinstance(response, Response):
             self.response_status = response.status_code
-            if self.request.method == b"HEAD" and not _has_response_framing(response.headers):
+            if self.request.method == b"HEAD" and not scan_response_headers(response.headers)[1]:
                 response = Response(
                     status_code=response.status_code,
                     headers=[*response.headers, (b"content-length", b"0")],

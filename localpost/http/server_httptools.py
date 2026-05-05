@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import socket
 import time
-from collections.abc import Buffer, Callable, Iterator, Sequence
+from collections.abc import Buffer, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO, final
@@ -36,14 +36,17 @@ import httptools
 from localpost.http._base import (
     BAD_REQUEST_WIRE,
     PAYLOAD_TOO_LARGE_WIRE,
+    REASON_PHRASES,
     REQUEST_TIMEOUT_WIRE,
     BaseHTTPConn,
     BodyHandler,
     RequestHandler,
     Selector,
     _send_all,
+    content_length,
     emit_handler_error,
     native_stream,
+    scan_response_headers,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
@@ -51,35 +54,12 @@ from localpost.http.config import DEFAULT_BUFFER_SIZE
 __all__ = ["HTTPConn"]
 
 
-# RFC 7231 §6.1 reason phrases for the codes the server-side actually emits.
-_DEFAULT_REASONS: dict[int, bytes] = {
-    100: b"Continue",
-    200: b"OK",
-    204: b"No Content",
-    301: b"Moved Permanently",
-    302: b"Found",
-    304: b"Not Modified",
-    400: b"Bad Request",
-    401: b"Unauthorized",
-    403: b"Forbidden",
-    404: b"Not Found",
-    405: b"Method Not Allowed",
-    408: b"Request Timeout",
-    413: b"Payload Too Large",
-    417: b"Expectation Failed",
-    500: b"Internal Server Error",
-    501: b"Not Implemented",
-    502: b"Bad Gateway",
-    503: b"Service Unavailable",
-}
-
-
 def _serialize_response(r: Response | InformationalResponse) -> bytes:
     """Serialise a status + headers block to wire bytes (no body)."""
     out = bytearray(b"HTTP/1.1 ")
     out += str(r.status_code).encode("ascii")
     out += b" "
-    out += r.reason or _DEFAULT_REASONS.get(r.status_code, b"")
+    out += r.reason or REASON_PHRASES.get(r.status_code, b"")
     out += b"\r\n"
     for name, value in r.headers:
         out += name
@@ -88,36 +68,6 @@ def _serialize_response(r: Response | InformationalResponse) -> bytes:
         out += b"\r\n"
     out += b"\r\n"
     return bytes(out)
-
-
-def _scan_response_headers(headers: Sequence[tuple[bytes, bytes]]) -> tuple[bool, bool, bool]:
-    """One-pass scan: ``(has_connection_close, has_framing, has_chunked)``.
-
-    - ``has_framing`` — either ``Content-Length`` or ``Transfer-Encoding``
-      is set, i.e. the auto-frame branch in :meth:`start_response` should
-      be skipped.
-    - ``has_chunked`` — ``Transfer-Encoding`` carries a ``chunked`` token
-      anywhere in its value (per RFC 7230 §3.3.1, ``chunked`` must be the
-      final encoding). When true, ``_chunked`` must be set so subsequent
-      ``send`` calls actually wrap chunks with ``<size>\\r\\n<data>\\r\\n``
-      framing — otherwise the wire is malformed.
-
-    Combined to avoid multiple walks per response.
-    """
-    has_close = False
-    has_framing = False
-    has_chunked = False
-    for name, value in headers:
-        n = name.lower()
-        if n == b"connection" and b"close" in value.lower():
-            has_close = True
-        elif n == b"content-length":
-            has_framing = True
-        elif n == b"transfer-encoding":
-            has_framing = True
-            if b"chunked" in value.lower():
-                has_chunked = True
-    return has_close, has_framing, has_chunked
 
 
 def _response_allows_body(request_method: bytes, status_code: int) -> bool:
@@ -238,14 +188,7 @@ class HTTPConn(BaseHTTPConn):
             self._cur_target_buf = None
 
         # Eager content-length cap check.
-        cl: int | None = None
-        for n, v in self._cur_headers:
-            if n == b"content-length":
-                try:
-                    cl = int(v)
-                except ValueError:
-                    cl = None
-                break
+        cl = content_length(self._cur_headers)
         if cl is not None and cl > self.selector.config.max_body_size:
             self._body_too_large = cl
             self._cur_oversize = True
@@ -685,7 +628,7 @@ class _HTTPReqCtx:
             self.response_status = response.status_code
             self.conn._response_started = True
             self._body_allowed = _response_allows_body(self.request.method, response.status_code)
-            has_close, has_framing, has_chunked = _scan_response_headers(response.headers)
+            has_close, has_framing, has_chunked = scan_response_headers(response.headers)
             if has_close or not self._keep_alive:
                 self.conn._close_after_response = True
             if self._body_allowed:

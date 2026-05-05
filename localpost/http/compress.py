@@ -45,24 +45,26 @@ __all__ = [
 ]
 
 
-DEFAULT_COMPRESSIBLE_TYPES: Final[frozenset[bytes]] = frozenset({
-    b"text/html",
-    b"text/plain",
-    b"text/css",
-    b"text/xml",
-    b"text/csv",
-    b"text/javascript",
-    b"text/event-stream",
-    b"application/json",
-    b"application/javascript",
-    b"application/xml",
-    b"application/xhtml+xml",
-    b"application/manifest+json",
-    b"application/x-yaml",
-    b"application/rss+xml",
-    b"application/atom+xml",
-    b"image/svg+xml",
-})
+DEFAULT_COMPRESSIBLE_TYPES: Final[frozenset[bytes]] = frozenset(
+    {
+        b"text/html",
+        b"text/plain",
+        b"text/css",
+        b"text/xml",
+        b"text/csv",
+        b"text/javascript",
+        b"text/event-stream",
+        b"application/json",
+        b"application/javascript",
+        b"application/xml",
+        b"application/xhtml+xml",
+        b"application/manifest+json",
+        b"application/x-yaml",
+        b"application/rss+xml",
+        b"application/atom+xml",
+        b"image/svg+xml",
+    }
+)
 
 
 # --------------------------------------------------------------------------
@@ -586,12 +588,14 @@ def compress_handler(
         body_handler: BodyHandler = result
 
         def proxied_body(real_ctx: HTTPReqCtx) -> None:
-            body_handler(_CompressedCtx(  # type: ignore[arg-type]
-                _inner=real_ctx,
-                _encoding=chosen,
-                _min_size=min_size,
-                _compressible_types=compressible_types,
-            ))
+            body_handler(
+                _CompressedCtx(  # type: ignore[arg-type]
+                    _inner=real_ctx,
+                    _encoding=chosen,
+                    _min_size=min_size,
+                    _compressible_types=compressible_types,
+                )
+            )
 
         return proxied_body
 

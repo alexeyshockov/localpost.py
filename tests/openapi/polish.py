@@ -11,7 +11,6 @@ import pytest
 from localpost.openapi import FromHeader, FromPath, FromQuery, HttpApp, NotFound
 from tests.openapi.app import make_ctx, run_op
 
-
 # --- Optional handling ---------------------------------------------------
 
 

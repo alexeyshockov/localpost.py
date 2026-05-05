@@ -34,6 +34,7 @@ from localpost.http import (
     streaming_pool_handler,
     thread_pool_handler,
 )
+
 pytestmark = pytest.mark.anyio
 
 
@@ -253,6 +254,7 @@ class TestHttpServerService:
 
             lt.shutdown()
             await lt.stopped
+
 
 class TestMultiSelector:
     """``selectors=N > 1`` spawns N independent ``BaseServer`` threads bound
