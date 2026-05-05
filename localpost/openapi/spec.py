@@ -7,6 +7,7 @@ touching the data shape. v1 emits 3.2 only.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -14,6 +15,67 @@ import msgspec
 
 ParameterLocation = Literal["query", "header", "path", "cookie"]
 SecuritySchemeType = Literal["apiKey", "http", "oauth2", "openIdConnect", "mutualTLS"]
+
+
+# --- Serialisation helpers ------------------------------------------------
+
+# Field-name → output-key overrides for fields whose JSON name doesn't
+# follow the snake_case → camelCase rule (e.g. ``ref`` → ``$ref``).
+_KEY_OVERRIDES: dict[str, str] = {
+    "ref": "$ref",
+    "location": "in",
+}
+
+
+def _camel(name: str) -> str:
+    head, *tail = name.split("_")
+    return head + "".join(p.capitalize() for p in tail)
+
+
+def _key(name: str) -> str:
+    return _KEY_OVERRIDES.get(name, _camel(name))
+
+
+def _dump(value: Any) -> Any:
+    """Recursively serialise dataclasses/containers for JSON output.
+
+    Tuples become lists; nested dataclasses are flattened via their own
+    ``to_dict``. Plain JSON-compatible values pass through.
+    """
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return {k: _dump(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_dump(v) for v in value]
+    return value
+
+
+_MISSING = dataclasses.MISSING
+
+
+def _to_dict(obj: Any, *, always: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Generic ``to_dict`` for the spec dataclasses.
+
+    Walks ``dataclasses.fields(obj)``, skipping any field whose value
+    matches its declared default (so ``""`` strings, empty dicts/tuples,
+    ``None`` and ``False`` are omitted unless their name is listed in
+    ``always``). Field names map to JSON keys via :func:`_key`
+    (snake_case → camelCase, with overrides for ``ref`` and ``location``).
+    """
+    out: dict[str, Any] = {}
+    for f in dataclasses.fields(obj):
+        v = getattr(obj, f.name)
+        if f.name not in always:
+            if f.default is not _MISSING and v == f.default:
+                continue
+            if f.default_factory is not _MISSING and v == f.default_factory():
+                continue
+        out[_key(f.name)] = _dump(v)
+    return out
+
+
+# --- Spec dataclasses -----------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,12 +87,7 @@ class Reference:
     description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"$ref": self.ref}
-        if self.summary:
-            d["summary"] = self.summary
-        if self.description:
-            d["description"] = self.description
-        return d
+        return _to_dict(self, always=("ref",))
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,14 +97,7 @@ class Contact:
     email: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.name:
-            d["name"] = self.name
-        if self.url:
-            d["url"] = self.url
-        if self.email:
-            d["email"] = self.email
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +107,7 @@ class License:
     url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"name": self.name}
-        if self.identifier:
-            d["identifier"] = self.identifier
-        if self.url:
-            d["url"] = self.url
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,18 +121,7 @@ class Info:
     license: License | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"title": self.title, "version": self.version}
-        if self.summary:
-            d["summary"] = self.summary
-        if self.description:
-            d["description"] = self.description
-        if self.terms_of_service:
-            d["termsOfService"] = self.terms_of_service
-        if self.contact:
-            d["contact"] = self.contact.to_dict()
-        if self.license:
-            d["license"] = self.license.to_dict()
-        return d
+        return _to_dict(self, always=("title", "version"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,12 +131,7 @@ class ServerVariable:
     description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"default": self.default}
-        if self.enum:
-            d["enum"] = list(self.enum)
-        if self.description:
-            d["description"] = self.description
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,12 +141,7 @@ class Server:
     variables: dict[str, ServerVariable] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"url": self.url}
-        if self.description:
-            d["description"] = self.description
-        if self.variables:
-            d["variables"] = {k: v.to_dict() for k, v in self.variables.items()}
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +150,7 @@ class ExternalDocs:
     description: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"url": self.url}
-        if self.description:
-            d["description"] = self.description
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,16 +163,7 @@ class Tag:
     """3.2 addition: name of the parent tag for nested grouping."""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"name": self.name}
-        if self.summary:
-            d["summary"] = self.summary
-        if self.description:
-            d["description"] = self.description
-        if self.external_docs:
-            d["externalDocs"] = self.external_docs.to_dict()
-        if self.parent:
-            d["parent"] = self.parent
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +174,7 @@ class TagGroup:
     tags: tuple[str, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "tags": list(self.tags)}
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,18 +186,7 @@ class Encoding:
     allow_reserved: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.content_type:
-            d["contentType"] = self.content_type
-        if self.headers:
-            d["headers"] = {k: v.to_dict() for k, v in self.headers.items()}
-        if self.style:
-            d["style"] = self.style
-        if self.explode is not None:
-            d["explode"] = self.explode
-        if self.allow_reserved:
-            d["allowReserved"] = True
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,16 +197,7 @@ class Example:
     external_value: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.summary:
-            d["summary"] = self.summary
-        if self.description:
-            d["description"] = self.description
-        if self.value is not None:
-            d["value"] = self.value
-        if self.external_value:
-            d["externalValue"] = self.external_value
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,16 +208,7 @@ class MediaType:
     encoding: dict[str, Encoding] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.schema:
-            d["schema"] = self.schema
-        if self.example is not None:
-            d["example"] = self.example
-        if self.examples:
-            d["examples"] = {k: v.to_dict() for k, v in self.examples.items()}
-        if self.encoding:
-            d["encoding"] = {k: v.to_dict() for k, v in self.encoding.items()}
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,18 +220,7 @@ class Header:
     content: dict[str, MediaType] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.description:
-            d["description"] = self.description
-        if self.required:
-            d["required"] = True
-        if self.deprecated:
-            d["deprecated"] = True
-        if self.schema:
-            d["schema"] = self.schema
-        if self.content:
-            d["content"] = {k: v.to_dict() for k, v in self.content.items()}
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,20 +235,7 @@ class Parameter:
     explode: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"name": self.name, "in": self.location}
-        if self.required:
-            d["required"] = True
-        if self.description:
-            d["description"] = self.description
-        if self.deprecated:
-            d["deprecated"] = True
-        if self.schema:
-            d["schema"] = self.schema
-        if self.style:
-            d["style"] = self.style
-        if self.explode is not None:
-            d["explode"] = self.explode
-        return d
+        return _to_dict(self, always=("location",))
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,14 +245,7 @@ class RequestBody:
     content: dict[str, MediaType] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.description:
-            d["description"] = self.description
-        if self.required:
-            d["required"] = True
-        if self.content:
-            d["content"] = {k: v.to_dict() for k, v in self.content.items()}
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,12 +255,7 @@ class Response:
     content: dict[str, MediaType] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"description": self.description}
-        if self.headers:
-            d["headers"] = {k: v.to_dict() for k, v in self.headers.items()}
-        if self.content:
-            d["content"] = {k: v.to_dict() for k, v in self.content.items()}
-        return d
+        return _to_dict(self, always=("description",))
 
 
 SecurityRequirement = dict[str, tuple[str, ...]]
@@ -332,32 +279,7 @@ class Operation:
     callbacks: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.summary:
-            d["summary"] = self.summary
-        if self.operation_id:
-            d["operationId"] = self.operation_id
-        if self.description:
-            d["description"] = self.description
-        if self.tags:
-            d["tags"] = list(self.tags)
-        if self.parameters:
-            d["parameters"] = [p.to_dict() for p in self.parameters]
-        if self.request_body is not None:
-            d["requestBody"] = self.request_body.to_dict()
-        if self.responses:
-            d["responses"] = {code: r.to_dict() for code, r in self.responses.items()}
-        if self.callbacks:
-            d["callbacks"] = dict(self.callbacks)
-        if self.deprecated:
-            d["deprecated"] = True
-        if self.security:
-            d["security"] = [{k: list(v) for k, v in req.items()} for req in self.security]
-        if self.servers:
-            d["servers"] = [s.to_dict() for s in self.servers]
-        if self.external_docs:
-            d["externalDocs"] = self.external_docs.to_dict()
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,9 +304,9 @@ class PathItem:
         for method, op in self.operations.items():
             d[method] = op.to_dict()
         if self.parameters:
-            d["parameters"] = [p.to_dict() for p in self.parameters]
+            d["parameters"] = [_dump(p) for p in self.parameters]
         if self.servers:
-            d["servers"] = [s.to_dict() for s in self.servers]
+            d["servers"] = [_dump(s) for s in self.servers]
         return d
 
 
@@ -401,16 +323,7 @@ class OAuthFlow:
     """3.2 addition: device-authorization URL for the device flow."""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"scopes": dict(self.scopes)}
-        if self.authorization_url:
-            d["authorizationUrl"] = self.authorization_url
-        if self.token_url:
-            d["tokenUrl"] = self.token_url
-        if self.refresh_url:
-            d["refreshUrl"] = self.refresh_url
-        if self.device_authorization_url:
-            d["deviceAuthorizationUrl"] = self.device_authorization_url
-        return d
+        return _to_dict(self, always=("scopes",))
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,18 +336,7 @@ class OAuthFlows:
     """3.2 addition."""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.implicit:
-            d["implicit"] = self.implicit.to_dict()
-        if self.password:
-            d["password"] = self.password.to_dict()
-        if self.client_credentials:
-            d["clientCredentials"] = self.client_credentials.to_dict()
-        if self.authorization_code:
-            d["authorizationCode"] = self.authorization_code.to_dict()
-        if self.device_authorization:
-            d["deviceAuthorization"] = self.device_authorization.to_dict()
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,22 +354,7 @@ class SecurityScheme:
     open_id_connect_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"type": self.type}
-        if self.description:
-            d["description"] = self.description
-        if self.name:
-            d["name"] = self.name
-        if self.location:
-            d["in"] = self.location
-        if self.scheme:
-            d["scheme"] = self.scheme
-        if self.bearer_format:
-            d["bearerFormat"] = self.bearer_format
-        if self.flows:
-            d["flows"] = self.flows.to_dict()
-        if self.open_id_connect_url:
-            d["openIdConnectUrl"] = self.open_id_connect_url
-        return d
+        return _to_dict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,24 +369,7 @@ class Components:
     path_items: dict[str, PathItem] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.schemas:
-            d["schemas"] = dict(self.schemas)
-        if self.responses:
-            d["responses"] = {k: v.to_dict() for k, v in self.responses.items()}
-        if self.parameters:
-            d["parameters"] = {k: v.to_dict() for k, v in self.parameters.items()}
-        if self.request_bodies:
-            d["requestBodies"] = {k: v.to_dict() for k, v in self.request_bodies.items()}
-        if self.headers:
-            d["headers"] = {k: v.to_dict() for k, v in self.headers.items()}
-        if self.security_schemes:
-            d["securitySchemes"] = {k: v.to_dict() for k, v in self.security_schemes.items()}
-        if self.examples:
-            d["examples"] = {k: v.to_dict() for k, v in self.examples.items()}
-        if self.path_items:
-            d["pathItems"] = {k: v.to_dict() for k, v in self.path_items.items()}
-        return d
+        return _to_dict(self)
 
     def is_empty(self) -> bool:
         return not (
@@ -549,26 +419,7 @@ class OpenAPI:
         return replace(self, components=components)
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"openapi": self.openapi, "info": self.info.to_dict()}
-        if self.json_schema_dialect:
-            d["jsonSchemaDialect"] = self.json_schema_dialect
-        if self.servers:
-            d["servers"] = [s.to_dict() for s in self.servers]
-        if self.paths:
-            d["paths"] = {p: item.to_dict() for p, item in self.paths.items()}
-        if self.webhooks:
-            d["webhooks"] = {k: v.to_dict() for k, v in self.webhooks.items()}
-        if not self.components.is_empty():
-            d["components"] = self.components.to_dict()
-        if self.security:
-            d["security"] = [{k: list(v) for k, v in req.items()} for req in self.security]
-        if self.tags:
-            d["tags"] = [t.to_dict() for t in self.tags]
-        if self.tag_groups:
-            d["tagGroups"] = [g.to_dict() for g in self.tag_groups]
-        if self.external_docs:
-            d["externalDocs"] = self.external_docs.to_dict()
-        return d
+        return _to_dict(self, always=("openapi", "info"))
 
     def to_json(self) -> bytes:
         return msgspec.json.encode(self.to_dict())
