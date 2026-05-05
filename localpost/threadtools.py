@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import dataclasses as dc
-import queue
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future
-from typing import Any, Literal, Protocol, Self, final, override
+from typing import Any, Protocol, Self, final, override
 
 from anyio import (
     ClosedResourceError,
@@ -417,60 +416,53 @@ class _Task:
 
 @final
 class _Worker:
-    """Idle-tracked worker thread with a 1-slot inbox.
+    """Idle-tracked worker thread with a per-worker inbox.
 
-    State machine: ``busy`` (running a task or freshly spawned) → ``idle``
-    (re-parked, in the global ``_idle`` deque) → ``busy`` again on claim,
-    or ``dead`` if the inbox stays empty for ``_IDLE_TIMEOUT`` seconds.
-
-    Idle workers stay listed in ``_idle`` until a dispatcher pops them.
-    A self-died worker leaves a tombstone in the deque; ``claim()``
-    returns ``False`` for tombstones so the dispatcher pops the next
-    one (or spawns a fresh worker).
+    Lifecycle: ``alive`` until the thread self-exits after ``_IDLE_TIMEOUT``
+    seconds with no work, after which the worker becomes a tombstone in the
+    global ``_idle`` deque. The dispatcher detects tombstones via
+    :meth:`submit` returning ``False`` and pops the next worker / spawns a
+    fresh one.
     """
 
-    __slots__ = ("_inbox", "_lock", "_state", "_thread")
+    __slots__ = ("_alive", "_cv", "_inbox")
 
     def __init__(self) -> None:
-        self._inbox: queue.Queue[_Task] = queue.Queue(maxsize=1)
-        self._lock = threading.Lock()
-        # Born busy: spawned only with a task imminent (skips claim()).
-        self._state: Literal["busy", "idle", "dead"] = "busy"
-        self._thread = threading.Thread(target=self._run, daemon=True, name="localpost-worker")
-        self._thread.start()
+        self._inbox: deque[_Task] = deque()
+        self._cv = threading.Condition(threading.Lock())
+        # Set under ``_cv`` before lock release in ``_run``; that ordering is
+        # what makes ``submit`` race-free vs ``Thread.is_alive()``, which can
+        # still report ``True`` after ``_run`` has released the lock but
+        # before CPython's bootstrap marks the thread stopped.
+        self._alive = True
+        threading.Thread(target=self._run, daemon=True, name="localpost-worker").start()
 
-    def claim(self) -> bool:
-        """Atomically transition idle → busy. Returns ``False`` for tombstones."""
-        with self._lock:
-            if self._state == "idle":
-                self._state = "busy"
-                return True
-            return False
-
-    def submit(self, task: _Task) -> None:
-        """Hand off a task to a worker that's already been claimed."""
-        # Inbox capacity is 1; a claimed worker has an empty inbox by construction
-        # (the previous task was already dequeued before re-parking).
-        self._inbox.put(task)
+    def submit(self, task: _Task) -> bool:
+        """Hand off a task. Returns ``False`` if the worker has self-exited."""
+        with self._cv:
+            if not self._alive:
+                return False
+            self._inbox.append(task)
+            self._cv.notify()
+            return True
 
     def _run(self) -> None:
         while True:
-            try:
-                task = self._inbox.get(timeout=_IDLE_TIMEOUT)
-            except queue.Empty:
-                with self._lock:
-                    if self._state == "idle":
-                        # Genuinely idle on timeout — die. Tombstone stays in
-                        # the deque; the next dispatcher to pop it will retry.
-                        self._state = "dead"
-                        return
-                    # Claimed during the timeout race — fall through and consume
-                    # the put that's about to land in the inbox.
-                    continue
+            with self._cv:
+                # Re-check inbox after each wait — covers both spurious wakeups
+                # and the lost-notify race where a submit lands between the
+                # outer ``inbox.popleft`` and the wait re-acquiring the lock.
+                while not self._inbox:
+                    if not self._cv.wait(timeout=_IDLE_TIMEOUT):
+                        # Timed out. One more inbox check under the lock to
+                        # close the timeout-vs-notify race.
+                        if not self._inbox:
+                            self._alive = False
+                            return
+                        break
+                task = self._inbox.popleft()
             task.run()
-            with self._lock:
-                self._state = "idle"
-                _idle.append(self)
+            _idle.append(self)
 
 
 _idle: deque[_Worker] = deque()
@@ -515,7 +507,12 @@ class ThreadTaskGroup:
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._pending = 0
-        self._errors: list[BaseException] = []
+        # ``deque.append`` is documented thread-safe (vs ``list.append`` which
+        # is only atomic by CPython implementation accident). Workers append
+        # without holding any group-level lock; ``__exit__`` reads after
+        # drain, so the ``_cv`` release/acquire in ``_task_done`` provides
+        # the visibility barrier.
+        self._errors: deque[BaseException] = deque()
         self._closed = False
 
     def __enter__(self) -> Self:
@@ -555,15 +552,13 @@ class ThreadTaskGroup:
             try:
                 w = _idle.pop()
             except IndexError:
-                # No idle worker — spawn one. It starts in ``busy`` state, so
-                # we skip ``claim()`` and submit directly.
-                w = _Worker()
-                break
-            if w.claim():
-                break
+                # No idle worker — spawn a fresh one. ``submit`` on a fresh
+                # worker is guaranteed to succeed (``_alive=True``).
+                _Worker().submit(task)
+                return fut
+            if w.submit(task):
+                return fut
             # Tombstone (self-died on idle timeout); pop the next one.
-        w.submit(task)
-        return fut
 
     def _task_done(self) -> None:
         with self._cv:
@@ -572,5 +567,8 @@ class ThreadTaskGroup:
                 self._cv.notify_all()
 
     def _record_error(self, exc: BaseException) -> None:
-        with self._lock:
-            self._errors.append(exc)
+        # No lock needed: ``list.append`` is atomic in CPython (GIL or
+        # free-threaded per-list mutex). Memory visibility to ``__exit__``
+        # is established by ``_task_done``'s acquire of ``_cv``, which always
+        # runs after ``_record_error`` in the same task.
+        self._errors.append(exc)

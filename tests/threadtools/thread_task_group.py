@@ -233,7 +233,7 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
 
     # Wait past the idle timeout.
     time.sleep(fast_idle_timeout * 10)
-    assert fresh._state == "dead"
+    assert fresh._alive is False
 
     # Submitting again skips the dead tombstone and spawns fresh.
     with ThreadTaskGroup() as tg:

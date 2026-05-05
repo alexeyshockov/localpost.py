@@ -1,4 +1,4 @@
-"""Static-file server with a separate worker pool from the API.
+"""Static-file server alongside an API on the same worker pool.
 
 Run::
 
@@ -9,9 +9,9 @@ Run::
     curl -I http://localhost:8000/static/<some-file>      # HEAD: just headers
     curl -H 'Range: bytes=0-99' http://localhost:8000/static/<some-file>
 
-The static handler uses ``socket.sendfile()`` for the body (zero-copy)
-and lives in its own thread pool sized for I/O-bound concurrency, so a
-slow client downloading a large file can't pin the small API pool.
+The static handler uses ``socket.sendfile()`` for the body (zero-copy).
+Both API and static handlers go through the same ``thread_pool_handler``
+— workers come from the process-wide pool and grow on demand.
 """
 
 from __future__ import annotations
@@ -66,15 +66,13 @@ async def app():
         prefix=b"/static/",
         cache_control="public, max-age=3600",
     )
+    api = build_api()
 
-    async with (
-        thread_pool_handler(build_api()) as api_h,
-        thread_pool_handler(static) as static_h,
-    ):
-        def root_handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-            return (static_h if ctx.request.path.startswith(b"/static/") else api_h)(ctx)
+    def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
+        return (static if ctx.request.path.startswith(b"/static/") else api)(ctx)
 
-        async with http_server(config, root_handler):
+    async with thread_pool_handler(dispatch) as wrapped:
+        async with http_server(config, wrapped):
             yield
 
 
