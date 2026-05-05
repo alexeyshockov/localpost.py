@@ -27,7 +27,7 @@ from localpost.http.router import (
     route_match,
 )
 from localpost.http.static import static_handler
-from localpost.http.wsgi import wrap_wsgi
+from localpost.http.wsgi import to_wsgi, wrap_wsgi
 
 __all__ = [
     # config
@@ -59,7 +59,8 @@ __all__ = [
     "RouteMatch",
     "URITemplate",
     "route_match",
-    # WSGI adapter
+    # WSGI adapters
+    "to_wsgi",
     "wrap_wsgi",
     # hosting
     "http_server",

@@ -317,6 +317,18 @@ class Router:
 
         return dispatch
 
+    def as_wsgi(self):
+        """Return a WSGI application that dispatches via this router.
+
+        Sugar over :func:`localpost.http.wsgi.to_wsgi(self.as_handler())`.
+        Deploy with Gunicorn / uWSGI / Werkzeug — the WSGI worker model
+        is the request-side concurrency layer (``thread_pool_handler``
+        does not apply).
+        """
+        from localpost.http.wsgi import to_wsgi  # noqa: PLC0415
+
+        return to_wsgi(self.as_handler())
+
 
 # --------------------------------------------------------------------------
 # Match result types

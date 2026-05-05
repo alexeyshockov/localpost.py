@@ -211,6 +211,23 @@ class HttpApp:
 
         return _app_service()
 
+    def as_wsgi(self):
+        """Return a WSGI application that serves this :class:`HttpApp`.
+
+        Sugar over :func:`localpost.http.wsgi.to_wsgi`: builds the same
+        router used by :meth:`service` and adapts it for deployment
+        under Gunicorn / uWSGI / Werkzeug. Deploy with e.g.
+        ``gunicorn myapp:app.as_wsgi()``.
+
+        The WSGI worker model is the request-side concurrency layer —
+        :func:`localpost.http.thread_pool_handler` does not apply, and
+        :func:`localpost.http.check_cancelled` is a no-op (no socket
+        handle inside the WSGI app).
+        """
+        from localpost.http.wsgi import to_wsgi  # noqa: PLC0415
+
+        return to_wsgi(self._build_router_handler())
+
     # ----- Internals -----
 
     def _build_router_handler(self) -> RequestHandler:
