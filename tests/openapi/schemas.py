@@ -31,6 +31,31 @@ class Status(StrEnum):
     CLOSED = "closed"
 
 
+# attrs sample types live at module scope so ``attrs.resolve_types`` (which goes through
+# ``typing.get_type_hints`` against the class's module globals) can resolve forward refs
+# under ``from __future__ import annotations``.
+try:
+    import attrs as _attrs
+
+    @_attrs.define
+    class _AttrsPet:
+        name: str
+        age: int = 0
+
+    class _MsgspecTrinket(msgspec.Struct):
+        sku: str
+
+    @_attrs.define
+    class _AttrsPetWithTrinket:
+        name: str
+        toy: _MsgspecTrinket
+
+except ImportError:
+    _AttrsPet = None  # type: ignore[assignment,misc]
+    _MsgspecTrinket = None  # type: ignore[assignment,misc]
+    _AttrsPetWithTrinket = None  # type: ignore[assignment,misc]
+
+
 class TestPrimitives:
     def test_int(self):
         registry = SchemaRegistry()
@@ -135,6 +160,44 @@ class TestAdapterDispatch:
         assert "Pet" in components
         assert "name" in components["Pet"]["properties"]
 
+    def test_attrs_class_routes_to_attrs(self):
+        pytest.importorskip("attrs")
+        pytest.importorskip("cattrs")
+        registry = default_registry()
+        assert registry.for_type(_AttrsPet).name == "attrs"
+
+    def test_attrs_schema_registered_in_components(self):
+        pytest.importorskip("attrs")
+        pytest.importorskip("cattrs")
+
+        registry = SchemaRegistry()
+        schema = registry.schema_for(_AttrsPet)
+        assert schema == {"$ref": REF_TEMPLATE.format(name="_AttrsPet")}
+
+        components = registry.components()
+        assert "_AttrsPet" in components
+        body = components["_AttrsPet"]
+        assert body["type"] == "object"
+        assert body["properties"]["name"] == {"type": "string"}
+        assert body["properties"]["age"] == {"type": "integer"}
+        # ``age`` has a default; only ``name`` is required.
+        assert body["required"] == ["name"]
+
+    def test_attrs_with_nested_msgspec_struct_recurses_via_registry(self):
+        """attrs adapter must defer foreign nested types to the registry's schema_for callback."""
+        pytest.importorskip("attrs")
+        pytest.importorskip("cattrs")
+
+        registry = SchemaRegistry()
+        registry.schema_for(_AttrsPetWithTrinket)
+        components = registry.components()
+        assert "_AttrsPetWithTrinket" in components
+        # _MsgspecTrinket must have been registered as a side-effect of the schema_for callback.
+        assert "_MsgspecTrinket" in components
+        assert components["_AttrsPetWithTrinket"]["properties"]["toy"] == {
+            "$ref": REF_TEMPLATE.format(name="_MsgspecTrinket")
+        }
+
 
 class TestCustomAdapter:
     """Plug a fake adapter ahead of msgspec to confirm dispatch is extensible."""
@@ -156,9 +219,7 @@ class TestCustomAdapter:
         def is_body_type(self, t: Any, /) -> bool:
             return self.claims(t)
 
-        def schema(
-            self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None
-        ) -> dict[str, Any]:
+        def schema(self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None) -> dict[str, Any]:
             del schema_for
             self.schema_calls.append(t)
             return {"$ref": ref_template.format(name="Marker")}

@@ -15,8 +15,9 @@ Type-driven HTTP framework with built-in **OpenAPI 3.2** generation, on top of
   via an `update_doc` hook. There's no second place to declare auth.
 - **msgspec-first.** [msgspec](https://jcristharif.com/msgspec/) does request
   body decoding, response encoding, and JSON Schema generation. Pydantic
-  models are recognised automatically — but pydantic is **not** a runtime
-  dependency; install it yourself if you want to use it.
+  models *and* `attrs.define`'d classes are recognised automatically — but
+  neither is a runtime dependency of the `openapi` extra; install them
+  yourself if you want to use them.
 
 ## Install
 
@@ -28,6 +29,14 @@ For Pydantic models in handlers:
 
 ```bash
 pip install pydantic
+```
+
+For `attrs` classes in handlers (uses `cattrs` for structuring):
+
+```bash
+pip install 'localpost[openapi-attrs]'
+# or, equivalently:
+pip install attrs cattrs
 ```
 
 ## Quick start
@@ -99,7 +108,7 @@ One per parameter. Picked from the annotation; explicit factories override:
 | Path variable | `FromPath()` | param name matches `{name}` in template |
 | Query string | `FromQuery()` | scalar parameter not in path, no body type |
 | Header | `FromHeader("X-…")` | only via explicit `Annotated[...]` |
-| Request body | `FromBody()` | param annotated as `msgspec.Struct` / dataclass / pydantic model |
+| Request body | `FromBody()` | param annotated as `msgspec.Struct` / dataclass / pydantic model / `attrs` class |
 | Request ctx | (none) | param annotated as `HTTPReqCtx` |
 
 Each resolver may short-circuit by returning an `OpResult` (e.g. validation

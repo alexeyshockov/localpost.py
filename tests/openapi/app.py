@@ -102,6 +102,20 @@ except ImportError:
     Pet = None  # type: ignore[assignment,misc]
 
 
+# attrs Toy lives at module scope for the same reason: forward-ref resolution
+# in ``attrs.resolve_types`` walks ``__annotations__`` against module globals.
+try:
+    import attrs
+
+    @attrs.define
+    class Toy:
+        name: str
+        weight: int
+
+except ImportError:
+    Toy = None  # type: ignore[assignment,misc]
+
+
 # --- Tests ---------------------------------------------------------------
 
 
@@ -416,3 +430,38 @@ class TestPydantic:
         assert status == 200, body
         assert msgspec.json.decode(body) == {"name": "Rex", "age": 3}
         assert headers["content-type"] == "application/json"
+
+
+class TestAttrs:
+    def test_attrs_body_is_parsed_and_serialized(self):
+        pytest.importorskip("attrs")
+        pytest.importorskip("cattrs")
+
+        app = HttpApp()
+
+        @app.post("/toys")
+        def create(toy: Toy) -> Toy:
+            return toy
+
+        op = app.operations[0]
+        ctx = make_ctx(method="POST", path="/toys", body=b'{"name":"Bone","weight":2}')
+        status, body, headers = run_op(op, ctx)
+        assert status == 200, body
+        assert msgspec.json.decode(body) == {"name": "Bone", "weight": 2}
+        assert headers["content-type"] == "application/json"
+
+    def test_attrs_invalid_body_is_400(self):
+        pytest.importorskip("attrs")
+        pytest.importorskip("cattrs")
+
+        app = HttpApp()
+
+        @app.post("/toys")
+        def create(toy: Toy) -> Toy:
+            return toy
+
+        op = app.operations[0]
+        # Missing required ``weight`` field — cattrs raises ClassValidationError.
+        ctx = make_ctx(method="POST", path="/toys", body=b'{"name":"Bone"}')
+        status, _body, _headers = run_op(op, ctx)
+        assert status == 400

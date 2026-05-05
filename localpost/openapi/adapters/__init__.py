@@ -1,19 +1,19 @@
 """Pluggable type adapters for JSON Schema, request decode, and response encode.
 
 A :class:`TypeAdapter` owns a family of types — msgspec for the catch-all,
-pydantic for :class:`pydantic.BaseModel` subclasses, and so on. The
-:class:`AdapterRegistry` dispatches by type, with the catch-all (msgspec)
-always last.
+pydantic for :class:`pydantic.BaseModel` subclasses, attrs for
+:func:`attrs.define`'d classes, and so on. The :class:`AdapterRegistry`
+dispatches by type, with the catch-all (msgspec) always last.
 
 The default registry is auto-built from what's installed: msgspec is a
-hard runtime dependency; pydantic is detected at import time. To plug in
-a custom adapter (e.g. attrs, protobuf), pass an explicit registry to
-:class:`localpost.openapi.HttpApp`::
+hard runtime dependency; pydantic and attrs/cattrs are detected at import
+time. To plug in a custom adapter (e.g. protobuf), pass an explicit
+registry to :class:`localpost.openapi.HttpApp`::
 
     from localpost.openapi import HttpApp
     from localpost.openapi.adapters import AdapterRegistry, default_registry
 
-    registry = AdapterRegistry([MyAttrsAdapter(), *default_registry().adapters])
+    registry = AdapterRegistry([MyProtobufAdapter(), *default_registry().adapters])
     app = HttpApp(adapters=registry)
 """
 
@@ -159,7 +159,8 @@ def default_registry() -> AdapterRegistry:
     """Return a process-wide :class:`AdapterRegistry` autoconfigured from
     installed libraries.
 
-    Order: pydantic (if importable), then msgspec as the catch-all. Cached.
+    Order: pydantic (if importable), attrs (if both ``attrs`` and ``cattrs`` are importable),
+    then msgspec as the catch-all. Cached.
     """
     from localpost.openapi.adapters._msgspec import MsgspecAdapter  # noqa: PLC0415
 
@@ -168,6 +169,12 @@ def default_registry() -> AdapterRegistry:
         from localpost.openapi.adapters._pydantic import PydanticAdapter  # noqa: PLC0415
 
         adapters.append(PydanticAdapter())
+    except ImportError:
+        pass
+    try:
+        from localpost.openapi.adapters._attrs import AttrsAdapter  # noqa: PLC0415
+
+        adapters.append(AttrsAdapter())
     except ImportError:
         pass
     adapters.append(MsgspecAdapter())

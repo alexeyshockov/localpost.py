@@ -72,6 +72,13 @@ openapi = [
 #    "localpost[http]",
     "msgspec ~=0.19",
 ]
+openapi-attrs = [
+    # attrs handlers + cattrs for structuring/unstructuring. Schema generation walks
+    # ``attrs.fields(cls)`` directly. Both libraries are user-installed; not a runtime
+    # dep of the base ``openapi`` extra.
+    "attrs >=23",
+    "cattrs >=24",
+]
 
 [dependency-groups]
 dev = [
@@ -95,6 +102,9 @@ dev-openapi = [
     # dep of the openapi extra — end users install pydantic themselves. We pull
     # it in here so our own examples and tests can exercise that path.
     "pydantic ~=2.7",
+    # Same posture for attrs/cattrs (see the ``openapi-attrs`` extra).
+    "attrs >=23",
+    "cattrs >=24",
 ]
 dev-sentry = [
     "sentry-sdk ~=2.51",

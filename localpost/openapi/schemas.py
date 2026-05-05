@@ -37,7 +37,9 @@ class SchemaRegistry:
     __slots__ = ("_adapters", "_components", "_lock", "_types_by_adapter")
 
     def __init__(self, adapters: AdapterRegistry | None = None) -> None:
-        self._lock = threading.Lock()
+        # Re-entrant: adapters that recurse via the ``schema_for`` callback (attrs ->
+        # msgspec for foreign nested types) take the same lock from the same thread.
+        self._lock = threading.RLock()
         self._adapters = adapters or default_registry()
         # We bucket types by the adapter that claims them. Insertion order
         # is preserved (CPython dict semantics), so generated component
@@ -77,7 +79,24 @@ class SchemaRegistry:
             if self._components is not None:
                 return self._components
             schemas: dict[str, dict[str, Any]] = {}
-            for adapter, types in self._types_by_adapter.items():
-                schemas.update(adapter.components(types, ref_template=REF_TEMPLATE, schema_for=self.schema_for))
+            # Drain in passes: an adapter's ``components()`` may register more types via
+            # ``schema_for`` (e.g. attrs adapter delegating a nested msgspec.Struct field
+            # back to the registry). Track per-adapter how many items have been processed
+            # and loop until no adapter has unprocessed work.
+            processed: dict[TypeAdapter, int] = {}
+            while True:
+                made_progress = False
+                # Snapshot keys: more adapters may appear during iteration.
+                for adapter in list(self._types_by_adapter.keys()):
+                    bucket = self._types_by_adapter[adapter]
+                    start = processed.get(adapter, 0)
+                    if start >= len(bucket):
+                        continue
+                    pending = bucket[start:]
+                    processed[adapter] = len(bucket)
+                    schemas.update(adapter.components(pending, ref_template=REF_TEMPLATE, schema_for=self.schema_for))
+                    made_progress = True
+                if not made_progress:
+                    break
             self._components = schemas
             return schemas
