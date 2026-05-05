@@ -21,6 +21,7 @@ __all__ = [
     "ReceiveChannel",
     "SendChannel",
     "ThreadTaskGroup",
+    "warmup",
 ]
 
 CHECK_TIMEOUT: float = 1.0
@@ -471,6 +472,27 @@ class _Worker:
 
 _idle: deque[_Worker] = deque()
 """Global LIFO stack of idle workers, shared across all ``ThreadTaskGroup``s."""
+
+
+def warmup(count: int, /) -> None:
+    """Pre-spawn ``count`` worker threads and park them in the global idle pool.
+
+    Useful at process startup to amortise thread-creation cost so the first
+    bursts of work don't pay it. Pre-warmed workers are indistinguishable
+    from organically spawned ones — they self-exit on the same idle timeout
+    if unused.
+
+    One-shot: ``warmup(8)`` always spawns 8 fresh workers, regardless of
+    how many idle workers already exist. Calling it again from a long-idle
+    process re-warms.
+
+    Raises:
+        ValueError: ``count`` is negative.
+    """
+    if count < 0:
+        raise ValueError("count must be >= 0")
+    for _ in range(count):
+        _idle.append(_Worker())
 
 
 @final

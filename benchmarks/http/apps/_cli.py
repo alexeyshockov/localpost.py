@@ -23,13 +23,20 @@ class AppArgs:
     port: int
     selectors: int
     acceptor: bool
+    warmup: int
 
 
 def parse_args(default_port: int = 8000) -> AppArgs:
-    """Port + selectors + acceptor. Used by LocalPost bench apps."""
+    """Port + selectors + acceptor + warmup. Used by LocalPost bench apps."""
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=default_port)
     p.add_argument("--selectors", type=int, default=1)
     p.add_argument("--acceptor", action="store_true")
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=32,
+        help="Pre-spawn N worker threads before serving (default: 32).",
+    )
     a = p.parse_args()
-    return AppArgs(port=a.port, selectors=a.selectors, acceptor=a.acceptor)
+    return AppArgs(port=a.port, selectors=a.selectors, acceptor=a.acceptor, warmup=a.warmup)

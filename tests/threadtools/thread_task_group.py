@@ -8,7 +8,7 @@ from concurrent.futures import Future
 import pytest
 
 from localpost import threadtools
-from localpost.threadtools import ThreadTaskGroup
+from localpost.threadtools import ThreadTaskGroup, warmup
 
 
 @pytest.fixture
@@ -298,6 +298,55 @@ def test_start_soon_from_arbitrary_thread():
 def _record(i: int, sink: list[int], lock: threading.Lock) -> None:
     with lock:
         sink.append(i)
+
+
+# ---------------------------------------------------------------------------
+# warmup()
+# ---------------------------------------------------------------------------
+
+
+def test_warmup_adds_workers_to_idle_pool():
+    """``warmup(N)`` spawns N workers and puts them in the global idle deque."""
+    threadtools._idle.clear()
+    warmup(4)
+    assert len(threadtools._idle) == 4
+    # Each entry is a distinct, alive worker.
+    workers = list(threadtools._idle)
+    assert all(w._alive for w in workers)
+    assert len(set(id(w) for w in workers)) == 4
+
+
+def test_warmup_workers_are_used_by_dispatch():
+    """A subsequent ``start_soon`` reuses a pre-warmed worker rather than
+    spawning a fresh one."""
+    threadtools._idle.clear()
+    warmup(2)
+    pre = {id(w) for w in threadtools._idle}
+
+    seen: set[int] = set()
+    seen_lock = threading.Lock()
+
+    def record_self() -> None:
+        with seen_lock:
+            seen.add(threading.get_ident())
+
+    with ThreadTaskGroup() as tg:
+        tg.start_soon(record_self).result(timeout=5)
+
+    # The worker that ran is one of the pre-warmed set.
+    post = {id(w) for w in threadtools._idle}
+    assert pre & post  # at least one of the warmed workers is still parked
+
+
+def test_warmup_zero_is_noop():
+    threadtools._idle.clear()
+    warmup(0)
+    assert len(threadtools._idle) == 0
+
+
+def test_warmup_negative_raises():
+    with pytest.raises(ValueError, match=">= 0"):
+        warmup(-1)
 
 
 # ---------------------------------------------------------------------------

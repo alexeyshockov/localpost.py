@@ -18,7 +18,7 @@ from localpost.http.app import HttpApp
 
 def main() -> int:
     args = parse_args()
-    app = HttpApp(max_concurrency=0)  # inline: no pool
+    app = HttpApp(pooled=False)  # inline: no pool
 
     @app.get("/ping")
     def ping():
