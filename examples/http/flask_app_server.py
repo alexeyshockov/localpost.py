@@ -55,7 +55,7 @@ def build_app() -> Flask:
 @service
 async def app_svc():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(flask_handler(build_app()), max_concurrency=8) as wrapped:
+    async with thread_pool_handler(flask_handler(build_app())) as wrapped:
         async with http_server(config, wrapped):
             yield
 

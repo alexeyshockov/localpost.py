@@ -112,7 +112,7 @@ def build_handler() -> RequestHandler:
 @service
 async def app():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(build_handler(), max_concurrency=8) as h:
+    async with thread_pool_handler(build_handler()) as h:
         async with http_server(config, h):
             yield
 

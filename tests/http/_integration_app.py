@@ -112,7 +112,7 @@ def _main() -> int:
 
     @service
     async def app():
-        async with thread_pool_handler(handler, max_concurrency=8) as wrapped:
+        async with thread_pool_handler(handler) as wrapped:
             async with http_server(cfg, wrapped):
                 yield
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import dataclasses as dc
+import queue
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
-from typing import Protocol, Self, final, override
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future
+from typing import Any, Literal, Protocol, Self, final, override
 
 from anyio import (
     ClosedResourceError,
@@ -16,8 +18,9 @@ from anyio import (
 
 __all__ = [
     "Channel",
-    "SendChannel",
     "ReceiveChannel",
+    "SendChannel",
+    "ThreadTaskGroup",
 ]
 
 CHECK_TIMEOUT: float = 1.0
@@ -381,3 +384,193 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
                 self._closed = True
                 state.open_receive_channels -= 1
                 state.not_empty.notify()  # Wake up threads waiting in get() immediately
+
+
+###
+# ThreadTaskGroup
+###
+
+_IDLE_TIMEOUT: float = 60.0
+"""Seconds an idle worker waits for new work before self-exiting."""
+
+
+@dc.dataclass(slots=True)
+class _Task:
+    future: Future[Any]
+    fn: Callable[..., Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    group: ThreadTaskGroup
+
+    def run(self) -> None:
+        try:
+            try:
+                result = self.fn(*self.args, **self.kwargs)
+            except BaseException as exc:  # noqa: BLE001 — Trio-style: capture everything
+                self.future.set_exception(exc)
+                self.group._record_error(exc)
+            else:
+                self.future.set_result(result)
+        finally:
+            self.group._task_done()
+
+
+@final
+class _Worker:
+    """Idle-tracked worker thread with a 1-slot inbox.
+
+    State machine: ``busy`` (running a task or freshly spawned) → ``idle``
+    (re-parked, in the global ``_idle`` deque) → ``busy`` again on claim,
+    or ``dead`` if the inbox stays empty for ``_IDLE_TIMEOUT`` seconds.
+
+    Idle workers stay listed in ``_idle`` until a dispatcher pops them.
+    A self-died worker leaves a tombstone in the deque; ``claim()``
+    returns ``False`` for tombstones so the dispatcher pops the next
+    one (or spawns a fresh worker).
+    """
+
+    __slots__ = ("_inbox", "_lock", "_state", "_thread")
+
+    def __init__(self) -> None:
+        self._inbox: queue.Queue[_Task] = queue.Queue(maxsize=1)
+        self._lock = threading.Lock()
+        # Born busy: spawned only with a task imminent (skips claim()).
+        self._state: Literal["busy", "idle", "dead"] = "busy"
+        self._thread = threading.Thread(target=self._run, daemon=True, name="localpost-worker")
+        self._thread.start()
+
+    def claim(self) -> bool:
+        """Atomically transition idle → busy. Returns ``False`` for tombstones."""
+        with self._lock:
+            if self._state == "idle":
+                self._state = "busy"
+                return True
+            return False
+
+    def submit(self, task: _Task) -> None:
+        """Hand off a task to a worker that's already been claimed."""
+        # Inbox capacity is 1; a claimed worker has an empty inbox by construction
+        # (the previous task was already dequeued before re-parking).
+        self._inbox.put(task)
+
+    def _run(self) -> None:
+        while True:
+            try:
+                task = self._inbox.get(timeout=_IDLE_TIMEOUT)
+            except queue.Empty:
+                with self._lock:
+                    if self._state == "idle":
+                        # Genuinely idle on timeout — die. Tombstone stays in
+                        # the deque; the next dispatcher to pop it will retry.
+                        self._state = "dead"
+                        return
+                    # Claimed during the timeout race — fall through and consume
+                    # the put that's about to land in the inbox.
+                    continue
+            task.run()
+            with self._lock:
+                self._state = "idle"
+                _idle.append(self)
+
+
+_idle: deque[_Worker] = deque()
+"""Global LIFO stack of idle workers, shared across all ``ThreadTaskGroup``s."""
+
+
+@final
+class ThreadTaskGroup:
+    """Trio-style task group running sync callables on a shared thread pool.
+
+    Tasks submitted via :meth:`start_soon` run on a process-wide pool of
+    worker threads. Workers are spawned on demand, reused across all
+    ``ThreadTaskGroup`` instances, and self-exit after 60 s of idleness.
+    There is no concurrency cap — ``start_soon`` always succeeds (modulo
+    OS thread limits).
+
+    Lifetime: sync context manager. On exit, blocks until every task
+    started inside the ``with`` block has finished, then re-raises any
+    task exceptions wrapped in an :class:`ExceptionGroup` (Trio
+    ``strict_exception_groups=True`` semantics — a body exception and
+    task exceptions are merged into one group).
+
+    Example::
+
+        with ThreadTaskGroup() as tg:
+            fut = tg.start_soon(do_work, arg)
+            # ...
+        # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
+
+    ``start_soon`` is callable from any thread, including from inside a
+    task running on the same group (recursive spawn). It returns a
+    :class:`concurrent.futures.Future` that captures the task's result
+    or exception. Reading the future is optional — a task exception is
+    surfaced via the ``ExceptionGroup`` raised at ``__exit__`` even if
+    the future is discarded.
+    """
+
+    __slots__ = ("_closed", "_cv", "_errors", "_lock", "_name", "_pending")
+
+    def __init__(self, *, name: str | None = None) -> None:
+        self._name = name
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._pending = 0
+        self._errors: list[BaseException] = []
+        self._closed = False
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            raise RuntimeError("ThreadTaskGroup cannot be reused")
+        return self
+
+    def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
+        # Drain. Nested ``start_soon`` from in-flight tasks is allowed — the
+        # while loop re-checks after each notify.
+        with self._cv:
+            while self._pending > 0:
+                self._cv.wait()
+            self._closed = True
+        all_errors: list[BaseException] = []
+        if exc is not None:
+            all_errors.append(exc)
+        all_errors.extend(self._errors)
+        if all_errors:
+            label = f"ThreadTaskGroup {self._name!r} failed" if self._name else "ThreadTaskGroup failed"
+            # ``BaseExceptionGroup(...)`` returns ``ExceptionGroup`` when every
+            # member is an ``Exception`` subclass, ``BaseExceptionGroup`` otherwise
+            # — matches Trio semantics for ``KeyboardInterrupt`` / ``SystemExit``.
+            raise BaseExceptionGroup(label, all_errors)
+
+    def start_soon[**P, R](
+        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> Future[R]:
+        """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("ThreadTaskGroup is closed")
+            self._pending += 1
+        fut: Future[R] = Future()
+        task = _Task(fut, fn, args, kwargs, self)
+        while True:
+            try:
+                w = _idle.pop()
+            except IndexError:
+                # No idle worker — spawn one. It starts in ``busy`` state, so
+                # we skip ``claim()`` and submit directly.
+                w = _Worker()
+                break
+            if w.claim():
+                break
+            # Tombstone (self-died on idle timeout); pop the next one.
+        w.submit(task)
+        return fut
+
+    def _task_done(self) -> None:
+        with self._cv:
+            self._pending -= 1
+            if self._pending == 0:
+                self._cv.notify_all()
+
+    def _record_error(self, exc: BaseException) -> None:
+        with self._lock:
+            self._errors.append(exc)

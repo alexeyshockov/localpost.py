@@ -159,9 +159,6 @@ PAYLOAD_TOO_LARGE_RESPONSE, PAYLOAD_TOO_LARGE_WIRE = _build_canned(413, PAYLOAD_
 REQUEST_TIMEOUT_BODY = b"Request Timeout"
 REQUEST_TIMEOUT_RESPONSE, REQUEST_TIMEOUT_WIRE = _build_canned(408, REQUEST_TIMEOUT_BODY)
 
-SERVICE_UNAVAILABLE_BODY = b"Service Unavailable"
-SERVICE_UNAVAILABLE_RESPONSE, SERVICE_UNAVAILABLE_WIRE = _build_canned(503, SERVICE_UNAVAILABLE_BODY)
-
 
 # --------------------------------------------------------------------------
 # HTTPReqCtx Protocol + handler types

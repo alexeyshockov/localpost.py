@@ -61,10 +61,6 @@ class HttpApp:
             called once at spec build; their
             :meth:`OpMiddleware.contribute_operation` is called for every
             operation.
-        max_concurrency: Worker-pool size used by :func:`thread_pool_handler`.
-            Default 32.
-        backlog: Extra channel buffer between the selector and the worker
-            pool. Default ``0`` (rendezvous).
         openapi_path: URL the generated spec is served on. ``None`` to
             disable.
         docs_path: Base URL for the built-in doc UIs. Each UI is served
@@ -83,21 +79,13 @@ class HttpApp:
         *,
         info: openapi_spec.Info | None = None,
         middlewares: Sequence[OpMiddleware] = (),
-        max_concurrency: int = 32,
-        backlog: int = 0,
         openapi_path: str | None = "/openapi.json",
         docs_path: str | None = "/docs",
         docs_ui: DocsUI = "all",
         adapters: AdapterRegistry | None = None,
     ) -> None:
-        if max_concurrency < 1:
-            raise ValueError("max_concurrency must be >= 1")
-        if backlog < 0:
-            raise ValueError("backlog must be >= 0")
         self._info = info or openapi_spec.Info()
         self._middlewares = tuple(middlewares)
-        self._max_concurrency = max_concurrency
-        self._backlog = backlog
         self._openapi_path = openapi_path
         self._docs_path = docs_path
         self._docs_ui = docs_ui
@@ -213,13 +201,11 @@ class HttpApp:
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """
-        max_concurrency = self._max_concurrency
-        backlog = self._backlog
         router = self._build_router_handler()
 
         @hosting.service
         async def _app_service():
-            async with thread_pool_handler(router, max_concurrency=max_concurrency, backlog=backlog) as h:
+            async with thread_pool_handler(router) as h:
                 async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                     yield
 

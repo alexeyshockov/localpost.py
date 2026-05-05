@@ -47,7 +47,7 @@ async def wsgi_app_service():
     config = ServerConfig(host="127.0.0.1", port=8000)
     # WSGI views block on response-body iteration, so wrap with a thread pool
     # to serve more than one request at a time.
-    async with thread_pool_handler(wrap_wsgi(build_app()), max_concurrency=8) as wrapped:
+    async with thread_pool_handler(wrap_wsgi(build_app())) as wrapped:
         async with http_server(config, wrapped):
             yield
 

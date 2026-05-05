@@ -66,7 +66,7 @@ def _events(ctx: HTTPReqCtx) -> None:
 async def app():
     # Streaming SSE handlers run on a streaming pool — body is not
     # pre-buffered, the worker holds the borrowed conn for the duration.
-    async with streaming_pool_handler(_events, max_concurrency=8) as inner:
+    async with streaming_pool_handler(_events) as inner:
         # Same compress_handler call as for JSON APIs; the middleware
         # picks the streaming path automatically when the response has no
         # Content-Length and the content type is in the allowlist (which

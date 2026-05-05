@@ -9,7 +9,7 @@ Run::
     curl http://localhost:8000/slow    # sleeps; spam a few of these in parallel
 
 The whole router is wrapped with :func:`localpost.http.thread_pool_handler` so
-every matched route runs on a worker thread (bounded by ``max_concurrency``).
+every matched route runs on a worker thread from the shared pool.
 SIGINT / SIGTERM signals shutdown; in-flight handlers see ``RequestCancelled``
 on the next ``check_cancelled`` call and the pool drains before the process
 exits.
@@ -74,7 +74,7 @@ def build_router() -> Router:
 @service
 async def app():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(build_router().as_handler(), max_concurrency=16) as wrapped:
+    async with thread_pool_handler(build_router().as_handler()) as wrapped:
         async with http_server(config, wrapped):
             yield
 

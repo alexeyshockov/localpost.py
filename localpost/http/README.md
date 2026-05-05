@@ -270,11 +270,10 @@ from localpost.http import (
 routes = Routes()
 # ... register API routes ...
 
-api    = thread_pool_handler(routes.build().as_handler(), max_concurrency=8)
+api    = thread_pool_handler(routes.build().as_handler())
 static = thread_pool_handler(
     static_handler("/var/www", prefix=b"/static/",
                    cache_control="public, max-age=31536000, immutable"),
-    max_concurrency=128, backlog=64,
 )
 
 async with api as api_h, static as static_h:
@@ -284,8 +283,8 @@ async with api as api_h, static as static_h:
         ...
 ```
 
-The API pool is small and CPU-shaped; the static pool is wide and I/O-shaped.
-See [`examples/http/static_files.py`](../../examples/http/static_files.py).
+Both wrappers share the process-wide worker pool — workers are spawned on
+demand and reused. See [`examples/http/static_files.py`](../../examples/http/static_files.py).
 
 #### `HTTPReqCtx.sendfile`
 
@@ -375,10 +374,8 @@ zero-copy:
 ```python
 api    = thread_pool_handler(
     compress_handler(routes.build().as_handler(), algorithms=("br", "gzip")),
-    max_concurrency=8,
 )
-static = thread_pool_handler(static_handler("/var/www", prefix=b"/static/"),
-                             max_concurrency=128, backlog=64)
+static = thread_pool_handler(static_handler("/var/www", prefix=b"/static/"))
 ```
 
 See [`examples/http/compressed_api.py`](../../examples/http/compressed_api.py).
@@ -457,7 +454,7 @@ on the documented public Flask API.
 | `http_server(config, handler, *, selectors=1, acceptor=False)` | `localpost.http._service`    | `@hosting.service` — runs the server loop with `handler`. See **Threading topologies** below. |
 | `wsgi_server(config, app, *, selectors=1, acceptor=False)`     | `localpost.http._service`    | Same, for a generic WSGI app.                                                       |
 | `flask_server(config, app)`                       | `localpost.http.flask`       | Native Flask — see `localpost.http.flask`.                                          |
-| `thread_pool_handler(inner, *, max_concurrency, backlog=0)` | `localpost.http._pool` | Async CM. Yields a `RequestHandler` that runs `inner` on a worker thread. Admission cap = `max_concurrency + backlog`; default `backlog=0` means exactly `max_concurrency` in flight. |
+| `thread_pool_handler(inner)`                      | `localpost.http._pool`       | Async CM. Yields a `RequestHandler` that runs `inner` on a shared worker thread (process-wide pool, workers spawned on demand, no concurrency cap). |
 
 #### Threading topologies
 
@@ -495,7 +492,7 @@ async def app():
     def hello(ctx): ...   # plain RequestCtx → Response handler
 
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(routes.build().as_handler(), max_concurrency=8) as h:
+    async with thread_pool_handler(routes.build().as_handler()) as h:
         async with http_server(config, h):
             yield
 
@@ -513,14 +510,11 @@ What this gives you:
   the router directly to `http_server` to keep them all on the selector;
   more granular per-route control is the user's composition problem (today
   there is no per-route pool API).
-- **No max\_concurrency on `http_server`.** The pool is the wrapper's
-  concern; `http_server` has one job and one job only.
-- **Admission is the pool's concern, not the server's.** The pool admits up to
-  `max_concurrency + backlog` requests at once (a `threading.Semaphore`
-  acquired by the selector on dispatch, released by the worker on completion).
-  The default `backlog=0` is the strict-N case: every dispatch needs a free
-  worker, otherwise it 503s. Bump `backlog` to let bursts queue briefly
-  instead of bouncing.
+- **No concurrency cap on `http_server` or the pool.** The pool dispatches
+  every request onto a process-wide `ThreadTaskGroup`; workers are spawned
+  on demand and reused across all `thread_pool_handler` instances in the
+  process. There is no admission gate and no 503-on-overflow — backpressure
+  is the deployment's concern (front-LB / OS thread limits).
 
 ## Design
 

@@ -69,7 +69,7 @@ async def app():
         h = compress_handler(build_router().as_handler(), algorithms=("gzip",))
 
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(h, max_concurrency=8) as wrapped:
+    async with thread_pool_handler(h) as wrapped:
         async with http_server(config, wrapped):
             yield
 

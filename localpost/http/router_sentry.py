@@ -23,7 +23,7 @@ Usage::
     sentry_sdk.init(dsn=..., traces_sample_rate=1.0)
     handler = sentry_router_handler(router)
 
-    async with thread_pool_handler(handler, max_concurrency=16) as wrapped:
+    async with thread_pool_handler(handler) as wrapped:
         async with http_server(config, wrapped):
             ...
 

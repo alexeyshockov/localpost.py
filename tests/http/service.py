@@ -34,8 +34,6 @@ from localpost.http import (
     streaming_pool_handler,
     thread_pool_handler,
 )
-from tests.http._helpers import read_http_response
-
 pytestmark = pytest.mark.anyio
 
 
@@ -44,8 +42,6 @@ async def _serve_pooled(
     cfg: ServerConfig,
     handler: RequestHandler,
     *,
-    max_concurrency: int,
-    backlog: int = 0,
     selectors: int = 1,
     acceptor: bool = False,
 ) -> AsyncGenerator[ServiceLifetimeView]:
@@ -53,7 +49,7 @@ async def _serve_pooled(
 
     Tests own shutdown via the yielded lifetime; the pool drains on exit.
     """
-    async with thread_pool_handler(handler, max_concurrency=max_concurrency, backlog=backlog) as wrapped:
+    async with thread_pool_handler(handler) as wrapped:
         async with serve(http_server(cfg, wrapped, selectors=selectors, acceptor=acceptor)) as lt:
             yield lt
 
@@ -109,7 +105,7 @@ class TestHttpServerService:
     async def test_serves_single_request_pooled(self, free_port):
         """Pool-wrapped handler: same observable behaviour, but on a worker thread."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, _handler_200(b"hi"), max_concurrency=1) as lt:
+        async with _serve_pooled(cfg, _handler_200(b"hi")) as lt:
             await lt.started
             await _wait_server_ready(free_port)
             resp = await _get(f"http://127.0.0.1:{free_port}/")
@@ -120,7 +116,7 @@ class TestHttpServerService:
         assert lt.exit_code == 0
 
     async def test_each_request_becomes_a_task(self, free_port):
-        """max_concurrency>1 → several slow handlers run in parallel (different threads)."""
+        """Several slow handlers run in parallel on different worker threads."""
         thread_ids: list[int] = []
         lock = threading.Lock()
         entered = threading.Semaphore(0)  # used as a barrier signal
@@ -141,7 +137,7 @@ class TestHttpServerService:
             return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=4) as lt:
+        async with _serve_pooled(cfg, handler) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -177,39 +173,6 @@ class TestHttpServerService:
             lt.shutdown()
             await lt.stopped
 
-    async def test_max_concurrency_one_serializes(self, free_port):
-        """With a 1-slot pool plus a queue, all requests run, just one at a time."""
-        in_flight = 0
-        peak = 0
-        lock = threading.Lock()
-
-        def body_handler(ctx: HTTPReqCtx):
-            nonlocal in_flight, peak
-            with lock:
-                in_flight += 1
-                peak = max(peak, in_flight)
-            time.sleep(0.1)
-            with lock:
-                in_flight -= 1
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=1, backlog=2) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            async with anyio.create_task_group() as tg:
-                for _ in range(3):
-                    tg.start_soon(_get, f"http://127.0.0.1:{free_port}/")
-
-            assert peak == 1
-
-            lt.shutdown()
-            await lt.stopped
-
     async def test_shutdown_cancels_inflight(self, free_port):
         """Triggering shutdown while a handler is running cancels it via the HTTP cancellation token.
 
@@ -235,7 +198,7 @@ class TestHttpServerService:
             return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
+        async with _serve_pooled(cfg, handler) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -277,7 +240,7 @@ class TestHttpServerService:
         router = routes.build()
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, router.as_handler(), max_concurrency=4) as lt:
+        async with _serve_pooled(cfg, router.as_handler()) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -290,192 +253,6 @@ class TestHttpServerService:
 
             lt.shutdown()
             await lt.stopped
-
-    async def test_invalid_max_concurrency(self):
-        with pytest.raises(ValueError, match="max_concurrency"):
-            async with thread_pool_handler(_handler_200(), max_concurrency=0):
-                pass
-
-    async def test_invalid_backlog(self):
-        with pytest.raises(ValueError, match="backlog"):
-            async with thread_pool_handler(_handler_200(), max_concurrency=1, backlog=-1):
-                pass
-
-
-class TestBacklogAdmission:
-    """``backlog`` controls the channel buffer between selector and workers.
-
-    Default ``backlog=0`` is rendezvous: the selector's ``put_nowait`` only
-    succeeds when a worker is currently waiting on ``Channel.get()``;
-    otherwise the request is rejected with 503 immediately. ``backlog=K``
-    admits up to ``max_concurrency + K`` requests before 503s start.
-    """
-
-    async def test_rendezvous_default_rejects_when_workers_busy(self, free_port):
-        """backlog=0, max_concurrency=1: a 2nd concurrent request 503s
-        immediately because no worker is waiting on get()."""
-        entered = threading.Event()
-        release = threading.Event()
-
-        def body_handler(ctx: HTTPReqCtx):
-            entered.set()
-            release.wait(timeout=5.0)
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            try:
-                # Block the only worker.
-                async def slow():
-                    return await _get(f"http://127.0.0.1:{free_port}/", timeout=5.0)
-
-                async with anyio.create_task_group() as tg:
-
-                    async def hold_first():
-                        await slow()
-
-                    tg.start_soon(hold_first)
-
-                    # Wait until the first request is in the worker.
-                    await to_thread.run_sync(lambda: entered.wait(2.0))
-
-                    # Second request: no worker waiting → 503 immediately.
-                    r = await _get(f"http://127.0.0.1:{free_port}/", timeout=2.0)
-                    assert r.status_code == 503
-
-                    release.set()
-            finally:
-                release.set()
-
-            lt.shutdown()
-            await lt.stopped
-
-    async def test_rendezvous_idle_worker_dispatches_normally(self, free_port):
-        """backlog=0 must not 503 when a worker IS waiting. Sequential
-        requests on max_concurrency=1 are the regression check — each
-        request finishes before the next arrives, so the worker is always
-        idle on get() at dispatch time."""
-
-        def handler(ctx: HTTPReqCtx):
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            for _ in range(5):
-                r = await _get(f"http://127.0.0.1:{free_port}/", timeout=2.0)
-                assert r.status_code == 200
-
-            lt.shutdown()
-            await lt.stopped
-
-    async def test_backlog_admits_extra_requests(self, free_port):
-        """backlog=2 with max_concurrency=2: 4 concurrent slow requests all
-        succeed (2 in flight + 2 buffered)."""
-        entered = threading.Semaphore(0)
-        release = threading.Event()
-
-        def body_handler(ctx: HTTPReqCtx):
-            entered.release()
-            release.wait(timeout=5.0)
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=2, backlog=2) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            results: list[httpx.Response | None] = [None] * 4
-
-            async def fire(i: int) -> None:
-                results[i] = await _get(f"http://127.0.0.1:{free_port}/", timeout=5.0)
-
-            try:
-                async with anyio.create_task_group() as tg:
-                    for i in range(4):
-                        tg.start_soon(fire, i)
-
-                    # Two workers run concurrently; the other two sit in the
-                    # backlog. Wait for the first wave to enter, then release.
-                    def wait_for_two():
-                        for _ in range(2):
-                            assert entered.acquire(timeout=5.0)
-
-                    await to_thread.run_sync(wait_for_two)
-                    release.set()
-            finally:
-                release.set()
-
-            for r in results:
-                assert r is not None
-                assert r.status_code == 200
-
-            lt.shutdown()
-            await lt.stopped
-
-    async def test_backlog_overflow_rejects_with_503(self, free_port):
-        """backlog=1 with max_concurrency=1: 1 worker + 1 buffered = 2
-        capacity. A 3rd concurrent request is rejected with 503."""
-        entered = threading.Event()
-        release = threading.Event()
-
-        def body_handler(ctx: HTTPReqCtx):
-            entered.set()
-            release.wait(timeout=5.0)
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=1, backlog=1) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            sockets: list[socket.socket] = []
-
-            def open_slow() -> socket.socket:
-                sock = socket.create_connection(("127.0.0.1", free_port), timeout=2.0)
-                sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-                return sock
-
-            try:
-                # Saturate worker.
-                sockets.append(await to_thread.run_sync(open_slow))
-                assert await to_thread.run_sync(lambda: entered.wait(2.0))
-                # Saturate the single backlog slot.
-                sockets.append(await to_thread.run_sync(open_slow))
-                await anyio.sleep(0.1)
-
-                # 3rd request must 503.
-                def probe() -> bytes:
-                    s = socket.create_connection(("127.0.0.1", free_port), timeout=2.0)
-                    sockets.append(s)
-                    s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
-                    return read_http_response(s, deadline=2.0)
-
-                response = await to_thread.run_sync(probe)
-                assert b"HTTP/1.1 503" in response, response
-            finally:
-                release.set()
-                for s in sockets:
-                    with contextlib.suppress(OSError):
-                        s.close()
-
-            lt.shutdown()
-            await lt.stopped
-
 
 class TestMultiSelector:
     """``selectors=N > 1`` spawns N independent ``BaseServer`` threads bound
@@ -509,9 +286,7 @@ class TestMultiSelector:
         """selectors=4 + thread pool. Multiple selectors push onto the
         single shared channel; the pool drains across all producers."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        # backlog=8: with 10 fast requests against max_concurrency=4, headroom keeps the
-        # rendezvous race from intermittently 503'ing late arrivals during the test.
-        async with thread_pool_handler(_handler_200(b"hi"), max_concurrency=4, backlog=8) as wrapped:
+        async with thread_pool_handler(_handler_200(b"hi")) as wrapped:
             async with serve(http_server(cfg, wrapped, selectors=4)) as lt:
                 await lt.started
                 await _wait_server_ready(free_port)
@@ -659,13 +434,9 @@ class TestAcceptorTopology:
         actual owning selector.
         """
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        # backlog=8 keeps the rendezvous race from intermittently 503'ing late
-        # arrivals while the pool has spare capacity.
         async with _serve_pooled(
             cfg,
             _handler_200(b"hi"),
-            max_concurrency=4,
-            backlog=8,
             selectors=4,
             acceptor=True,
         ) as lt:
@@ -784,7 +555,7 @@ class TestServiceRobustness:
             ran.set()
 
         try:
-            async with streaming_pool_handler(work, max_concurrency=1) as wrapped:
+            async with streaming_pool_handler(work) as wrapped:
                 assert wrapped(cast(HTTPReqCtx, ctx)) is None
                 assert ctx.deferred is not None
                 assert selector.stopped is False
@@ -798,121 +569,6 @@ class TestServiceRobustness:
             sock.close()
             peer.close()
 
-    async def test_max_concurrency_caps_parallelism(self, free_port):
-        """N+1 requests against max_concurrency=N: peak in-flight is exactly N."""
-        in_flight = 0
-        peak = 0
-        lock = threading.Lock()
-        gate = threading.Event()
-
-        def body_handler(ctx: HTTPReqCtx):
-            nonlocal in_flight, peak
-            with lock:
-                in_flight += 1
-                peak = max(peak, in_flight)
-            gate.wait(timeout=5.0)
-            with lock:
-                in_flight -= 1
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=3, backlog=2) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            async with anyio.create_task_group() as tg:
-                for _ in range(5):
-                    tg.start_soon(_get, f"http://127.0.0.1:{free_port}/")
-
-                # Once 3 handlers are in flight, the cap is observable. Wait for it
-                # before releasing the gate so we don't race the "still ramping up" state.
-                async def wait_for_peak() -> None:
-                    while True:
-                        with lock:
-                            if peak >= 3:
-                                return
-                        await anyio.sleep(0.02)
-
-                with anyio.fail_after(5.0):
-                    await wait_for_peak()
-                gate.set()
-
-            assert peak == 3, f"expected peak 3, got {peak}"
-
-            lt.shutdown()
-            await lt.stopped
-
-    async def test_pool_overload_rejects_without_blocking_selector(self, free_port):
-        """A full worker pool + full queue returns 503 instead of blocking the selector."""
-        entered = threading.Event()
-        release = threading.Event()
-
-        def body_handler(ctx: HTTPReqCtx):
-            entered.set()
-            release.wait(timeout=5.0)
-            ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
-
-        routes = Routes()
-
-        @routes.get("/slow")
-        def slow(_ctx: HTTPReqCtx) -> BodyHandler:
-            return body_handler
-
-        cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, routes.build().as_handler(), max_concurrency=1, backlog=1) as lt:
-            await lt.started
-            await _wait_server_ready(free_port)
-
-            sockets: list[socket.socket] = []
-
-            def open_slow() -> socket.socket:
-                sock = socket.create_connection(("127.0.0.1", free_port), timeout=2.0)
-                sock.sendall(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
-                return sock
-
-            def open_slow_and_try_read() -> tuple[socket.socket, bytes]:
-                sock = open_slow()
-                try:
-                    return sock, read_http_response(sock, deadline=0.5)
-                except TimeoutError:
-                    return sock, b""
-
-            try:
-                sockets.append(await to_thread.run_sync(open_slow))
-                assert await to_thread.run_sync(lambda: entered.wait(2.0))
-
-                # This request occupies the single pending queue slot while
-                # the first request keeps the only worker busy.
-                sockets.append(await to_thread.run_sync(open_slow))
-                await anyio.sleep(0.1)
-
-                overload_response = b""
-                for _ in range(4):
-                    sock, response = await to_thread.run_sync(open_slow_and_try_read)
-                    sockets.append(sock)
-                    if b"HTTP/1.1 503" in response:
-                        overload_response = response
-                        break
-
-                assert b"HTTP/1.1 503" in overload_response, overload_response
-                assert b"Service Unavailable" in overload_response
-
-                # The selector must still be responsive while the worker and
-                # pending queue are saturated. A miss is answered inline.
-                r = await _get(f"http://127.0.0.1:{free_port}/missing", timeout=1.0)
-                assert r.status_code == 404
-            finally:
-                release.set()
-                for sock in sockets:
-                    with contextlib.suppress(OSError):
-                        sock.close()
-
-            lt.shutdown()
-            await lt.stopped
-
     async def test_handler_exception_returns_500_and_service_stays_up(self, free_port):
         """A handler exception is caught at the connection level and returned as 500.
 
@@ -923,7 +579,7 @@ class TestServiceRobustness:
             raise RuntimeError("handler crashed")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, boom, max_concurrency=2) as lt:
+        async with _serve_pooled(cfg, boom) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -937,18 +593,15 @@ class TestServiceRobustness:
 
         assert lt.exit_code == 0
 
-    async def test_slot_released_after_normal_request(self, free_port):
-        """Repeatedly hitting a 1-slot pool must keep working.
-
-        Indirectly confirms the worker channel slot is released on the success
-        path — if it weren't, the second request would block forever.
-        """
+    async def test_repeated_requests_keep_working(self, free_port):
+        """Repeatedly hitting the pool must keep working — confirms workers
+        re-park (back into the shared idle deque) after each task."""
 
         def handler(ctx: HTTPReqCtx):
             ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=1) as lt:
+        async with _serve_pooled(cfg, handler) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -974,9 +627,7 @@ class TestDispatchLoad:
         def handler(_ctx: HTTPReqCtx):
             return body_handler
 
-        # backlog gives 10 fast requests headroom past the rendezvous default,
-        # so this test isolates the dispatch-distribution check from admission timing.
-        async with _serve_pooled(cfg, handler, max_concurrency=8, backlog=4) as lt:
+        async with _serve_pooled(cfg, handler) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 
@@ -1027,7 +678,7 @@ class TestRequestCancellation:
             return body_handler
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with _serve_pooled(cfg, handler, max_concurrency=2) as lt:
+        async with _serve_pooled(cfg, handler) as lt:
             await lt.started
             await _wait_server_ready(free_port)
 

@@ -70,7 +70,7 @@ def build_router():
 async def app():
     handler = sentry_router_handler(build_router())
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(handler, max_concurrency=8) as wrapped:
+    async with thread_pool_handler(handler) as wrapped:
         async with http_server(config, wrapped):
             yield
 

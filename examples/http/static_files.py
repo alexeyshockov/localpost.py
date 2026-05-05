@@ -68,8 +68,8 @@ async def app():
     )
 
     async with (
-        thread_pool_handler(build_api(), max_concurrency=8) as api_h,
-        thread_pool_handler(static, max_concurrency=64, backlog=64) as static_h,
+        thread_pool_handler(build_api()) as api_h,
+        thread_pool_handler(static) as static_h,
     ):
         def root_handler(ctx: HTTPReqCtx) -> BodyHandler | None:
             return (static_h if ctx.request.path.startswith(b"/static/") else api_h)(ctx)

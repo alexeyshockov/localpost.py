@@ -18,7 +18,7 @@ Usage::
 
     sentry_sdk.init(dsn=..., traces_sample_rate=1.0)
     handler = sentry_flask_handler(my_flask_app)
-    async with thread_pool_handler(handler, max_concurrency=8) as wrapped:
+    async with thread_pool_handler(handler) as wrapped:
         async with http_server(config, wrapped):
             ...
 """

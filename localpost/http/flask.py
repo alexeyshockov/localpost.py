@@ -85,7 +85,7 @@ def flask_server(config: ServerConfig, app: Flask, /):
     request at a time wrap the handler with
     :func:`localpost.http.thread_pool_handler`::
 
-        async with thread_pool_handler(flask_handler(app), max_concurrency=8) as h:
+        async with thread_pool_handler(flask_handler(app)) as h:
             async with http_server(config, h):
                 ...
     """

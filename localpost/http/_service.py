@@ -285,7 +285,7 @@ def wsgi_server(
     synchronous). Wrap with :func:`thread_pool_handler` if you want to
     serve more than one request at a time::
 
-        async with thread_pool_handler(wrap_wsgi(my_app), max_concurrency=8) as h:
+        async with thread_pool_handler(wrap_wsgi(my_app)) as h:
             async with http_server(config, h):
                 ...
     """

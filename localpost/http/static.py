@@ -68,7 +68,6 @@ def static_handler(
         h = thread_pool_handler(
             static_handler("/var/www", prefix=b"/static/",
                            cache_control="public, max-age=31536000, immutable"),
-            max_concurrency=128, backlog=64,
         )
     """
     root_path = Path(os.fspath(root)).resolve(strict=True)

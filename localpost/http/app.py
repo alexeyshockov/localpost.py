@@ -181,18 +181,13 @@ class HttpApp:
     """Decorator-driven HTTP app on top of :class:`Router`.
 
     Args:
-        max_concurrency: Worker-pool size. Default 32. Set to ``0`` to
-            disable the pool — buffered handlers then run inline on the
-            selector thread (only viable when every handler is short
-            and non-blocking). Streaming routes (``buffer_body=False``)
-            require a pool — registering one with ``max_concurrency=0``
-            raises at service-startup time.
-        backlog: Additional channel buffer between selector and workers.
-            Default ``0`` = rendezvous: a request is dispatched only when
-            a worker is currently waiting; otherwise the selector replies
-            503 immediately. ``backlog=K`` allows up to K extra requests
-            to sit in the channel before 503s start. Total system capacity
-            is ``max_concurrency + backlog``.
+        pooled: When ``True`` (default), buffered routes run on a shared
+            worker pool (:func:`thread_pool_handler`). Set to ``False`` to
+            run buffered handlers inline on the selector thread — only
+            viable when every handler is short and non-blocking.
+            Streaming routes (``buffer_body=False``) always require the
+            pool; ``pooled=False`` with a streaming route raises at
+            service-startup time.
         middleware: App-level middlewares wrapping the entire dispatcher
             (after Router). Outermost-first.
     """
@@ -200,16 +195,10 @@ class HttpApp:
     def __init__(
         self,
         *,
-        max_concurrency: int = 32,
-        backlog: int = 0,
+        pooled: bool = True,
         middleware: Sequence[Middleware] = (),
     ) -> None:
-        if max_concurrency < 0:
-            raise ValueError("max_concurrency must be >= 0")
-        if backlog < 0:
-            raise ValueError("backlog must be >= 0")
-        self.max_concurrency = max_concurrency
-        self.backlog = backlog
+        self.pooled = pooled
         self._middleware = tuple(middleware)
         self._routes: list[_Route] = []
 
@@ -340,7 +329,7 @@ class HttpApp:
                 if pool is None:
                     raise RuntimeError(
                         f"streaming route {route.method.value} {route.path!r} requires "
-                        f"a worker pool (HttpApp(max_concurrency > 0))"
+                        f"a worker pool (HttpApp(pooled=True))"
                     )
                 handler = self._build_streaming_handler(route, pool)
             routes.add(route.method, route.path, handler)
@@ -367,17 +356,16 @@ class HttpApp:
         ``selectors`` and ``acceptor`` forward to :func:`http_server` — see
         its docstring for the full topology rules.
         """
-        max_concurrency = self.max_concurrency
-        backlog = self.backlog
+        pooled = self.pooled
 
         @hosting.service
         async def _app_service():
-            if max_concurrency == 0:
+            if not pooled:
                 inner = self._build_router_handler(None)
                 async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
                     yield
                 return
-            async with _pool_context(max_concurrency, backlog) as pool:
+            async with _pool_context() as pool:
                 inner = self._build_router_handler(pool)
                 async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
                     yield

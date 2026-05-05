@@ -410,7 +410,7 @@ class TestNotFoundAndMethodNotAllowed:
 
 class TestWorkerPool:
     async def test_handlers_run_on_worker_threads(self, free_port):
-        """Default ``max_concurrency=32`` — handlers run on worker threads,
+        """Default (``pooled=True``) — handlers run on worker threads,
         not the selector thread."""
         seen: list[int] = []
         lock = threading.Lock()
@@ -438,12 +438,12 @@ class TestWorkerPool:
             lt.shutdown()
             await lt.stopped
 
-    async def test_max_concurrency_zero_runs_inline(self, free_port):
+    async def test_pooled_false_runs_inline(self, free_port):
         """When the pool is disabled, handlers run on the selector thread."""
         seen: set[int] = set()
         lock = threading.Lock()
 
-        app = HttpApp(max_concurrency=0)
+        app = HttpApp(pooled=False)
 
         @app.get("/tid")
         def tid():
@@ -463,10 +463,6 @@ class TestWorkerPool:
 
             lt.shutdown()
             await lt.stopped
-
-    async def test_invalid_max_concurrency(self):
-        with pytest.raises(ValueError, match="max_concurrency"):
-            HttpApp(max_concurrency=-1)
 
 
 # --- backend selection ---------------------------------------------------
@@ -721,9 +717,9 @@ class TestStreamingRoutes:
         assert captured == ["upload:1024", "ping"]
 
     def test_streaming_route_with_pool_disabled_raises(self):
-        """Registering a streaming route on an HttpApp with ``max_concurrency=0``
+        """Registering a streaming route on an HttpApp with ``pooled=False``
         raises ``RuntimeError`` when the dispatcher is built."""
-        app = HttpApp(max_concurrency=0)
+        app = HttpApp(pooled=False)
 
         @app.post("/upload", buffer_body=False)
         def upload(ctx: HTTPReqCtx):  # pragma: no cover
