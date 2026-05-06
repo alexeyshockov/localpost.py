@@ -227,14 +227,21 @@ def _ensure_async_middleware(mw: object) -> None:
 
     The whole point of the split is two parallel pipelines — silently
     treating a sync middleware as async would block the event loop.
+    The :class:`AsyncOpMiddleware` Protocol is structural (it shares
+    method names with the sync :class:`OpMiddleware`), so isinstance
+    isn't enough — we additionally check that ``__call__`` is a
+    coroutine function.
     """
-    if isinstance(mw, AsyncOpMiddleware):
-        return
-    name = type(mw).__name__
-    raise TypeError(
-        f"HttpAsyncApp middleware {name!r} is not an AsyncOpMiddleware. "
-        f"Use @async_op_middleware (or AsyncHttpBearerAuth / AsyncHttpBasicAuth) for the async app."
-    )
+    import inspect  # noqa: PLC0415
+
+    call = getattr(type(mw), "__call__", None)  # noqa: B004 — inspecting unbound method, not testing callability
+    if not inspect.iscoroutinefunction(call):
+        name = type(mw).__name__
+        raise TypeError(
+            f"HttpAsyncApp middleware {name!r} is not an AsyncOpMiddleware "
+            f"(its ``__call__`` must be ``async def``). "
+            f"Use @async_op_middleware (or AsyncHttpBearerAuth / AsyncHttpBasicAuth) for the async app."
+        )
 
 
 # --- ASGI dispatch -------------------------------------------------------
