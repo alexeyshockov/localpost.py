@@ -3,32 +3,25 @@
 Symmetric with :mod:`localpost.http.wsgi`: this module owns the
 translation between the foreign protocol (ASGI 3) and our async
 request-context shape (:class:`AsyncHTTPReqCtx`). The handler doesn't
-know anything about ASGI — it just reads ``ctx.request`` / ``ctx.body``
-or ``await ctx.receive(size)``, and calls ``await ctx.complete(...)``
+know anything about ASGI — it just reads ``ctx.request`` /
+``await ctx.receive(size)``, and calls ``await ctx.complete(...)``
 / ``await ctx.stream(...)``.
 
 ``localpost.http`` itself doesn't ship an async server — production
 ASGI servers (uvicorn, hypercorn, granian) already exist. This module
 plugs an :data:`AsyncRequestHandler` into one of them via :func:`to_asgi`.
 
-Two body-handling modes:
-
-- **Buffered** (default): the bridge reads the full body upfront and
-  drops it on ``ctx.body``. ``ctx.receive(size)`` slices that buffer.
-  Matches the JSON-API common case; 413 is sent before the handler
-  runs if the body exceeds ``max_body_size``.
-- **Streaming** (``streaming=True``): the body is *not* pre-read.
-  ``ctx.body`` is empty; the handler pulls chunks via
-  ``await ctx.receive(size)``. Use for large uploads / streaming
-  consumers. ``max_body_size`` is enforced via the ``Content-Length``
-  header when present (413 before dispatch); chunked uploads without
-  ``Content-Length`` aren't capped — trust your ASGI server's limit
-  or check ``len(chunk)`` in the handler.
+Body bytes are read lazily — the bridge does *not* pre-buffer. The
+handler pulls chunks via ``await ctx.receive(size)`` (or the
+:func:`localpost.http.aread_body` helper for the "give me the whole
+body" common case). ``max_body_size`` is enforced via the
+``Content-Length`` header when present (413 before dispatch); chunked
+uploads without ``Content-Length`` aren't capped at the bridge — trust
+your ASGI server's limit or check ``len(chunk)`` in the handler.
 """
 
 from __future__ import annotations
 
-import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, final
@@ -69,7 +62,6 @@ def to_asgi(
     handler: AsyncRequestHandler,
     *,
     max_body_size: int = 1 << 20,
-    streaming: bool = False,
 ) -> ASGIApp:
     """Wrap an :data:`AsyncRequestHandler` as an ASGI 3 application.
 
@@ -87,21 +79,22 @@ def to_asgi(
 
     Args:
         handler: The async request handler.
-        max_body_size: Cap on the request body, in bytes. Buffered mode
-            raises ``413 Payload Too Large`` before the handler runs;
-            streaming mode pre-checks ``Content-Length`` (when present)
-            and 413s if it exceeds the cap. ``-1`` disables the cap.
-            Defaults to ``1 << 20`` (1 MiB).
-        streaming: When ``True``, skip the pre-buffer — ``ctx.body``
-            stays empty and the handler pulls body chunks via
-            ``await ctx.receive(size)``. Use for large uploads or
-            streaming consumers; otherwise leave ``False`` (default).
+        max_body_size: Cap on the request body, in bytes. The bridge
+            pre-checks ``Content-Length`` (when present) and replies
+            ``413 Payload Too Large`` before the handler runs.
+            Chunk-by-chunk enforcement during ``ctx.receive`` is the
+            handler's / :func:`localpost.http.aread_body`'s job.
+            ``-1`` disables the cap. Defaults to ``1 << 20`` (1 MiB).
 
     The returned callable handles ``lifespan`` (no-op accept) and
     ``http`` scopes; WebSocket scopes are rejected with
     :class:`ValueError`. A peer ``http.disconnect`` flips
     ``ctx.disconnected``; long handlers / SSE generators poll it
     between events to short-circuit cleanly.
+
+    Body bytes are pulled lazily — handlers call
+    ``await ctx.receive(size)`` (or :func:`localpost.http.aread_body`
+    for the whole body in one call). The bridge never pre-buffers.
     """
 
     async def asgi_app(scope: ASGIScope, receive: ASGIReceive, send: ASGISend) -> None:
@@ -111,59 +104,22 @@ def to_asgi(
             return
         if kind != "http":
             raise ValueError(f"to_asgi: unsupported ASGI scope type: {kind!r}")
-        if streaming:
-            await _handle_http_streaming(handler, max_body_size, scope, receive, send)
-        else:
-            await _handle_http_buffered(handler, max_body_size, scope, receive, send)
+        await _handle_http(handler, max_body_size, scope, receive, send)
 
     return asgi_app
 
 
-async def _handle_http_buffered(
+async def _handle_http(
     handler: AsyncRequestHandler,
     max_body_size: int,
     scope: ASGIScope,
     receive: ASGIReceive,
     send: ASGISend,
 ) -> None:
-    try:
-        body = await _read_body(receive, max_body_size)
-    except ValueError:
-        await _send_canned(send, 413, b"Payload Too Large")
-        return
-
-    request = build_request_from_scope(scope)
-    remote, local = addrs_from_scope(scope)
-    disconnected = threading.Event()
-    ctx = _ASGIReqCtx(
-        request=request,
-        body=body,
-        remote_addr=remote,
-        local_addr=local,
-        scheme=str(scope.get("scheme", "http")),
-        _send=send,
-        _disconnected=disconnected,
-    )
-
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(_watch_disconnect, receive, disconnected)
-        try:
-            await handler(ctx)
-        finally:
-            tg.cancel_scope.cancel()
-
-
-async def _handle_http_streaming(
-    handler: AsyncRequestHandler,
-    max_body_size: int,
-    scope: ASGIScope,
-    receive: ASGIReceive,
-    send: ASGISend,
-) -> None:
-    """Streaming dispatch — single channel-pump task demuxes body chunks
+    """Lazy-body dispatch — single channel-pump task demuxes body chunks
     + disconnect events. The ASGI receive channel is single-consumer, so
-    we can't run a body-reader and a disconnect-watcher in parallel; the
-    pump owns the channel and feeds an in-process body queue.
+    the pump owns it and feeds an in-process body queue that backs
+    ``ctx.receive(size)``.
     """
     request = build_request_from_scope(scope)
 
@@ -176,11 +132,10 @@ async def _handle_http_streaming(
             return
 
     remote, local = addrs_from_scope(scope)
-    disconnected = threading.Event()
+    disconnected = anyio.Event()
     body_send, body_recv = anyio.create_memory_object_stream[bytes](0)
     ctx = _ASGIReqCtx(
         request=request,
-        body=b"",
         remote_addr=remote,
         local_addr=local,
         scheme=str(scope.get("scheme", "http")),
@@ -219,36 +174,24 @@ class _ResponseAlreadyStarted(RuntimeError):
 class _ASGIReqCtx:
     """:class:`AsyncHTTPReqCtx` backed by an ASGI 3 ``scope`` + ``send``.
 
-    Two body-source modes (selected by ``to_asgi(streaming=...)``):
-
-    - **Buffered**: ``_body_stream`` is ``None``. The request body has
-      been pre-read into ``body`` before this ctx was built, so
-      :meth:`receive` slices that buffer. Mirrors the
-      :class:`localpost.http._WSGIReqCtx` shape.
-    - **Streaming**: ``_body_stream`` is set; ``body`` is empty.
-      :meth:`receive` pulls chunks from the in-process queue that the
-      :func:`_pump_channel` task feeds from ASGI ``http.request``
-      events. Trailing partials beyond ``size`` are stashed in
-      ``_stream_leftover``.
-
-    ``complete`` and ``stream`` translate into ``http.response.start``
-    + ``http.response.body`` events. ``disconnected`` flips when an
-    ``http.disconnect`` event arrives (via the watcher task in
-    buffered mode, or the channel pump in streaming mode).
+    Body bytes are pulled lazily from an in-process queue that the
+    :func:`_pump_channel` task feeds from ASGI ``http.request`` events.
+    Trailing partials beyond ``size`` are stashed in
+    ``_stream_leftover``. ``complete`` and ``stream`` translate into
+    ``http.response.start`` + ``http.response.body`` events.
+    ``disconnected`` flips when an ``http.disconnect`` event arrives.
     """
 
     request: Request
-    body: bytes
     remote_addr: str | None
     local_addr: str
     scheme: str
     _send: ASGISend
-    _disconnected: threading.Event
+    _disconnected: anyio.Event
+    _body_stream: MemoryObjectReceiveStream[bytes]
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     _started: bool = False
-    _body_cursor: int = 0
-    _body_stream: MemoryObjectReceiveStream[bytes] | None = None
     _stream_eof: bool = False
     _stream_leftover: bytes = b""
 
@@ -257,19 +200,6 @@ class _ASGIReqCtx:
         return self._disconnected.is_set()
 
     async def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        if self._body_stream is None:
-            return self._slice_buffered(size)
-        return await self._receive_streaming(size)
-
-    def _slice_buffered(self, size: int) -> bytes:
-        if self._body_cursor >= len(self.body):
-            return b""
-        end = self._body_cursor + size
-        chunk = self.body[self._body_cursor : end]
-        self._body_cursor += len(chunk)
-        return chunk
-
-    async def _receive_streaming(self, size: int) -> bytes:
         if self._stream_leftover:
             if len(self._stream_leftover) <= size:
                 chunk = self._stream_leftover
@@ -280,7 +210,6 @@ class _ASGIReqCtx:
             return chunk
         if self._stream_eof:
             return b""
-        assert self._body_stream is not None
         try:
             chunk = await self._body_stream.receive()
         except anyio.EndOfStream:
@@ -390,53 +319,13 @@ def _response_start_event(response: _Response) -> dict[str, Any]:
 # --- Body buffering / disconnect / lifespan / canned responses ---------
 
 
-async def _read_body(receive: ASGIReceive, max_size: int) -> bytes:
-    """Buffer the entire request body from successive ``http.request`` events.
-
-    Raises :class:`ValueError` if the accumulated size would exceed
-    ``max_size``. ``http.disconnect`` while reading aborts cleanly with
-    whatever bytes have been received so far.
-    """
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        event = await receive()
-        kind = event.get("type")
-        if kind == "http.disconnect":
-            return b"".join(chunks)
-        if kind != "http.request":
-            continue
-        body: bytes = event.get("body", b"") or b""
-        if body:
-            total += len(body)
-            if max_size >= 0 and total > max_size:
-                raise ValueError(f"Request body exceeds max_body_size ({max_size} bytes)")
-            chunks.append(body)
-        if not event.get("more_body", False):
-            return b"".join(chunks)
-
-
-async def _watch_disconnect(receive: ASGIReceive, flag: threading.Event) -> None:
-    """Drain ASGI events while the handler runs; flip ``flag`` on
-    ``http.disconnect``. Loop ends silently when the task group cancels."""
-    try:
-        while True:
-            event = await receive()
-            if event.get("type") == "http.disconnect":
-                flag.set()
-                return
-    except Exception:  # noqa: BLE001
-        # ``receive`` may raise once the response is fully sent; treat as benign.
-        return
-
-
 async def _pump_channel(
     receive: ASGIReceive,
     body_send: MemoryObjectSendStream[bytes],
-    flag: threading.Event,
+    flag: anyio.Event,
 ) -> None:
-    """Streaming-mode demuxer: consume ASGI events, route body chunks to
-    ``body_send`` and flip ``flag`` on ``http.disconnect``.
+    """Body / disconnect demuxer: consume ASGI events, route body chunks
+    to ``body_send`` and flip ``flag`` on ``http.disconnect``.
 
     Closes ``body_send`` once body is at EOM (or peer disconnected) so
     the handler's ``ctx.receive`` sees ``b""``. Continues consuming

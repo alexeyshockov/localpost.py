@@ -47,12 +47,12 @@ class AsyncHTTPReqCtx(Protocol):
     scheme) so resolvers that read those attributes work against either
     flavour. Methods that touch the wire are async.
 
-    ``body`` is empty unless the transport pre-buffers it before
-    dispatch. Handlers that need streaming reads call
-    ``await ctx.receive(size)`` directly — same name as the sync ctx,
-    same contract ("give me up to ``size`` bytes of request body, or
-    ``b''`` at EOF"). Whether that comes from a slice of a buffered
-    body or a fresh wire read is the transport's choice.
+    The body is read lazily — handlers call
+    ``await ctx.receive(size)`` (same name as the sync ctx, same
+    contract: "give me up to ``size`` bytes, or ``b''`` at EOF") or use
+    :func:`localpost.http.aread_body` to drain into a single
+    :class:`bytes` object. The bridge never pre-buffers; framework
+    layers that want a cached body cache it themselves.
 
     **Members deliberately absent vs. the sync surface.**
 
@@ -66,7 +66,6 @@ class AsyncHTTPReqCtx(Protocol):
     """
 
     request: Request
-    body: bytes
     response_status: int | None
     attrs: dict[Any, Any]
 

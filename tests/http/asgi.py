@@ -10,16 +10,17 @@ Symmetric with ``tests/http/wsgi_to.py`` for the sync side.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 
 from localpost.http import (
     AsyncHTTPReqCtx,
     Response,
+    aread_body,
     to_asgi,
 )
 from localpost.http._types import Request
@@ -34,19 +35,29 @@ def _build_ctx(
     body: bytes = b"",
     send=None,  # type: ignore[no-untyped-def]
 ) -> _ASGIReqCtx:
-    """Build a minimal _ASGIReqCtx for unit-level checks."""
+    """Build a minimal _ASGIReqCtx for unit-level checks.
+
+    Pre-fills the body channel with ``body`` and closes it — the ctx
+    behaves as if the bridge had received exactly those bytes from
+    upstream and observed EOM.
+    """
 
     async def _swallow(_event: dict[str, Any]) -> None:
         pass
 
+    body_send, body_recv = anyio.create_memory_object_stream[bytes](max_buffer_size=64)
+    if body:
+        body_send.send_nowait(body)
+    body_send.close()
+
     return _ASGIReqCtx(
         request=request or Request(b"GET", b"/", b"/", b"", []),
-        body=body,
         remote_addr=None,
         local_addr="0.0.0.0:0",
         scheme="http",
         _send=send or _swallow,
-        _disconnected=threading.Event(),
+        _disconnected=anyio.Event(),
+        _body_stream=body_recv,
     )
 
 
@@ -164,11 +175,12 @@ class TestCtxStream:
 
 
 class TestCtxReceive:
-    """``ctx.receive(size)`` slices the pre-buffered body — same shape
-    as the sync :class:`_WSGIReqCtx.receive` helper."""
+    """``ctx.receive(size)`` pulls from the in-process body queue,
+    splitting upstream chunks down to the caller's requested ``size``.
+    """
 
     @pytest.mark.anyio
-    async def test_receive_slices_buffer(self) -> None:
+    async def test_receive_splits_chunk_across_calls(self) -> None:
         ctx = _build_ctx(body=b"abcdef")
         assert await ctx.receive(2) == b"ab"
         assert await ctx.receive(3) == b"cde"
@@ -196,11 +208,11 @@ class TestToAsgi:
         assert resp.content == b"hi"
 
     @pytest.mark.anyio
-    async def test_body_pre_buffered(self) -> None:
+    async def test_body_read_via_aread_body(self) -> None:
         captured: dict[str, bytes] = {}
 
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            captured["body"] = ctx.body
+            captured["body"] = await aread_body(ctx)
             await ctx.complete(Response(200), b"ok")
 
         asgi_app = to_asgi(handler)
@@ -209,9 +221,9 @@ class TestToAsgi:
         assert captured["body"] == b"payload"
 
     @pytest.mark.anyio
-    async def test_body_too_large_returns_413(self) -> None:
+    async def test_content_length_pre_check_413(self) -> None:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            await ctx.complete(Response(200), b"unreached")
+            raise AssertionError("handler should not run for over-cap requests")
 
         asgi_app = to_asgi(handler, max_body_size=4)
         async with _client(asgi_app) as c:
@@ -253,16 +265,15 @@ class TestToAsgi:
             await asgi_app(scope, receive, send)
 
 
-class TestToAsgiStreaming:
-    """``to_asgi(handler, streaming=True)`` skips the pre-buffer; the
-    handler reads body chunks via ``await ctx.receive(size)``."""
+class TestToAsgiReceive:
+    """End-to-end body-streaming: handlers pull chunks via
+    ``await ctx.receive(size)``."""
 
     @pytest.mark.anyio
-    async def test_body_reads_chunks_in_order(self) -> None:
+    async def test_receive_drains_in_order(self) -> None:
         captured: list[bytes] = []
 
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            assert ctx.body == b""  # streaming mode: no pre-buffer
             while True:
                 chunk = await ctx.receive(64)
                 if not chunk:
@@ -270,7 +281,7 @@ class TestToAsgiStreaming:
                 captured.append(chunk)
             await ctx.complete(Response(200), b"ok")
 
-        asgi_app = to_asgi(handler, streaming=True)
+        asgi_app = to_asgi(handler)
         async with _client(asgi_app) as c:
             resp = await c.post("/", content=b"hello-streaming-world")
         assert resp.status_code == 200
@@ -290,31 +301,21 @@ class TestToAsgiStreaming:
                 sizes.append(len(chunk))
             await ctx.complete(Response(200), b"ok")
 
-        asgi_app = to_asgi(handler, streaming=True)
+        asgi_app = to_asgi(handler)
         async with _client(asgi_app) as c:
             await c.post("/", content=b"abcdefghij")
         assert all(s <= 3 for s in sizes)
         assert sum(sizes) == 10
 
     @pytest.mark.anyio
-    async def test_content_length_pre_check_413(self) -> None:
-        async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            raise AssertionError("handler should not run")
-
-        asgi_app = to_asgi(handler, streaming=True, max_body_size=4)
-        async with _client(asgi_app) as c:
-            resp = await c.post("/", content=b"too-long-by-far")
-        assert resp.status_code == 413
-
-    @pytest.mark.anyio
     async def test_handler_can_skip_body_and_respond(self) -> None:
-        """Streaming mode: handler may respond without reading the body —
-        the channel pump drains stragglers; the response still completes."""
+        """Handler may respond without reading the body — the channel
+        pump drains stragglers; the response still completes."""
 
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             await ctx.complete(Response(204), b"")
 
-        asgi_app = to_asgi(handler, streaming=True)
+        asgi_app = to_asgi(handler)
         async with _client(asgi_app) as c:
             resp = await c.post("/", content=b"ignored-body")
         assert resp.status_code == 204

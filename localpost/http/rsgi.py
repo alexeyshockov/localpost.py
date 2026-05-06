@@ -4,8 +4,8 @@ Symmetric with :mod:`localpost.http.asgi` and :mod:`localpost.http.wsgi`:
 this module owns the translation between the foreign protocol (Granian's
 RSGI) and our async request-context shape (:class:`AsyncHTTPReqCtx`).
 The handler doesn't know anything about RSGI — it just reads
-``ctx.request`` / ``ctx.body`` or ``await ctx.receive(size)``, and
-calls ``await ctx.complete(...)`` / ``await ctx.stream(...)`` /
+``ctx.request`` / ``await ctx.receive(size)``, and calls
+``await ctx.complete(...)`` / ``await ctx.stream(...)`` /
 ``await ctx.sendfile(...)``.
 
 RSGI's wire surface is richer than ASGI's, so the bridge gets a few
@@ -18,6 +18,10 @@ wins for free:
 - **Streaming uploads** don't need a pump task — RSGI's ``proto`` is
   directly async-iterable, so :meth:`receive` wraps that iterator.
 
+Body bytes are read lazily via ``await ctx.receive(size)`` (or the
+:func:`localpost.http.aread_body` helper). The bridge never
+pre-buffers.
+
 This module covers Mode A (single HTTP app under Granian); Mode B
 (host-as-RSGI for hosted apps with multiple services) lives in
 :mod:`localpost.hosting.rsgi`.
@@ -25,7 +29,6 @@ This module covers Mode A (single HTTP app under Granian); Mode B
 
 from __future__ import annotations
 
-import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, BinaryIO, final
@@ -65,7 +68,6 @@ def to_rsgi(
     handler: AsyncRequestHandler,
     *,
     max_body_size: int = 1 << 20,
-    streaming: bool = False,
 ) -> RSGIApplication:
     """Wrap an :data:`AsyncRequestHandler` as an RSGI application.
 
@@ -83,20 +85,21 @@ def to_rsgi(
 
     Args:
         handler: The async request handler.
-        max_body_size: Cap on the request body, in bytes. Buffered mode
-            raises ``413 Payload Too Large`` before the handler runs;
-            streaming mode pre-checks ``Content-Length`` (when present)
-            and 413s if it exceeds the cap. ``-1`` disables the cap.
-            Defaults to ``1 << 20`` (1 MiB).
-        streaming: When ``True``, skip the pre-buffer — ``ctx.body``
-            stays empty and the handler pulls body chunks via
-            ``await ctx.receive(size)``. Use for large uploads.
+        max_body_size: Cap on the request body, in bytes. The bridge
+            pre-checks ``Content-Length`` (when present) and replies
+            ``413 Payload Too Large`` before the handler runs.
+            Chunk-by-chunk enforcement during ``ctx.receive`` is the
+            handler's / :func:`localpost.http.aread_body`'s job.
+            ``-1`` disables the cap. Defaults to ``1 << 20`` (1 MiB).
 
     Returns:
         An object with ``__rsgi__`` (and no-op ``__rsgi_init__`` /
         ``__rsgi_del__``) suitable as Granian's RSGI target.
+
+    Body bytes are pulled lazily via ``await ctx.receive(size)`` (or
+    :func:`localpost.http.aread_body`); the bridge never pre-buffers.
     """
-    return _RSGIApp(handler, max_body_size=max_body_size, streaming=streaming)
+    return _RSGIApp(handler, max_body_size=max_body_size)
 
 
 @final
@@ -107,24 +110,19 @@ class _RSGIApp:
     is the variant that runs a full hosting lifecycle alongside.
     """
 
-    __slots__ = ("_handler", "_max_body_size", "_streaming")
+    __slots__ = ("_handler", "_max_body_size")
 
     def __init__(
         self,
         handler: AsyncRequestHandler,
         *,
         max_body_size: int,
-        streaming: bool,
     ) -> None:
         self._handler = handler
         self._max_body_size = max_body_size
-        self._streaming = streaming
 
     async def __rsgi__(self, scope: RSGIScope, proto: RSGIProtocol) -> None:
-        if self._streaming:
-            await _dispatch_streaming(self._handler, self._max_body_size, scope, proto)
-        else:
-            await _dispatch_buffered(self._handler, self._max_body_size, scope, proto)
+        await _dispatch(self._handler, self._max_body_size, scope, proto)
 
     def __rsgi_init__(self, loop: Any) -> None:
         # No background services to start.
@@ -138,44 +136,7 @@ class _RSGIApp:
 # --- Dispatch -----------------------------------------------------------
 
 
-async def _dispatch_buffered(
-    handler: AsyncRequestHandler,
-    max_body_size: int,
-    scope: RSGIScope,
-    proto: RSGIProtocol,
-) -> None:
-    request = build_request_from_scope(scope)
-    if max_body_size >= 0:
-        cl = _content_length(request)
-        if cl is not None and cl > max_body_size:
-            await _send_canned(proto, 413, b"Payload Too Large")
-            return
-
-    body = await proto()
-    if max_body_size >= 0 and len(body) > max_body_size:
-        await _send_canned(proto, 413, b"Payload Too Large")
-        return
-
-    remote, local = addrs_from_scope(scope)
-    disconnected = threading.Event()
-    ctx = _RSGIReqCtx(
-        request=request,
-        body=body,
-        remote_addr=remote,
-        local_addr=local,
-        scheme=str(scope.scheme),
-        _proto=proto,
-        _disconnected=disconnected,
-    )
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(_watch_disconnect, proto, disconnected)
-        try:
-            await handler(ctx)
-        finally:
-            tg.cancel_scope.cancel()
-
-
-async def _dispatch_streaming(
+async def _dispatch(
     handler: AsyncRequestHandler,
     max_body_size: int,
     scope: RSGIScope,
@@ -189,11 +150,10 @@ async def _dispatch_streaming(
             return
 
     remote, local = addrs_from_scope(scope)
-    disconnected = threading.Event()
+    disconnected = anyio.Event()
     body_send, body_recv = anyio.create_memory_object_stream[bytes](0)
     ctx = _RSGIReqCtx(
         request=request,
-        body=b"",
         remote_addr=remote,
         local_addr=local,
         scheme=str(scope.scheme),
@@ -222,16 +182,10 @@ class _ResponseAlreadyStarted(RuntimeError):
 class _RSGIReqCtx:
     """:class:`AsyncHTTPReqCtx` backed by Granian's RSGI ``proto``.
 
-    Two body-source modes (selected by ``to_rsgi(streaming=...)``):
-
-    - **Buffered**: ``_body_stream`` is ``None``. The whole body has
-      been read via ``await proto()`` before this ctx was built;
-      :meth:`receive` slices ``body``.
-    - **Streaming**: ``_body_stream`` is set; ``body`` is empty.
-      :meth:`receive` pulls chunks from the in-process queue that
-      :func:`_pump_body` feeds from ``async for chunk in proto``.
-
-    Response paths translate directly to RSGI calls:
+    Body bytes come lazily through :meth:`receive`, which pulls chunks
+    from the in-process queue that :func:`_pump_body` feeds from
+    ``async for chunk in proto``. Response paths translate directly
+    to RSGI calls:
 
     - :meth:`complete` → ``proto.response_bytes`` (or ``response_empty``).
     - :meth:`stream` → ``proto.response_stream`` + ``transport.send_bytes``.
@@ -244,17 +198,15 @@ class _RSGIReqCtx:
     """
 
     request: Request
-    body: bytes
     remote_addr: str | None
     local_addr: str
     scheme: str
     _proto: RSGIProtocol
-    _disconnected: threading.Event
+    _disconnected: anyio.Event
+    _body_stream: MemoryObjectReceiveStream[bytes]
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     _started: bool = False
-    _body_cursor: int = 0
-    _body_stream: MemoryObjectReceiveStream[bytes] | None = None
     _stream_eof: bool = False
     _stream_leftover: bytes = b""
 
@@ -263,19 +215,6 @@ class _RSGIReqCtx:
         return self._disconnected.is_set()
 
     async def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        if self._body_stream is None:
-            return self._slice_buffered(size)
-        return await self._receive_streaming(size)
-
-    def _slice_buffered(self, size: int) -> bytes:
-        if self._body_cursor >= len(self.body):
-            return b""
-        end = self._body_cursor + size
-        chunk = self.body[self._body_cursor : end]
-        self._body_cursor += len(chunk)
-        return chunk
-
-    async def _receive_streaming(self, size: int) -> bytes:
         if self._stream_leftover:
             if len(self._stream_leftover) <= size:
                 chunk = self._stream_leftover
@@ -286,7 +225,6 @@ class _RSGIReqCtx:
             return chunk
         if self._stream_eof:
             return b""
-        assert self._body_stream is not None
         try:
             chunk = await self._body_stream.receive()
         except anyio.EndOfStream:
@@ -431,7 +369,7 @@ async def _pump_body(
         return
 
 
-async def _watch_disconnect(proto: RSGIProtocol, flag: threading.Event) -> None:
+async def _watch_disconnect(proto: RSGIProtocol, flag: anyio.Event) -> None:
     """Set ``flag`` when ``proto.client_disconnect()`` resolves."""
     try:
         await proto.client_disconnect()

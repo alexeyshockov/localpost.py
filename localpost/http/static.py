@@ -6,10 +6,11 @@ single-range support, and ``Cache-Control`` passthrough. Designed to be
 wrapped in :func:`localpost.http.thread_pool_handler` with its own
 concurrency budget so slow clients can't pin API workers.
 
-Pre-body decisions (404 / 405 / 304 / 416, plus HEAD success) run inline
-on the selector via :meth:`HTTPReqCtx.complete`. GET 200 / 206 returns a
-:data:`BodyHandler` that opens the file and ``sendfile`` s it on the
-worker thread.
+Header-only decisions (404 / 405 / 304 / 416, plus HEAD success) finish
+inline via :meth:`HTTPReqCtx.complete`. GET 200 / 206 opens the file and
+calls :meth:`HTTPReqCtx.sendfile` — when the handler is wrapped in
+:func:`localpost.http.thread_pool_handler` (the recommended composition)
+this happens on a worker thread.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from stat import S_ISREG
 from typing import Final, Literal
 from urllib.parse import unquote_to_bytes
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
 from localpost.http._types import Response
 
 __all__ = ["static_handler"]
@@ -55,10 +56,11 @@ def static_handler(
             ``None`` disables directory → index resolution (returns 404).
 
     Returns:
-        A :data:`RequestHandler`. For 200 / 206 GET, returns a
-        :data:`BodyHandler` so a wrapping :func:`thread_pool_handler`
-        can dispatch the ``sendfile`` to a worker. Other outcomes
-        complete inline on the selector and return ``None``.
+        A :data:`RequestHandler`. For 200 / 206 GET, opens the file and
+        calls :meth:`HTTPReqCtx.sendfile` — wrap with
+        :func:`thread_pool_handler` so the syscall runs on a worker
+        thread. Header-only outcomes (404 / 405 / 304 / 416 / HEAD)
+        finish inline.
 
     Example::
 
@@ -74,7 +76,7 @@ def static_handler(
         raise ValueError(f"root must be a directory: {root_path}")
     cc_bytes = cache_control.encode("ascii") if cache_control is not None else None
 
-    def handle(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handle(ctx: HTTPReqCtx) -> None:
         method = ctx.request.method
         if method not in (b"GET", b"HEAD"):
             # Always include the body — the caller used a non-HEAD method.
@@ -89,26 +91,26 @@ def static_handler(
                 ),
                 _METHOD_NOT_ALLOWED_BODY,
             )
-            return None
+            return
 
         url_path = ctx.request.path
         if not url_path.startswith(prefix):
             _send_not_found(ctx, method)
-            return None
+            return
 
         target = _resolve(root_path, url_path[len(prefix) :], index=index)
         if target is None:
             _send_not_found(ctx, method)
-            return None
+            return
 
         try:
             st = target.stat()
         except (FileNotFoundError, NotADirectoryError, PermissionError):
             _send_not_found(ctx, method)
-            return None
+            return
         if not S_ISREG(st.st_mode):
             _send_not_found(ctx, method)
-            return None
+            return
 
         size = st.st_size
         etag = _etag(st)
@@ -120,10 +122,10 @@ def static_handler(
         ims = headers.get(b"if-modified-since")
         if inm is not None and _if_none_match_matches(inm, etag):
             _send_not_modified(ctx, etag, last_modified, cc_bytes)
-            return None
+            return
         if inm is None and ims is not None and _if_modified_since_satisfied(ims, st.st_mtime):
             _send_not_modified(ctx, etag, last_modified, cc_bytes)
-            return None
+            return
 
         # Range — single byte-range only. Multi-range / unparseable falls back to 200.
         offset = 0
@@ -134,7 +136,7 @@ def static_handler(
             parsed = _parse_range(rng, size)
             if parsed == "unsatisfiable":
                 _send_range_not_satisfiable(ctx, method, size, etag, last_modified)
-                return None
+                return
             if parsed is not None:
                 offset, length = parsed
                 status = 206
@@ -156,37 +158,12 @@ def static_handler(
 
         if method == b"HEAD" or length == 0:
             ctx.complete(response)
-            return None
+            return
 
-        return _SendFileBody(target, response, offset, length)
+        with target.open("rb") as f:
+            ctx.sendfile(response, f, offset, length)
 
     return handle
-
-
-# --------------------------------------------------------------------------
-# Body handler — sendfile on the worker thread
-# --------------------------------------------------------------------------
-
-
-class _SendFileBody:
-    """Body handler closure: open + :meth:`HTTPReqCtx.sendfile` + finish.
-
-    Spelled as a callable class (not a closure) so its captured state is
-    visible in repr — same convention as the dispatch-chain callables in
-    :mod:`localpost.http._base`.
-    """
-
-    __slots__ = ("length", "offset", "path", "response")
-
-    def __init__(self, path: Path, response: Response, offset: int, length: int) -> None:
-        self.path = path
-        self.response = response
-        self.offset = offset
-        self.length = length
-
-    def __call__(self, ctx: HTTPReqCtx) -> None:
-        with self.path.open("rb") as f:
-            ctx.sendfile(self.response, f, self.offset, self.length)
 
 
 # --------------------------------------------------------------------------

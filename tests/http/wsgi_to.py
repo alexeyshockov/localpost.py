@@ -17,6 +17,7 @@ from localpost.http import (
     HTTPReqCtx,
     Response,
     Routes,
+    read_body,
     to_wsgi,
 )
 
@@ -143,11 +144,11 @@ class TestToWsgiComplete:
         assert seen["path"] == b"/items/42"
         assert seen["query"] == b"x=1&y=2"
 
-    def test_request_body_buffered(self):
+    def test_request_body_lazy_via_read_body(self):
         seen: dict[str, bytes] = {}
 
         def handler(ctx: HTTPReqCtx):
-            seen["body"] = ctx.body
+            seen["body"] = read_body(ctx)
             ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
 
         environ = _base_environ(

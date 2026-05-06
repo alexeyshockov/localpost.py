@@ -12,7 +12,6 @@ import httpx
 import pytest
 
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     compress_handler,
@@ -264,7 +263,7 @@ def _emit(ctx: HTTPReqCtx, content_type: bytes, body: bytes, **headers: bytes) -
 
 
 def _make_handler(content_type: bytes, body: bytes):
-    def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handler(ctx: HTTPReqCtx) -> None:
         _emit(ctx, content_type, body)
         return None
 
@@ -382,17 +381,12 @@ class TestComposeWithStatic:
         assert r.content == payload
 
     def test_round_trip_when_pool_wraps_compress(self, serve_backend_in_thread):
-        # Sanity-check: the BodyHandler proxy path (inner returns a continuation)
-        # also routes complete() through the proxy. We exercise it via a handler
-        # that uses ctx.body — selector buffers the request body, then invokes
-        # the BodyHandler which calls ctx.complete.
+        # Sanity-check: ``compress_handler`` proxies ``ctx.complete`` through
+        # the inner handler; the response body is compressed.
         body = b'{"data": ' + b"x" * 4096 + b"}"
 
-        def inner(ctx: HTTPReqCtx) -> BodyHandler | None:
-            def cont(c: HTTPReqCtx) -> None:
-                _emit(c, b"application/json", body)
-
-            return cont
+        def inner(ctx: HTTPReqCtx) -> None:
+            _emit(ctx, b"application/json", body)
 
         h = compress_handler(inner, algorithms=("gzip",))
         with serve_backend_in_thread(h) as port:
@@ -508,7 +502,7 @@ def _sse_handler(events: list[bytes]):
     the iterator-wrapping path the compression middleware intercepts.
     """
 
-    def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handler(ctx: HTTPReqCtx) -> None:
         def chunks() -> Iterator[bytes]:
             for ev in events:
                 yield b"data: " + ev + b"\n\n"
@@ -549,7 +543,7 @@ class TestStreamingRoundTripGzip:
         # corrupt the contract). Pass through verbatim.
         body_chunk = b"x" * 4096
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             def chunks() -> Iterator[bytes]:
                 yield body_chunk
 
@@ -579,7 +573,7 @@ class TestStreamingRoundTripGzip:
     def test_streaming_passthrough_when_no_transform(self, serve_backend_in_thread):
         events = [b"a", b"b", b"c"]
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             def chunks() -> Iterator[bytes]:
                 for ev in events:
                     yield b"data: " + ev + b"\n\n"
@@ -640,7 +634,7 @@ class TestStreamingFlush:
 
         gate = threading.Event()
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             def chunks() -> Iterator[bytes]:
                 yield b"data: first\n\n"
                 # Block until the test has read+decoded "data: first". If

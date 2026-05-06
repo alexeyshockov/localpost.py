@@ -46,6 +46,12 @@ __all__ = [
 # this request, so multiple FromQuery resolvers don't re-parse.
 _QUERY_CACHE_KEY = "__lp_openapi_query__"
 
+# Sentinel — the operation layer pre-buffers the request body into
+# ``ctx.attrs[_BODY_CACHE_KEY]`` when at least one parameter is a
+# ``FromBody`` resolver. The framework decides whether to call it (sync:
+# ``read_body``, async: ``aread_body``); resolvers just read from cache.
+BODY_CACHE_KEY = "__lp_openapi_body__"
+
 
 @runtime_checkable
 class ResolverCtx(Protocol):
@@ -53,13 +59,18 @@ class ResolverCtx(Protocol):
 
     Both :class:`localpost.http.HTTPReqCtx` (sync) and
     :class:`localpost.openapi.aio.AsyncHTTPReqCtx` (async) are
-    structurally compatible — they both expose ``request`` / ``body`` /
-    ``attrs`` synchronously. Restricting :class:`ArgResolver` to this
-    minimal protocol means the same factories work in both flavours.
+    structurally compatible — they both expose ``request`` / ``attrs``
+    synchronously. Restricting :class:`ArgResolver` to this minimal
+    protocol means the same factories work in both flavours.
+
+    The body itself is *not* on this Protocol — the wire-level Protocols
+    only expose ``await ctx.receive(size)``, which an :class:`ArgResolver`
+    can't drive (sync resolver, async ctx). Operations pre-buffer the
+    body into ``ctx.attrs[BODY_CACHE_KEY]`` before resolvers run; the
+    :class:`FromBody` resolver reads from there.
     """
 
     request: Request
-    body: bytes
     attrs: dict[Any, Any]
 
 
@@ -386,8 +397,9 @@ class FromBody:
             converter = _adapter_decode
 
         def resolve(ctx: ResolverCtx) -> object | OpResult:
+            body = ctx.attrs.get(BODY_CACHE_KEY, b"")
             try:
-                return converter(ctx.body, target)
+                return converter(body, target)
             except validation_errors as exc:
                 return BadRequest(f"Invalid request body: {exc}")
             except (ValueError, TypeError) as exc:

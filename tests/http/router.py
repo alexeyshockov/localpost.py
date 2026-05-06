@@ -15,7 +15,6 @@ import httpx
 import pytest
 
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     RouteMatch,
@@ -28,7 +27,7 @@ from localpost.http import (
 def _ok_handler(body: bytes = b"ok"):
     """Build a minimal HTTPReqCtx-shape handler that emits 200 + ``body``."""
 
-    def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handler(ctx: HTTPReqCtx) -> None:
         ctx.complete(
             Response(
                 status_code=200,
@@ -109,7 +108,7 @@ class TestRouteMatchAttached:
     def test_match_in_attrs(self, serve_in_thread):
         captured: dict = {}
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             m = route_match(ctx)
             assert isinstance(m, RouteMatch)
             captured["method"] = m.method
@@ -268,7 +267,7 @@ class TestPathVariableEncoding:
     def test_url_encoded_path_arg_passed_through(self, serve_in_thread):
         captured: dict = {}
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             m = route_match(ctx)
             captured["name"] = m.path_args["name"]
             ctx.complete(Response(200, [(b"content-length", b"2")]), b"ok")

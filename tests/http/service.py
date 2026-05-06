@@ -20,7 +20,6 @@ from anyio import to_thread
 
 from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Request,
     RequestCancelled,
@@ -134,8 +133,8 @@ class TestHttpServerService:
                 b"ok",
             )
 
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
+        def handler(_ctx: HTTPReqCtx) -> None:
+            body_handler(_ctx)
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler) as lt:
@@ -195,8 +194,8 @@ class TestHttpServerService:
                 raise
             ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
+        def handler(_ctx: HTTPReqCtx) -> None:
+            body_handler(_ctx)
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler) as lt:
@@ -225,7 +224,7 @@ class TestHttpServerService:
         routes = Routes()
 
         @routes.get("/books/{id}")
-        def get_book(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def get_book(ctx: HTTPReqCtx) -> None:
             book_id = route_match(ctx).path_args["id"]
             body = f"book={book_id}".encode()
             ctx.complete(
@@ -352,7 +351,7 @@ class TestAcceptorTopology:
         threads_seen: set[int] = set()
         lock = threading.Lock()
 
-        def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def handler(ctx: HTTPReqCtx) -> None:
             with lock:
                 threads_seen.add(threading.get_ident())
             ctx.complete(
@@ -479,7 +478,7 @@ class TestSelectorThreadFastPath:
         routes = Routes()
 
         @routes.get("/hit")
-        def hit(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def hit(ctx: HTTPReqCtx) -> None:
             with lock:
                 threads_seen.add(threading.get_ident())
             ctx.complete(
@@ -619,15 +618,12 @@ class TestDispatchLoad:
     async def test_many_requests_served_from_worker_threads(self, free_port):
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
 
-        def body_handler(ctx: HTTPReqCtx):
+        def handler(ctx: HTTPReqCtx):
             tid = str(threading.get_ident()).encode()
             ctx.complete(
                 Response(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),
                 tid,
             )
-
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
 
         async with _serve_pooled(cfg, handler) as lt:
             await lt.started
@@ -676,8 +672,8 @@ class TestRequestCancellation:
             # Should not be reached
             ctx.complete(Response(status_code=200, headers=[(b"content-length", b"2")]), b"ok")
 
-        def handler(_ctx: HTTPReqCtx):
-            return body_handler
+        def handler(_ctx: HTTPReqCtx) -> None:
+            body_handler(_ctx)
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_pooled(cfg, handler) as lt:

@@ -25,7 +25,6 @@ from anyio import to_thread
 
 from localpost.hosting import serve
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     ServerConfig,
@@ -37,7 +36,7 @@ pytestmark = pytest.mark.anyio
 
 
 def _capturing_handler(seen: Counter, lock: threading.Lock):
-    def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handler(ctx: HTTPReqCtx) -> None:
         with lock:
             seen[threading.get_ident()] += 1
         ctx.complete(

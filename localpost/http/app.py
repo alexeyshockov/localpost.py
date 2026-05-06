@@ -12,13 +12,9 @@ and the HTTP server. It provides:
   ``application/octet-stream``, ``dict`` / ``list`` → ``application/json``,
   :data:`localpost.http.Response` → as-is, ``(Response, bytes)``
   tuple → with body, ``None`` → 204.
-- Worker-pool dispatch for matched routes.
-- Two body modes per route:
-  - **Buffered (default):** selector buffers the full body into
-    ``ctx.body``; the handler runs on a worker with body in hand.
-  - **Streaming (``buffer_body=False``):** the handler runs on a worker
-    on a borrowed conn *before* the body is read; reads via
-    ``ctx.receive(...)``. Useful for large uploads.
+- Worker-pool dispatch for matched routes (each handler runs on a
+  worker with a borrowed conn — use :func:`localpost.http.read_body`
+  to consume the request body when needed).
 - App-level and per-route middleware composition.
 
 For lower-level control, drop down to :class:`localpost.http.Router` +
@@ -36,13 +32,12 @@ Example::
 
     @app.post("/{name}/profile")
     def update_profile(ctx: HTTPReqCtx, name: str):
-        profile = json.loads(ctx.body)
+        profile = json.loads(read_body(ctx))
         return {"updated": name, "profile": profile}
 
 
-    @app.post("/{name}/avatar", buffer_body=False)
+    @app.post("/{name}/avatar")
     def upload_avatar(ctx: HTTPReqCtx, name: str):
-        # Streaming: ctx.body is empty here; read chunks via ctx.receive(...)
         with open(f"/tmp/{name}.jpg", "wb") as f:
             while chunk := ctx.receive(8192):
                 f.write(chunk)
@@ -62,7 +57,7 @@ from http import HTTPMethod
 from typing import Any, get_type_hints
 
 from localpost import hosting
-from localpost.http._base import BodyHandler, HTTPReqCtx, Middleware, RequestHandler, compose
+from localpost.http._base import HTTPReqCtx, Middleware, RequestHandler, compose
 from localpost.http._pool import _Pool, _pool_context
 from localpost.http._service import http_server
 from localpost.http._types import Response
@@ -174,20 +169,17 @@ class _Route:
     path: str
     fn: Callable[..., Any]
     middleware: tuple[Middleware, ...]
-    buffer_body: bool
 
 
 class HttpApp:
     """Decorator-driven HTTP app on top of :class:`Router`.
 
     Args:
-        pooled: When ``True`` (default), buffered routes run on a shared
-            worker pool (:func:`thread_pool_handler`). Set to ``False`` to
-            run buffered handlers inline on the selector thread — only
-            viable when every handler is short and non-blocking.
-            Streaming routes (``buffer_body=False``) always require the
-            pool; ``pooled=False`` with a streaming route raises at
-            service-startup time.
+        pooled: When ``True`` (default), each matched-route handler runs
+            on a shared worker pool (:func:`thread_pool_handler`). Set to
+            ``False`` to run handlers inline on the selector thread —
+            only viable when every handler is short and non-blocking
+            (no body reads, no slow I/O).
         middleware: App-level middlewares wrapping the entire dispatcher
             (after Router). Outermost-first.
     """
@@ -209,52 +201,46 @@ class HttpApp:
         path: str,
         *,
         middleware: Sequence[Middleware] = (),
-        buffer_body: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        return self._decorator(HTTPMethod.GET, path, middleware, buffer_body)
+        return self._decorator(HTTPMethod.GET, path, middleware)
 
     def post(
         self,
         path: str,
         *,
         middleware: Sequence[Middleware] = (),
-        buffer_body: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        return self._decorator(HTTPMethod.POST, path, middleware, buffer_body)
+        return self._decorator(HTTPMethod.POST, path, middleware)
 
     def put(
         self,
         path: str,
         *,
         middleware: Sequence[Middleware] = (),
-        buffer_body: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        return self._decorator(HTTPMethod.PUT, path, middleware, buffer_body)
+        return self._decorator(HTTPMethod.PUT, path, middleware)
 
     def delete(
         self,
         path: str,
         *,
         middleware: Sequence[Middleware] = (),
-        buffer_body: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        return self._decorator(HTTPMethod.DELETE, path, middleware, buffer_body)
+        return self._decorator(HTTPMethod.DELETE, path, middleware)
 
     def patch(
         self,
         path: str,
         *,
         middleware: Sequence[Middleware] = (),
-        buffer_body: bool = True,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        return self._decorator(HTTPMethod.PATCH, path, middleware, buffer_body)
+        return self._decorator(HTTPMethod.PATCH, path, middleware)
 
     def _decorator(
         self,
         method: HTTPMethod,
         path: str,
         middleware: Sequence[Middleware],
-        buffer_body: bool,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
             # Validate signature eagerly so registration-time errors fire
@@ -266,7 +252,6 @@ class HttpApp:
                     path=path,
                     fn=fn,
                     middleware=tuple(middleware),
-                    buffer_body=buffer_body,
                 )
             )
             return fn  # return original for tests
@@ -275,45 +260,18 @@ class HttpApp:
 
     # ----- Building -----
 
-    def _build_buffered_handler(self, route: _Route, pool: _Pool | None) -> RequestHandler:
-        """Buffered route: pre-body returns BodyHandler that, if pooled,
-        dispatches to a worker; otherwise runs inline on selector."""
+    def _build_route_handler(self, route: _Route, pool: _Pool | None) -> RequestHandler:
         resolvers = _build_resolvers(route.fn, route.path)
         fn = route.fn
 
-        def post_body(ctx: HTTPReqCtx) -> None:
+        def inner(ctx: HTTPReqCtx) -> None:
             kwargs = {n: r(ctx) for n, r in resolvers.items()}
             result = fn(**kwargs)
             response, body = _wrap_response(result)
             ctx.complete(response, body)
 
-        if pool is not None:
-            dispatched: BodyHandler = pool.dispatch_buffered(post_body)
-
-            def pre_body_pooled(_ctx: HTTPReqCtx) -> BodyHandler:
-                return dispatched
-
-            return self._with_route_middleware(pre_body_pooled, route.middleware)
-
-        def pre_body_inline(_ctx: HTTPReqCtx) -> BodyHandler:
-            return post_body
-
-        return self._with_route_middleware(pre_body_inline, route.middleware)
-
-    def _build_streaming_handler(self, route: _Route, pool: _Pool) -> RequestHandler:
-        """Streaming route: pre-body borrows + queues for a worker,
-        which runs the user fn on a blocking conn (body not buffered).
-        """
-        resolvers = _build_resolvers(route.fn, route.path)
-        fn = route.fn
-
-        def streaming_inner(ctx: HTTPReqCtx) -> None:
-            kwargs = {n: r(ctx) for n, r in resolvers.items()}
-            result = fn(**kwargs)
-            response, body = _wrap_response(result)
-            ctx.complete(response, body)
-
-        return self._with_route_middleware(pool.dispatch_streaming(streaming_inner), route.middleware)
+        handler: RequestHandler = pool.dispatch(inner) if pool is not None else inner  # type: ignore[arg-type]
+        return self._with_route_middleware(handler, route.middleware)
 
     def _with_route_middleware(self, handler: RequestHandler, middleware: tuple[Middleware, ...]) -> RequestHandler:
         if not middleware:
@@ -323,15 +281,7 @@ class HttpApp:
     def _build_router_handler(self, pool: _Pool | None) -> RequestHandler:
         routes = Routes()
         for route in self._routes:
-            if route.buffer_body:
-                handler = self._build_buffered_handler(route, pool)
-            else:
-                if pool is None:
-                    raise RuntimeError(
-                        f"streaming route {route.method.value} {route.path!r} requires "
-                        f"a worker pool (HttpApp(pooled=True))"
-                    )
-                handler = self._build_streaming_handler(route, pool)
+            handler = self._build_route_handler(route, pool)
             routes.add(route.method, route.path, handler)
         router = routes.build().as_handler()
         if self._middleware:

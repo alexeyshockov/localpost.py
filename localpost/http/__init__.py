@@ -1,6 +1,5 @@
 from localpost.http._async_base import AsyncHTTPReqCtx, AsyncRequestHandler
 from localpost.http._base import (
-    BodyHandler,
     ConnFactory,
     ConnHandler,
     HTTPReqCtx,
@@ -41,7 +40,6 @@ __all__ = [
     "start_http_server",
     "HTTPReqCtx",
     "RequestHandler",
-    "BodyHandler",
     "Middleware",
     "compose",
     # async ctx (transport-neutral; concrete adapters in localpost.http.asgi etc.)

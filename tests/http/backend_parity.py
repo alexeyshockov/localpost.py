@@ -6,7 +6,7 @@ import socket
 
 import httpx
 
-from localpost.http import HTTPReqCtx, Response, ServerConfig
+from localpost.http import HTTPReqCtx, Response, ServerConfig, read_body
 from tests.http._helpers import drain_socket, read_http_response, read_until
 
 
@@ -33,12 +33,22 @@ def test_simple_get(serve_backend_in_thread):
     assert r.text == "hi"
 
 
-def test_buffered_post_body_handler(serve_backend_in_thread):
+def test_buffered_post_body_handler(serve_backend_in_thread, http_backend):
+    if http_backend == "httptools":
+        # ``read_body`` from on-selector handlers re-enters httptools'
+        # ``parser.feed_data`` callback chain — only safe via a worker
+        # pool. The pooled equivalent lives in ``tests/http/service.py``;
+        # here we just exercise the h11 path.
+        import pytest as _pytest  # noqa: PLC0415
+
+        _pytest.skip("httptools requires worker-pool composition for body reads")
+
     received: list[bytes] = []
 
-    def body_handler(ctx: HTTPReqCtx) -> None:
-        received.append(ctx.body)
-        out = b"echo:" + ctx.body
+    def handler(ctx: HTTPReqCtx) -> None:
+        body = read_body(ctx)
+        received.append(body)
+        out = b"echo:" + body
         ctx.complete(
             Response(
                 status_code=200,
@@ -49,9 +59,6 @@ def test_buffered_post_body_handler(serve_backend_in_thread):
             ),
             out,
         )
-
-    def handler(_ctx: HTTPReqCtx):
-        return body_handler
 
     with serve_backend_in_thread(handler) as port:
         r = httpx.post(f"http://127.0.0.1:{port}/x", content=b"hello world", timeout=2)
@@ -104,9 +111,17 @@ def test_malformed_request_returns_400(serve_backend_in_thread):
     assert b"HTTP/1.1 400" in data, data
 
 
-def test_expect_100_continue(serve_backend_in_thread):
-    def body_handler(ctx: HTTPReqCtx) -> None:
-        out = b"got:" + ctx.body
+def test_expect_100_continue(serve_backend_in_thread, http_backend):
+    if http_backend == "httptools":
+        import pytest as _pytest  # noqa: PLC0415
+
+        _pytest.skip("httptools requires worker-pool composition for body reads")
+
+    def handler(ctx: HTTPReqCtx) -> None:
+        # ``read_body`` drives the body recv loop, which sends 100 Continue
+        # when the parser sees the client is awaiting it.
+        body = read_body(ctx)
+        out = b"got:" + body
         ctx.complete(
             Response(
                 200,
@@ -117,9 +132,6 @@ def test_expect_100_continue(serve_backend_in_thread):
             ),
             out,
         )
-
-    def handler(_ctx: HTTPReqCtx):
-        return body_handler
 
     with serve_backend_in_thread(handler) as port:
         with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:

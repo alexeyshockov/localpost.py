@@ -13,10 +13,9 @@ The dispatch chain is loose-coupled:
     ConnHandler  ── after-accept policy; owns RequestHandler + conn_factory;
        │              decides which Selector tracks the new conn
        ▼
-    RequestHandler  ── pre-body dispatch; returns BodyHandler|None
-       │
-       ▼
-    BodyHandler  ── post-body continuation
+    RequestHandler  ── single-shot dispatch on headers-complete; handlers
+                       that need the body call ``ctx.receive(size)`` /
+                       :func:`localpost.http.read_body` themselves
 
 ISO-8859-1 is used for header encoding/decoding as per HTTP/1.1 specification.
 """
@@ -46,7 +45,6 @@ if TYPE_CHECKING:
 __all__ = [
     "BaseHTTPConn",
     "BaseServer",
-    "BodyHandler",
     "ConnFactory",
     "ConnHandler",
     "HTTPReqCtx",
@@ -239,9 +237,12 @@ class HTTPReqCtx(Protocol):
     ``localpost.http`` server backends and external transports
     (e.g. :func:`localpost.http.wsgi.to_wsgi`'s WSGI bridge).
 
-    ``body`` is empty when a :data:`RequestHandler` runs (pre-body phase).
-    It is populated by the selector / WSGI adapter with the fully
-    buffered request body before a returned :data:`BodyHandler` runs.
+    The body is read lazily — handlers call :meth:`receive` (or the
+    :func:`localpost.http.read_body` helper for "give me the whole
+    body" semantics). The transport never pre-buffers; framework layers
+    that want a cached body cache it themselves
+    (:class:`localpost.openapi.HttpApp` populates
+    ``ctx.attrs[BODY_CACHE_KEY]`` for typed body parameters).
 
     ``attrs`` is per-request mutable state for cross-cutting concerns
     to thread information through. :class:`localpost.http.Router` writes
@@ -276,7 +277,6 @@ class HTTPReqCtx(Protocol):
     """
 
     request: Request
-    body: bytes
     response_status: int | None
     attrs: dict[Any, Any]
 
@@ -350,46 +350,38 @@ class _NativeReqCtx(HTTPReqCtx, Protocol):
     def finish_response(self) -> None: ...
 
 
-BodyHandler = Callable[[HTTPReqCtx], None]
-"""Continuation invoked by the selector after the full request body has been
-buffered into ``ctx.body``. Must complete the response (or borrow the conn)."""
+RequestHandler = Callable[[HTTPReqCtx], None]
+"""Top-level sync request handler — drives one request to a response.
 
-RequestHandler = Callable[[HTTPReqCtx], BodyHandler | None]
-"""Pre-body handler dispatched on ``on_headers_complete``.
+Dispatched once on ``on_headers_complete`` (selector thread). The handler:
 
-Returns one of:
-- ``None`` — handler is done (either it called ``ctx.complete(...)`` to
-  send a response inline, or it called ``ctx.borrow()`` to hand the conn
-  off to a worker thread). Body bytes that arrive afterwards are drained
-  silently for keep-alive.
-- :data:`BodyHandler` — selector buffers the full request body into
-  ``ctx.body`` and then invokes the returned callable. This is the path
-  for the JSON-API common case (parse JSON, build response).
+- replies inline (``ctx.complete(...)`` / ``ctx.stream(...)`` /
+  ``ctx.sendfile(...)``) for fast cases that don't touch the body —
+  e.g. router 404 / 405, header-driven auth rejections.
+- or calls ``ctx.borrow()`` (or composes with
+  :func:`localpost.http.thread_pool_handler`) to escape the selector
+  before reading the body via ``ctx.receive(size)`` /
+  :func:`localpost.http.read_body`.
 
-Old-style ``Callable[[HTTPReqCtx], None]`` handlers continue to work —
-returning ``None`` implicitly is the "done inline" path."""
+Symmetric with :data:`localpost.http.AsyncRequestHandler` on the async side.
+"""
 
 Middleware = Callable[[RequestHandler], RequestHandler]
 """HTTP middleware: a function that wraps a :data:`RequestHandler`.
 
 Plain Python decorator pattern — no special chain object. A middleware
-can short-circuit pre-body (call ``ctx.complete(...)`` and return
-``None`` without invoking ``inner``), inspect / modify before passing
-through (``return inner(ctx)``), and wrap the returned
-:data:`BodyHandler` continuation to run code after the response::
+can short-circuit before invoking ``inner`` (call ``ctx.complete(...)``
+and return without delegating), inspect / modify the ctx, or run code
+after ``inner`` returns::
 
     def with_logging(inner: RequestHandler) -> RequestHandler:
         def wrapped(ctx):
             start = time.monotonic()
-            result = inner(ctx)
-            if result is None:
+            try:
+                inner(ctx)
+            finally:
                 if not ctx.borrowed:
                     _log(start, ctx)
-                return None
-            def post_body(ctx):
-                result(ctx)
-                _log(start, ctx)
-            return post_body
         return wrapped
 """
 

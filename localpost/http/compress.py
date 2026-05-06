@@ -39,7 +39,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Final
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
 from localpost.http._types import Request, Response
 
 __all__ = [
@@ -431,10 +431,6 @@ class _CompressedCtx:
         return self._inner.request
 
     @property
-    def body(self) -> bytes:
-        return self._inner.body
-
-    @property
     def attrs(self) -> dict[Any, Any]:
         return self._inner.attrs
 
@@ -568,36 +564,21 @@ def compress_handler(
 
     server_pref = tuple(algorithms)
 
-    def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def wrapped(ctx: HTTPReqCtx) -> None:
         accept = _get_header(ctx.request.headers, b"accept-encoding")
         if accept is None or ctx.request.method == b"HEAD":
-            return inner(ctx)
+            inner(ctx)
+            return
         chosen = _negotiate(accept, server_pref)
         if chosen is None:
-            return inner(ctx)
+            inner(ctx)
+            return
         proxy = _CompressedCtx(
             _inner=ctx,
             _encoding=chosen,
             _min_size=min_size,
             _compressible_types=compressible_types,
         )
-        result = inner(proxy)  # type: ignore[arg-type]  # _CompressedCtx structurally satisfies HTTPReqCtx
-        if result is None:
-            return None
-        # If the inner returned a BodyHandler continuation, route it
-        # through the same proxy so its ``complete`` call lands here too.
-        body_handler: BodyHandler = result
-
-        def proxied_body(real_ctx: HTTPReqCtx) -> None:
-            body_handler(
-                _CompressedCtx(  # type: ignore[arg-type]
-                    _inner=real_ctx,
-                    _encoding=chosen,
-                    _min_size=min_size,
-                    _compressible_types=compressible_types,
-                )
-            )
-
-        return proxied_body
+        inner(proxy)  # type: ignore[arg-type]  # _CompressedCtx structurally satisfies HTTPReqCtx
 
     return wrapped

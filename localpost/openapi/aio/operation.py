@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from http import HTTPMethod
 from typing import Any, Self
 
+from localpost.http import aread_body
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
@@ -43,8 +44,10 @@ from localpost.openapi.aio._ctx import AsyncHTTPReqCtx
 from localpost.openapi.aio.middleware import AsyncApiOperation, AsyncOpMiddleware
 from localpost.openapi.aio.sse import async_iter_events
 from localpost.openapi.resolvers import (
+    BODY_CACHE_KEY,
     ArgResolver,
     ArgResolverFactory,
+    FromBody,
     FromPath,
 )
 from localpost.openapi.results import EventStreamResult, NotFound, Ok, OpResult
@@ -78,6 +81,11 @@ class AsyncOperation:
     operation_id: str
     description: str
     adapters: AdapterRegistry
+    needs_body: bool
+    """``True`` iff at least one resolved parameter is a :class:`FromBody`
+    factory. The runtime pre-buffers the request body via
+    :func:`localpost.http.aread_body` and stashes it in
+    ``ctx.attrs[BODY_CACHE_KEY]`` before invoking resolvers."""
 
     @classmethod
     def create(
@@ -134,6 +142,8 @@ class AsyncOperation:
         description = doc[len(summary) :].lstrip("\n") if doc else ""
         op_id = _make_operation_id(method, path, fn)
 
+        needs_body = any(isinstance(factory, FromBody) for _, _, factory in arg_factories)
+
         return cls(
             method=method,
             path=path,
@@ -148,6 +158,7 @@ class AsyncOperation:
             operation_id=op_id,
             description=description,
             adapters=registry,
+            needs_body=needs_body,
         )
 
     # ----- runtime -----
@@ -162,6 +173,8 @@ class AsyncOperation:
         await self._write_response(ctx, result)
 
     async def _run_core(self, ctx: AsyncHTTPReqCtx) -> OpResult:
+        if self.needs_body and BODY_CACHE_KEY not in ctx.attrs:
+            ctx.attrs[BODY_CACHE_KEY] = await aread_body(ctx)
         kwargs: dict[str, object] = {}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)

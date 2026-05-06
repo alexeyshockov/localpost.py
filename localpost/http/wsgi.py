@@ -10,7 +10,8 @@ from typing import Any, BinaryIO, final, override
 from urllib.parse import unquote_to_bytes
 from wsgiref.types import WSGIApplication
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
+from localpost.http._body import read_body
 from localpost.http._types import Request
 from localpost.http._types import Response as _Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
@@ -20,10 +21,12 @@ __all__ = ["to_wsgi", "wrap_wsgi"]
 
 @final
 class _RequestBodyStream(RawIOBase):
-    """Expose the buffered ``HTTPReqCtx.body`` as ``wsgi.input``.
+    """Expose buffered request bytes as a ``wsgi.input`` file-like.
 
-    The body has already been read by the selector before the WSGI app
-    runs, so this is a thin slicing view — no I/O, no ``recv``.
+    :func:`wrap_wsgi` reads the full body via
+    :func:`localpost.http.read_body` before driving the WSGI app, then
+    wraps the resulting ``bytes`` here — WSGI apps see a synchronous
+    ``read`` / ``readinto`` API backed by an in-memory buffer.
     """
 
     def __init__(self, body: bytes) -> None:
@@ -68,13 +71,21 @@ def _wsgi_write_unsupported(_: bytes) -> None:
 def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
     """Wrap a WSGI application as a native :class:`RequestHandler`.
 
-    WSGI apps may consume ``wsgi.input`` from any route, so the wrapper
-    always returns a :data:`BodyHandler` continuation — the selector
-    buffers the request body into ``ctx.body`` before the WSGI app runs.
+    The handler reads the full request body via
+    :func:`localpost.http.read_body`, exposes it to the WSGI app as
+    ``wsgi.input``, and translates the WSGI response into a
+    :meth:`HTTPReqCtx.stream` call (the WSGI body iterable is already
+    a chunk iterator).
+
+    Reading the body blocks on the request socket, so this handler
+    **must** be composed with :func:`localpost.http.thread_pool_handler`
+    (or run inside an explicit ``ctx.borrow()`` block) — running it on
+    the selector thread will stall the loop while the upload finishes.
     """
 
     def run_wsgi(ctx: HTTPReqCtx) -> None:
-        environ = _build_environ(ctx)
+        body = read_body(ctx)
+        environ = _build_environ(ctx, body)
 
         response_state: dict[str, Any] = {}
 
@@ -129,13 +140,10 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
             if close is not None:
                 close()
 
-    def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
-        return run_wsgi
-
-    return pre_body
+    return run_wsgi
 
 
-def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
+def _build_environ(ctx: HTTPReqCtx, body: bytes) -> dict[str, Any]:
     request = ctx.request
     # ``request.path`` / ``request.query_string`` are pre-split by the
     # backend; only the percent-decode + ISO-8859-1 decode happens here.
@@ -158,7 +166,7 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
         "SERVER_PROTOCOL": f"HTTP/{request.http_version.decode('ascii')}",
         "wsgi.version": (1, 0),
         "wsgi.url_scheme": ctx.scheme,
-        "wsgi.input": _RequestBodyStream(ctx.body),
+        "wsgi.input": _RequestBodyStream(body),
         "wsgi.errors": sys.stderr,
         "wsgi.multithread": True,
         "wsgi.multiprocess": False,
@@ -198,10 +206,10 @@ def _build_environ(ctx: HTTPReqCtx) -> dict[str, Any]:
 class _WSGIReqCtx:
     """:class:`HTTPReqCtx` implementation backed by a WSGI ``environ``.
 
-    Body is read from ``wsgi.input`` and pre-buffered into ``ctx.body``
-    before the handler runs (matches the JSON-API common case the native
-    server is tuned for). ``receive`` slices the buffered body for any
-    handler that wants chunked reads.
+    Body bytes are read lazily — :meth:`receive` calls ``wsgi.input.read(size)``
+    on demand. The bridge does not pre-buffer; WSGI servers are usually
+    multi-thread / multi-process worker pools, so synchronous reads are
+    safe.
 
     Three response shapes are supported, all via the public
     :class:`HTTPReqCtx` Protocol:
@@ -219,14 +227,12 @@ class _WSGIReqCtx:
     """
 
     request: Request
-    body: bytes
     remote_addr: str | None
     local_addr: str
     scheme: str
     _environ: dict[str, Any]
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
-    _body_cursor: int = 0
 
     # Response capture state — at most one of these is populated.
     _completed: tuple[_Response, bytes] | None = None
@@ -248,12 +254,11 @@ class _WSGIReqCtx:
         return contextlib.nullcontext(self)
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        if self._body_cursor >= len(self.body):
+        stream = self._environ.get("wsgi.input")
+        if stream is None:
             return b""
-        end = self._body_cursor + size
-        chunk = self.body[self._body_cursor : end]
-        self._body_cursor += len(chunk)
-        return chunk
+        chunk = stream.read(size)
+        return chunk if chunk else b""
 
     # ----- response capture -----
 
@@ -343,9 +348,7 @@ def to_wsgi(handler: RequestHandler) -> WSGIApplication:
 
     def wsgi_app(environ: dict[str, Any], start_response: Callable[..., Any]) -> Iterable[bytes]:
         ctx = _build_wsgi_ctx(environ)
-        body_handler = handler(ctx)
-        if body_handler is not None:
-            body_handler(ctx)
+        handler(ctx)
         return ctx._respond(start_response)
 
     return wsgi_app
@@ -381,8 +384,6 @@ def _build_wsgi_ctx(environ: dict[str, Any]) -> _WSGIReqCtx:
         http_version=http_version,
     )
 
-    body = _read_body(environ)
-
     server_host = str(environ.get("SERVER_NAME", ""))
     server_port = str(environ.get("SERVER_PORT", ""))
     local_addr = f"{server_host}:{server_port}" if server_port else server_host
@@ -396,26 +397,11 @@ def _build_wsgi_ctx(environ: dict[str, Any]) -> _WSGIReqCtx:
 
     return _WSGIReqCtx(
         request=request,
-        body=body,
         remote_addr=remote_addr,
         local_addr=local_addr,
         scheme=str(environ.get("wsgi.url_scheme", "http")),
         _environ=environ,
     )
-
-
-def _read_body(environ: dict[str, Any]) -> bytes:
-    cl_raw = environ.get("CONTENT_LENGTH") or ""
-    try:
-        cl = int(cl_raw) if cl_raw else 0
-    except ValueError:
-        cl = 0
-    if cl <= 0:
-        return b""
-    stream = environ.get("wsgi.input")
-    if stream is None:
-        return b""
-    return stream.read(cl)
 
 
 def _status_line(response: _Response) -> str:

@@ -6,7 +6,7 @@ import httpx
 import pytest
 import sentry_sdk
 
-from localpost.http import BodyHandler, HTTPReqCtx, Response, Routes, route_match
+from localpost.http import HTTPReqCtx, Response, Routes, route_match
 from localpost.http.router_sentry import sentry_router_handler
 
 from ._sentry_helpers import CapturingTransport, init_sentry, transactions
@@ -24,7 +24,7 @@ def _build_router():
     routes = Routes()
 
     @routes.get("/books/{id}")
-    def get_book(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def get_book(ctx: HTTPReqCtx) -> None:
         body = f"book={route_match(ctx).path_args['id']}".encode()
         ctx.complete(
             Response(
@@ -33,12 +33,10 @@ def _build_router():
             ),
             body,
         )
-        return None
 
     @routes.post("/books")
-    def create_book(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def create_book(ctx: HTTPReqCtx) -> None:
         ctx.complete(Response(status_code=201, headers=[(b"content-length", b"0")]), b"")
-        return None
 
     assert get_book is not None
     assert create_book is not None

@@ -23,7 +23,7 @@ from http import HTTPMethod
 from http.client import responses as _http_phrases
 from typing import Self, final
 
-from localpost.http._base import BodyHandler, HTTPReqCtx
+from localpost.http._base import HTTPReqCtx
 from localpost.http._base import RequestHandler as NativeRequestHandler
 from localpost.http._types import Response as _Response
 
@@ -132,10 +132,9 @@ class Routes:
 
 
         @routes.get("/hello/{name}")
-        def hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def hello(ctx: HTTPReqCtx) -> None:
             match = route_match(ctx)
             ctx.complete(Response(...), b"hi " + match.path_args["name"].encode())
-            return None
 
 
         router = routes.build()
@@ -295,7 +294,7 @@ class Router:
         the body bytes (if any) are silently drained by the http layer.
         """
 
-        def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def dispatch(ctx: HTTPReqCtx) -> None:
             req = ctx.request
             # ``req.path`` and ``req.method`` are pre-split / pre-uppercased
             # by the backend (httptools.parse_url for httptools, manual
@@ -307,13 +306,13 @@ class Router:
 
             if isinstance(match, _MatchNotFound):
                 ctx.complete(_NOT_FOUND_RESPONSE, _NOT_FOUND_BODY)
-                return None
+                return
             if isinstance(match, _MatchMethodNotAllowed):
                 ctx.complete(match.response, match.body)
-                return None
+                return
 
             ctx.attrs[RouteMatch] = match.match
-            return match.handler(ctx)
+            match.handler(ctx)
 
         return dispatch
 

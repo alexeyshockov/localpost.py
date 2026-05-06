@@ -39,7 +39,6 @@ from localpost.http._base import (
     REASON_PHRASES,
     REQUEST_TIMEOUT_WIRE,
     BaseHTTPConn,
-    BodyHandler,
     RequestHandler,
     Selector,
     _native_stream,
@@ -117,25 +116,19 @@ class HTTPConn(BaseHTTPConn):
     _cur_oversize: bool = False  # set by on_headers_complete if Content-Length exceeds cap
 
     # Per-conn dispatch state. One in-flight request at a time (no pipelining):
-    # ``_ctx`` is built in ``on_headers_complete`` and the pre-body handler is
-    # invoked inline. If it returns a continuation, ``_continuation`` is set
-    # and ``on_body`` accumulates into ``_body_buf`` until ``on_message_complete``.
+    # ``_ctx`` is built in ``on_headers_complete`` and the handler is invoked
+    # inline. ``on_body`` populates ``_body_buf`` (drained by ``ctx.receive``
+    # on a borrowed conn); ``on_message_complete`` flips ``_body_eom``.
     _ctx: _HTTPReqCtx | None = None
-    _continuation: BodyHandler | None = None
     _body_buf: bytearray = field(default_factory=bytearray)
+    _body_eom: bool = False
     _message_complete: bool = False
     _body_too_large: int | None = None
 
-    # Streaming mode (``buffer_body=False``): the pre-body handler borrowed
-    # the conn before the body was buffered. Selector + worker both feed
-    # bytes through ``parser.feed_data``; ``on_body`` populates
-    # ``_streaming_body_buf`` regardless of which thread is feeding. The
-    # worker drains the buffer via ``ctx.receive``. Same model as h11
-    # (``next_event``-driven), just emulated with httptools' push
-    # callbacks.
-    _streaming_active: bool = False
-    _streaming_body_buf: bytearray = field(default_factory=bytearray)
-    _streaming_eom: bool = False
+    # Streaming-pool dispatch hook. ``_defer_streaming_dispatch`` (called by
+    # the streaming-pool wrapper from inside ``on_headers_complete``)
+    # stashes a callback here; ``_feed`` runs it after ``parser.feed_data``
+    # returns so the worker dispatch happens outside the parser callback.
     _deferred_streaming_dispatch: Callable[[], None] | None = None
 
     # Set when the response indicates ``Connection: close`` or the request lacked
@@ -229,57 +222,48 @@ class HTTPConn(BaseHTTPConn):
         )
         self._ctx = ctx
         self._body_buf = bytearray()
+        self._body_eom = False
         self._message_complete = False
-        self._continuation = None
 
-        # Dispatch the pre-body handler inline. It runs on the selector
-        # thread; it can call ``ctx.complete(...)`` (response sent inline,
-        # returns None), ``ctx.borrow()`` (escape to worker, returns None),
-        # or return a :data:`BodyHandler` continuation to receive the body.
+        # Dispatch the handler inline. It runs on the selector thread; it
+        # can call ``ctx.complete(...)`` (response sent inline) or
+        # ``ctx.borrow()`` (escape to worker — handler will then drive
+        # ``ctx.receive`` to drain the body). Body bytes that arrive in
+        # the same packet land in ``_body_buf`` regardless; ``on_body``
+        # decides whether to buffer or drop based on whether the handler
+        # is still expected to read.
         try:
-            result = self.handler(ctx)
+            self.handler(ctx)
         except BodyTooLarge:
             raise
         except Exception:
             self.selector.logger.exception("Handler raised for %s %r", req.method, req.target)
             emit_handler_error(ctx)
-            result = None
 
-        if result is None:
-            # Either the handler completed inline OR a streaming
-            # pool dispatched and borrowed the conn. Detect the latter
-            # so on_body / on_message_complete know to populate the
-            # streaming body buffer (drained by the worker via
-            # ``ctx.receive``) instead of dropping bytes.
-            if not self.tracked:
-                self._streaming_active = True
-            return
-
-        # Continuation returned: we'll buffer the body and invoke it on
-        # ``on_message_complete``. If the client sent ``Expect: 100-continue``,
-        # tell them to actually send the body now.
-        self._continuation = result
-        if self._cur_expect_100 and not ctx._continue_sent:
-            try:
-                self.sock.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
-                object.__setattr__(ctx, "_continue_sent", True)
-            except OSError:
-                # Best-effort; the body recv loop will surface the failure.
-                pass
+        # ``Expect: 100-continue`` edge case: handler responded inline
+        # without ever sending the 100 Continue (so the client is still
+        # waiting and will never deliver the body). The parser would
+        # never observe EOM. Mark the message complete and force the
+        # conn closed after the response — matches nginx-style "send
+        # final response + Connection: close" behaviour.
+        if (
+            not ctx.borrowed
+            and self._response_started
+            and self._cur_expect_100
+            and not ctx._continue_sent
+        ):
+            self._close_after_response = True
+            self._message_complete = True
 
     def on_body(self, data: bytes) -> None:
-        if self._streaming_active:
-            # Streaming mode: append to the worker-drained buffer regardless
-            # of which thread is currently inside ``feed_data``. ``ctx.receive``
-            # drains it (and pulls more bytes from the socket if needed).
-            new_total = len(self._streaming_body_buf) + len(data)
-            if new_total > self.selector.config.max_body_size:
-                self._body_too_large = new_total
-                return
-            self._streaming_body_buf += data
+        if self._cur_oversize:
             return
-        if self._continuation is None or self._cur_oversize:
-            return  # no body wanted (handler done) or already oversize
+        # If the handler responded inline without borrowing, it's done —
+        # remaining body bytes won't be read (we'll close the conn after
+        # the response). Drop to keep the body buf bounded.
+        ctx = self._ctx
+        if self._response_started and ctx is not None and not ctx.borrowed:
+            return
         new_total = len(self._body_buf) + len(data)
         if new_total > self.selector.config.max_body_size:
             self._body_too_large = new_total
@@ -287,23 +271,7 @@ class HTTPConn(BaseHTTPConn):
         self._body_buf += data
 
     def on_message_complete(self) -> None:
-        if self._streaming_active:
-            self._streaming_eom = True
-            self._message_complete = True
-            return
-        if self._continuation is not None:
-            cont = self._continuation
-            self._continuation = None
-            ctx = self._ctx
-            assert ctx is not None
-            ctx.body = bytes(self._body_buf)
-            try:
-                cont(ctx)
-            except BodyTooLarge:
-                raise
-            except Exception:
-                self.selector.logger.exception("Body handler raised for %s %r", ctx.request.method, ctx.request.target)
-                emit_handler_error(ctx)
+        self._body_eom = True
         self._message_complete = True
 
     # ----- BaseHTTPConn surface -----
@@ -379,14 +347,11 @@ class HTTPConn(BaseHTTPConn):
     def _reset_for_next_request(self) -> None:
         # Per-request parsing scratch is cleared by ``on_message_begin``.
         self._ctx = None
-        self._continuation = None
         self._body_buf = bytearray()
+        self._body_eom = False
         self._message_complete = False
         self._response_started = False
         self._close_after_response = False
-        self._streaming_active = False
-        self._streaming_body_buf = bytearray()
-        self._streaming_eom = False
         self._deferred_streaming_dispatch = None
         self.idle = True
         self.close_at = time.monotonic() + self.selector.config.keep_alive_timeout
@@ -437,7 +402,6 @@ class _HTTPReqCtx:
     _expect_100_continue: bool = False
     _keep_alive: bool = True
 
-    body: bytes = b""
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     _disconnected: bool = False
@@ -491,16 +455,14 @@ class _HTTPReqCtx:
             self._maybe_give_back()
 
     def _defer_streaming_dispatch(self, dispatcher: Callable[[_HTTPReqCtx], None]) -> None:
-        """Start a streaming worker after the current parser feed returns.
+        """Start a worker after the current parser feed returns.
 
         httptools fires callbacks from inside ``parser.feed_data``. Starting
         the worker directly from ``on_headers_complete`` would let it call
         ``ctx.receive`` and re-enter the parser while the selector thread is
-        still inside the same feed. Instead, mark streaming active now so any
-        body bytes from the current packet are buffered by ``on_body``, then
-        let ``_feed`` run the handoff once callbacks are done.
+        still inside the same feed. Instead we stash the dispatcher here and
+        let ``_feed`` run it once parser callbacks are done.
         """
-        self.conn._streaming_active = True
         self.conn._deferred_streaming_dispatch = lambda: dispatcher(self)
 
     def _maybe_give_back(self) -> None:
@@ -564,20 +526,16 @@ class _HTTPReqCtx:
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        """Streaming-read API.
+        """Streaming-read API: pull up to ``size`` bytes of the request
+        body off the wire (or ``b""`` at EOM / peer FIN).
 
-        Two paths:
+        Sends ``100 Continue`` lazily if the client is awaiting it. Pulls
+        more bytes from the socket and feeds them through the parser
+        (``on_body`` populates ``conn._body_buf``, ``on_message_complete``
+        flips ``conn._body_eom``) when the buffer is empty.
 
-        - **Streaming route** (``buffer_body=False``, ``conn._streaming_active``):
-          parser-driven, same shape as h11. ``on_body`` callbacks (fired
-          from ``parser.feed_data`` calls on either thread) populate
-          ``conn._streaming_body_buf``; this method drains it. Pulls more
-          bytes from the socket and feeds them through the parser if the
-          buffer is empty and EOM hasn't fired.
-        - **Buffered route**: the body has already been buffered into
-          ``ctx.body`` before this body handler ran. ``ctx.receive`` is
-          the legacy fallback path (rare); it just calls ``sock.recv``
-          for callers that did a hand-rolled ``borrow()``.
+        Use :func:`localpost.http.read_body` for the "give me the whole
+        body" common case.
         """
         if self._expect_100_continue and not self._continue_sent:
             self._send_continue()
@@ -585,47 +543,35 @@ class _HTTPReqCtx:
         conn = self.conn
         rw = self.selector.config.rw_timeout
 
-        if conn._streaming_active:
-            while not conn._streaming_body_buf and not conn._streaming_eom:
+        while not conn._body_buf and not conn._body_eom:
+            try:
+                data = conn.sock.recv(DEFAULT_BUFFER_SIZE)
+            except BlockingIOError:
+                conn.sock.settimeout(rw)
                 try:
                     data = conn.sock.recv(DEFAULT_BUFFER_SIZE)
-                except BlockingIOError:
-                    conn.sock.settimeout(rw)
-                    try:
-                        data = conn.sock.recv(DEFAULT_BUFFER_SIZE)
-                    finally:
-                        # On a borrowed conn keep the socket blocking-with-timeout
-                        # for the rest of the request; subsequent ``recv`` calls
-                        # in this loop (and in later sends) skip the
-                        # BlockingIOError path entirely. The give-back path
-                        # resets the socket on hand-back. On the selector thread
-                        # we restore inline.
-                        if conn.tracked:
-                            conn.sock.settimeout(0)
-                if not data:
-                    break  # peer FIN mid-body
-                # Feed through the parser; ``on_body`` populates the
-                # streaming buffer, ``on_message_complete`` flips EOM.
-                # Errors (BodyTooLarge / _ProtocolError) propagate to the
-                # caller; the worker pool's exception handler emits a 500.
-                conn._feed(data)
-            if conn._streaming_body_buf:
-                n = min(size, len(conn._streaming_body_buf))
-                chunk = bytes(conn._streaming_body_buf[:n])
-                del conn._streaming_body_buf[:n]
-                return chunk
-            return b""
-
-        # Buffered route fallback (hand-rolled borrow): raw recv.
-        try:
-            return conn.sock.recv(size)
-        except BlockingIOError:
-            conn.sock.settimeout(rw)
-            try:
-                return conn.sock.recv(size)
-            finally:
-                if conn.tracked:
-                    conn.sock.settimeout(0)
+                finally:
+                    # On a borrowed conn keep the socket blocking-with-timeout
+                    # for the rest of the request; subsequent ``recv`` calls
+                    # in this loop (and in later sends) skip the
+                    # BlockingIOError path entirely. The give-back path
+                    # resets the socket on hand-back. On the selector thread
+                    # we restore inline.
+                    if conn.tracked:
+                        conn.sock.settimeout(0)
+            if not data:
+                break  # peer FIN mid-body
+            # Feed through the parser; ``on_body`` populates ``_body_buf``,
+            # ``on_message_complete`` flips ``_body_eom``. Errors
+            # (BodyTooLarge / _ProtocolError) propagate to the caller;
+            # the worker pool's exception handler emits a 500.
+            conn._feed(data)
+        if conn._body_buf:
+            n = min(size, len(conn._body_buf))
+            chunk = bytes(conn._body_buf[:n])
+            del conn._body_buf[:n]
+            return chunk
+        return b""
 
     def _send_continue(self) -> None:
         _send_all(self.conn, b"HTTP/1.1 100 Continue\r\n\r\n")

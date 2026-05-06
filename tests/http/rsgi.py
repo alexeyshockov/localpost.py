@@ -18,7 +18,7 @@ from typing import Any
 import anyio
 import pytest
 
-from localpost.http import AsyncHTTPReqCtx, Response, to_rsgi
+from localpost.http import AsyncHTTPReqCtx, Response, aread_body, to_rsgi
 from localpost.http.rsgi import _RSGIReqCtx, addrs_from_scope, build_request_from_scope
 
 # --- Mocks --------------------------------------------------------------
@@ -138,18 +138,29 @@ class _FakeProto:
 
 
 def _build_ctx(*, body: bytes = b"", proto: _FakeProto | None = None) -> _RSGIReqCtx:
-    """Minimal _RSGIReqCtx for ctx-only checks."""
+    """Minimal _RSGIReqCtx for ctx-only checks.
+
+    Pre-fills the body channel with ``body`` and closes it — the ctx
+    behaves as if the bridge had read exactly those bytes from upstream
+    and observed EOM.
+    """
     from localpost.http._types import Request  # noqa: PLC0415
 
     request = Request(b"GET", b"/", b"/", b"", [])
+
+    body_send, body_recv = anyio.create_memory_object_stream[bytes](max_buffer_size=64)
+    if body:
+        body_send.send_nowait(body)
+    body_send.close()
+
     return _RSGIReqCtx(
         request=request,
-        body=body,
         remote_addr=None,
         local_addr="127.0.0.1:8000",
         scheme="http",
         _proto=proto or _FakeProto(),
-        _disconnected=__import__("threading").Event(),
+        _disconnected=anyio.Event(),
+        _body_stream=body_recv,
     )
 
 
@@ -276,11 +287,12 @@ class TestCtxSendfile:
 
 
 class TestCtxReceive:
-    """Buffered ``receive(size)`` slices the body — same shape as the
-    sync :class:`_WSGIReqCtx.receive` helper."""
+    """``ctx.receive(size)`` pulls from the in-process body queue,
+    splitting upstream chunks down to the caller's requested ``size``.
+    """
 
     @pytest.mark.anyio
-    async def test_receive_slices_buffer(self) -> None:
+    async def test_receive_splits_chunk_across_calls(self) -> None:
         ctx = _build_ctx(body=b"abcdef")
         assert await ctx.receive(2) == b"ab"
         assert await ctx.receive(3) == b"cde"
@@ -296,7 +308,7 @@ async def _drive(rsgi_app: Any, scope: _FakeScope, proto: _FakeProto) -> None:
     await rsgi_app.__rsgi__(scope, proto)
 
 
-class TestToRsgiBuffered:
+class TestToRsgi:
     @pytest.mark.anyio
     async def test_simple_round_trip(self) -> None:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
@@ -309,11 +321,11 @@ class TestToRsgiBuffered:
         assert proto.response_body == b"hi"
 
     @pytest.mark.anyio
-    async def test_body_pre_buffered(self) -> None:
+    async def test_body_read_via_aread_body(self) -> None:
         captured: dict[str, bytes] = {}
 
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            captured["body"] = ctx.body
+            captured["body"] = await aread_body(ctx)
             await ctx.complete(Response(200), b"ok")
 
         rsgi_app = to_rsgi(handler)
@@ -322,27 +334,10 @@ class TestToRsgiBuffered:
         assert captured["body"] == b"hello-world"
 
     @pytest.mark.anyio
-    async def test_body_too_large_returns_413_via_content_length(self) -> None:
-        async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            raise AssertionError("handler should not run")
-
-        rsgi_app = to_rsgi(handler, max_body_size=4)
-        proto = _FakeProto(body_chunks=[b"too-long-body"])
-        scope = _FakeScope(
-            method="POST",
-            headers=_FakeHeaders([("content-length", "13")]),
-        )
-        await _drive(rsgi_app, scope, proto)
-        assert proto.response_status == 413
-
-
-class TestToRsgiStreaming:
-    @pytest.mark.anyio
     async def test_chunks_arrive_in_order(self) -> None:
         captured: list[bytes] = []
 
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
-            assert ctx.body == b""
             while True:
                 chunk = await ctx.receive(64)
                 if not chunk:
@@ -350,7 +345,7 @@ class TestToRsgiStreaming:
                 captured.append(chunk)
             await ctx.complete(Response(200), b"ok")
 
-        rsgi_app = to_rsgi(handler, streaming=True)
+        rsgi_app = to_rsgi(handler)
         proto = _FakeProto(body_chunks=[b"first", b"second", b"third"])
         await _drive(rsgi_app, _FakeScope(method="POST"), proto)
         assert b"".join(captured) == b"firstsecondthird"
@@ -360,7 +355,7 @@ class TestToRsgiStreaming:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             raise AssertionError("handler should not run")
 
-        rsgi_app = to_rsgi(handler, streaming=True, max_body_size=4)
+        rsgi_app = to_rsgi(handler, max_body_size=4)
         proto = _FakeProto()
         scope = _FakeScope(
             method="POST",

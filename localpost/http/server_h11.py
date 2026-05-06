@@ -5,8 +5,10 @@ For the C-based alternative see :mod:`localpost.http.server_httptools`.
 
 Like the httptools backend, this one:
 
-- buffers the full request body into ``ctx.body`` before invoking a
-  returned :data:`BodyHandler` continuation
+- dispatches the handler exactly once on ``Request`` (headers complete)
+  — handlers that need the request body call ``ctx.receive(size)``
+  themselves (or :func:`localpost.http.read_body`); the selector never
+  pre-buffers
 - auto-buffers the response headers; the next ``send`` (or
   ``finish_response`` for empty bodies) emits headers + first body chunk
   in a single ``sendall``
@@ -35,7 +37,6 @@ from localpost.http._base import (
     REQUEST_TIMEOUT_BODY,
     REQUEST_TIMEOUT_RESPONSE,
     BaseHTTPConn,
-    BodyHandler,
     RequestHandler,
     Selector,
     _native_stream,
@@ -111,16 +112,6 @@ class HTTPConn(BaseHTTPConn):
     to enforce the upload cap."""
     idle: bool = True
 
-    # Per-request dispatch state. Set on ``h11.Request``, used while we
-    # iterate ``h11.Data`` events to accumulate the body, and consumed on
-    # ``h11.EndOfMessage`` to fire the continuation. ``_ctx`` is the
-    # current request context shared with the handler; ``_continuation``
-    # is the post-body callback (None if the pre-body handler completed
-    # inline or borrowed).
-    _ctx: _HTTPReqCtx | None = None
-    _continuation: BodyHandler | None = None
-    _body_buf: bytearray = field(default_factory=bytearray)
-
     def __post_init__(self) -> None:
         self.fd = self.sock.fileno()
 
@@ -169,69 +160,27 @@ class HTTPConn(BaseHTTPConn):
                 self.body_bytes_received = 0
                 self.idle = True
                 self.close_at = time.monotonic() + self.selector.config.keep_alive_timeout
-                # Per-request state from previous cycle is no longer relevant.
-                self._ctx = None
-                self._continuation = None
-                self._body_buf = bytearray()
 
             event = parser.next_event()
 
             if event is h11.NEED_DATA:
-                if parser.they_are_waiting_for_100_continue:
-                    if self._continuation is not None:
-                        # Body is wanted (handler returned a continuation) —
-                        # tell the client to send it. Fall through to recv.
-                        self.send(h11.InformationalResponse(status_code=100, headers=[], reason="Continue"))
-                    else:
-                        # No body needed — short-circuit with 417.
-                        self.send(h11.Response(status_code=417, headers=[], reason="Expectation Failed"))
-                        continue
                 try:
                     self.receive()
                 except BlockingIOError:
                     return  # Wait for it in the selector
                 self.close_at = time.monotonic() + self.selector.config.rw_timeout
-            elif isinstance(event, h11.Data):
-                self.body_bytes_received += len(event.data)
-                if self.body_bytes_received > self.selector.config.max_body_size:
-                    raise BodyTooLarge(self.body_bytes_received)
-                if self._continuation is not None:
-                    self._body_buf += event.data
-                # Else: pre-body handler returned None — drain silently.
-            elif isinstance(event, h11.EndOfMessage):
-                if self._continuation is not None:
-                    cont = self._continuation
-                    ctx = self._ctx
-                    assert ctx is not None
-                    self._continuation = None
-                    ctx.body = bytes(self._body_buf)
-                    self._body_buf = bytearray()
-                    try:
-                        cont(ctx)
-                    except BodyTooLarge:
-                        raise
-                    except Exception:
-                        self.selector.logger.exception(
-                            "Body handler raised for %s %r", ctx.request.method, ctx.request.target
-                        )
-                        emit_handler_error(ctx)
-                    if ctx.borrowed:
-                        return
-                    if not self.tracked:
-                        return
             elif isinstance(event, h11.Request):
+                # Pre-emptive Content-Length cap: bail before the handler
+                # ever sees an over-large body.
                 cl = content_length(event.headers)
                 if cl is not None and cl > self.selector.config.max_body_size:
                     raise BodyTooLarge(cl)
                 # h11 hands us ``bytes`` for method/target/version and a list
-                # of ``(bytes, bytes)`` tuples for headers. ``bytes(b)`` for an
-                # already-``bytes`` argument returns the same object, so the
-                # wraps were no-ops; the per-tuple comprehension was the only
-                # real cost. ``list(event.headers)`` is a shallow copy that
-                # insulates Request from h11's per-event Headers subclass.
-                # h11 is lenient on method case (per RFC the method is
-                # case-sensitive but most clients send uppercase); normalise
-                # here so consumers can rely on it.
+                # of ``(bytes, bytes)`` tuples for headers. ``list(event.headers)``
+                # is a shallow copy that insulates Request from h11's per-event
+                # Headers subclass. h11 is lenient on method case (per RFC the
+                # method is case-sensitive but most clients send uppercase);
+                # normalise here so consumers can rely on it.
                 target = event.target
                 qix = target.find(b"?")
                 if qix >= 0:
@@ -252,28 +201,36 @@ class HTTPConn(BaseHTTPConn):
                     http_version=event.http_version,
                 )
                 ctx = _HTTPReqCtx(self.selector, self, req)
-                self._ctx = ctx
-                self._body_buf = bytearray()
-                self._continuation = None
                 try:
-                    result = h(ctx)
+                    h(ctx)
                 except BodyTooLarge:
                     raise
                 except Exception:
                     self.selector.logger.exception("Handler raised for %s %r", event.method, event.target)
                     emit_handler_error(ctx)
-                    result = None
-                if result is not None:
-                    self._continuation = result
                 if ctx.borrowed:
-                    return
+                    return  # Worker owns the conn; it'll give back later.
                 if not self.tracked:
-                    return  # connection was closed during error recovery
+                    return  # Conn closed during error recovery.
+                # Handler ran on the selector thread. If it didn't fully
+                # consume the body, keep-alive isn't safe — close the conn
+                # (matches RFC 7230 §6.5 "close after sending response if
+                # the request body wasn't read"). Covers both the
+                # plain "404 without reading body" and the
+                # ``Expect: 100-continue`` "responded without sending 100"
+                # cases.
+                if parser.their_state is not h11.DONE:
+                    self.close()
+                    return
             elif isinstance(event, h11.ConnectionClosed):
                 self.selector.logger.debug("Client closed connection")
                 self.close()
                 return
             else:
+                # Stray Data / EndOfMessage events arrive only when the
+                # handler partially consumed the body and returned. The
+                # ``their_state != DONE`` check above closes us before we
+                # get here, so reaching this branch is a programming error.
                 raise RuntimeError(f"Unexpected {event!r} in the connection loop")
 
     def _try_send_status(self, response: Response, body: bytes) -> None:
@@ -326,7 +283,6 @@ class _HTTPReqCtx:
     conn: HTTPConn
     request: Request
 
-    body: bytes = b""
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     _pending_header_bytes: bytes | None = None
@@ -431,10 +387,11 @@ class _HTTPReqCtx:
         self.finish_response()
 
     def receive(self, size: int = DEFAULT_BUFFER_SIZE, /) -> bytes:
-        """Streaming-read API. Rare under the JSON-API contract — typical
-        callers receive the buffered body via ``ctx.body``. After the
-        :data:`BodyHandler` continuation runs, the body has been fully
-        consumed and the parser's state side reads ``b""``."""
+        """Streaming-read API: pull up to ``size`` bytes of the request
+        body off the wire (or ``b""`` at EOF / end-of-message). Drives
+        the h11 state machine — sends 100 Continue inline if the client
+        is awaiting it. Use :func:`localpost.http.read_body` for the
+        "give me the whole body" common case."""
         parser = self.conn.parser
         if parser.their_state is h11.DONE:
             return b""

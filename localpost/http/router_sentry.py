@@ -33,9 +33,7 @@ Pure Router instrumentation — no Flask import. Use
 
 from __future__ import annotations
 
-import sys
-
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
 from localpost.http._sentry import request_transaction
 from localpost.http.router import Router, _MatchOk
 
@@ -45,13 +43,12 @@ __all__ = ["sentry_router_handler"]
 def sentry_router_handler(router: Router, *, op: str = "http.server") -> RequestHandler:
     """Wrap a :class:`Router` with a Sentry transaction per request.
 
-    The transaction spans the full request, including the post-body
-    continuation when the router defers to one. 404 / 405 paths complete
-    inline and end the transaction in the same call.
+    The transaction spans the full request handler invocation. 404 / 405
+    paths complete inline and end the transaction in the same call.
     """
     inner = router.as_handler()
 
-    def handle(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def handle(ctx: HTTPReqCtx) -> None:
         req = ctx.request
         method = req.method.decode("ascii")
         target = req.target.decode("iso-8859-1")
@@ -67,34 +64,11 @@ def sentry_router_handler(router: Router, *, op: str = "http.server") -> Request
             tx_name = f"{method} {path}"
             source = "url"
 
-        # Manual __enter__/__exit__ because the transaction may need to
-        # span a deferred body handler returned below.
-        tx_cm = request_transaction(op=op, name=tx_name, source=source, method=method, url=target)
-        tx = tx_cm.__enter__()
-
-        def finalize(exc_info: tuple = (None, None, None)) -> None:
-            if ctx.response_status is not None:
-                tx.set_http_status(ctx.response_status)
-            tx_cm.__exit__(*exc_info)
-
-        try:
-            result = inner(ctx)
-        except BaseException:
-            finalize(sys.exc_info())
-            raise
-
-        if result is None:
-            finalize()
-            return None
-
-        def wrapped(req_ctx: HTTPReqCtx) -> None:
+        with request_transaction(op=op, name=tx_name, source=source, method=method, url=target) as tx:
             try:
-                result(req_ctx)
-            except BaseException:
-                finalize(sys.exc_info())
-                raise
-            finalize()
-
-        return wrapped
+                inner(ctx)
+            finally:
+                if ctx.response_status is not None:
+                    tx.set_http_status(ctx.response_status)
 
     return handle

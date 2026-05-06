@@ -21,7 +21,6 @@ def _build_handler():
     mode = os.environ.get("LP_TEST_MODE", "router")
     if mode == "router":
         from localpost.http import (  # noqa: PLC0415
-            BodyHandler,
             HTTPReqCtx,
             Response,
             Routes,
@@ -40,20 +39,15 @@ def _build_handler():
                 body,
             )
 
-        def _ping(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def _ping(ctx: HTTPReqCtx) -> None:
             _emit(ctx, b"pong")
-            return None
 
-        def _slow(ctx: HTTPReqCtx) -> BodyHandler | None:
-            def post_body(ctx: HTTPReqCtx) -> None:
-                time.sleep(float(os.environ.get("LP_TEST_SLOW_S", "0.2")))
-                _emit(ctx, str(threading.get_ident()).encode())
+        def _slow(ctx: HTTPReqCtx) -> None:
+            time.sleep(float(os.environ.get("LP_TEST_SLOW_S", "0.2")))
+            _emit(ctx, str(threading.get_ident()).encode())
 
-            return post_body
-
-        def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def _hello(ctx: HTTPReqCtx) -> None:
             _emit(ctx, f"hi {route_match(ctx).path_args['name']}".encode())
-            return None
 
         routes = Routes()
         routes.get("/ping")(_ping)

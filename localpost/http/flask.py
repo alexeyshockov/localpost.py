@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from flask import Flask
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
+from localpost.http._body import read_body
 from localpost.http._service import http_server
 from localpost.http._types import Response as _Response
 from localpost.http.config import ServerConfig
@@ -32,16 +33,22 @@ __all__ = ["flask_handler", "flask_server"]
 def flask_handler(app: Flask) -> RequestHandler:
     """Wrap a Flask app as a native :class:`RequestHandler`.
 
-    Always returns a :data:`BodyHandler` continuation so the selector
-    buffers the request body into ``ctx.body`` before the Flask
-    pipeline runs (Flask reads it via ``request.get_json`` etc.).
+    The handler reads the full request body via
+    :func:`localpost.http.read_body`, exposes it to Flask as
+    ``wsgi.input``, and streams the response straight to h11.
+
+    Reading the body blocks on the request socket, so this handler
+    **must** be composed with :func:`localpost.http.thread_pool_handler`
+    (or run inside an explicit ``ctx.borrow()`` block) — running it on
+    the selector thread will stall the loop while the upload finishes.
 
     See the module docstring for behaviour differences vs. WSGI — notably,
     the request context stays active during response body streaming.
     """
 
     def run_flask(http_ctx: HTTPReqCtx) -> None:
-        environ = _build_environ(http_ctx)
+        body = read_body(http_ctx)
+        environ = _build_environ(http_ctx, body)
         with app.request_context(environ):
             try:
                 response = app.full_dispatch_request()
@@ -55,10 +62,7 @@ def flask_handler(app: Flask) -> RequestHandler:
             finally:
                 response.close()  # Fire werkzeug's call_on_close callbacks
 
-    def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
-        return run_flask
-
-    return pre_body
+    return run_flask
 
 
 def _write_response(http_ctx: HTTPReqCtx, response) -> None:

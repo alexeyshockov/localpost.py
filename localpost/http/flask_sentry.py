@@ -29,7 +29,8 @@ import sentry_sdk
 from flask import Flask
 from flask import request as flask_request
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._base import HTTPReqCtx, RequestHandler
+from localpost.http._body import read_body
 from localpost.http._sentry import request_transaction
 from localpost.http.flask import _write_response
 from localpost.http.wsgi import _build_environ
@@ -40,13 +41,14 @@ __all__ = ["sentry_flask_handler"]
 def sentry_flask_handler(app: Flask, *, op: str = "http.server") -> RequestHandler:
     """Wrap a Flask app with a Sentry transaction covering the full request, streaming included.
 
-    Always returns a :data:`BodyHandler` continuation — Flask reads
-    ``request`` body internally, so the selector must buffer it before
-    the Flask pipeline runs.
+    Reads the full request body via :func:`localpost.http.read_body`
+    (Flask's WSGI surface needs ``wsgi.input``); composing with
+    :func:`localpost.http.thread_pool_handler` is required.
     """
 
     def run_flask_with_sentry(ctx: HTTPReqCtx) -> None:
-        environ = _build_environ(ctx)
+        body = read_body(ctx)
+        environ = _build_environ(ctx, body)
         method = environ["REQUEST_METHOD"]
         path = environ["PATH_INFO"]
 
@@ -73,7 +75,4 @@ def sentry_flask_handler(app: Flask, *, op: str = "http.server") -> RequestHandl
             finally:
                 response.close()
 
-    def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
-        return run_flask_with_sentry
-
-    return pre_body
+    return run_flask_with_sentry

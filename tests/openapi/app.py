@@ -37,12 +37,17 @@ class FakeCtx:
     """Minimal stand-in for :class:`HTTPReqCtx` for unit tests."""
 
     request: Request
-    body: bytes = b""
+    _body_chunks: list[bytes] = field(default_factory=list)
     attrs: dict[Any, Any] = field(default_factory=dict)
     completed: tuple[Response, bytes] | None = None
 
     def complete(self, response: Response, body: bytes = b"") -> None:
         self.completed = (response, body)
+
+    def receive(self, _size: int = 0, /) -> bytes:
+        if not self._body_chunks:
+            return b""
+        return self._body_chunks.pop(0)
 
 
 def make_ctx(
@@ -62,7 +67,7 @@ def make_ctx(
         headers=headers or [],
         http_version=b"1.1",
     )
-    ctx = FakeCtx(request=request, body=body)
+    ctx = FakeCtx(request=request, _body_chunks=[body] if body else [])
     if path_args is not None:
         ctx.attrs[RouteMatch] = RouteMatch(
             method=HTTPMethod(method),

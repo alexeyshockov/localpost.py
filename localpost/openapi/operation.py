@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from http import HTTPMethod
 from typing import Any, Self
 
-from localpost.http import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http import HTTPReqCtx, RequestHandler, read_body
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
@@ -38,8 +38,10 @@ from localpost.openapi._operation_core import (
 from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.middleware import ApiOperation, OpMiddleware
 from localpost.openapi.resolvers import (
+    BODY_CACHE_KEY,
     ArgResolver,
     ArgResolverFactory,
+    FromBody,
     FromPath,
 )
 from localpost.openapi.results import EventStreamResult, NotFound, Ok, OpResult
@@ -84,6 +86,12 @@ class Operation:
     adapters: AdapterRegistry
     """Type adapters used at request time for body decode and response
     encode. Threaded down from :class:`HttpApp`."""
+
+    needs_body: bool
+    """``True`` iff at least one resolved parameter is a :class:`FromBody`
+    factory. The runtime pre-buffers the request body via
+    :func:`localpost.http.read_body` and stashes it in
+    ``ctx.attrs[BODY_CACHE_KEY]`` before invoking resolvers."""
 
     @classmethod
     def create(
@@ -136,6 +144,8 @@ class Operation:
         description = doc[len(summary) :].lstrip("\n") if doc else ""
         op_id = _make_operation_id(method, path, fn)
 
+        needs_body = any(isinstance(factory, FromBody) for _, _, factory in arg_factories)
+
         return cls(
             method=method,
             path=path,
@@ -150,6 +160,7 @@ class Operation:
             operation_id=op_id,
             description=description,
             adapters=registry,
+            needs_body=needs_body,
         )
 
     # ----- runtime -----
@@ -157,18 +168,16 @@ class Operation:
     def as_handler(self) -> RequestHandler:
         """Build the ``RequestHandler`` registered with the router.
 
-        The pre-body phase returns a ``BodyHandler`` so that
-        :func:`localpost.http.thread_pool_handler` offloads execution to a
-        worker after the request body is buffered. The body handler runs the
-        full operation pipeline: middleware chain → arg resolvers → user fn →
-        response build → ``ctx.complete``.
+        Runs the full operation pipeline in one shot: middleware chain →
+        arg resolvers → user fn → response build → ``ctx.complete``.
+        Operations that consume the request body (parameters with a
+        :class:`FromBody` factory) call :func:`localpost.http.read_body`
+        from inside :meth:`_run_core` — the conn must therefore be on a
+        worker thread (composed via
+        :func:`localpost.http.thread_pool_handler`) before this handler
+        runs.
         """
-        run = self._run
-
-        def pre_body(_ctx: HTTPReqCtx) -> BodyHandler:
-            return run
-
-        return pre_body
+        return self._run
 
     def _run(self, ctx: HTTPReqCtx) -> None:
         chain: ApiOperation = self._run_core
@@ -182,6 +191,8 @@ class Operation:
         an :class:`OpResult`. SSE-shaped returns (generator, iterator,
         :class:`EventStream`) are wrapped in :class:`EventStreamResult`
         so middleware can post-process / wrap the stream uniformly."""
+        if self.needs_body and BODY_CACHE_KEY not in ctx.attrs:
+            ctx.attrs[BODY_CACHE_KEY] = read_body(ctx)
         kwargs: dict[str, object] = {}
         for name, resolver in self.arg_resolvers:
             value = resolver(ctx)

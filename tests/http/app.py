@@ -22,13 +22,13 @@ from anyio import to_thread
 
 from localpost.hosting import ServiceLifetimeView, serve
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Middleware,
     RequestHandler,
     Response,
     ServerConfig,
     http_server,
+    read_body,
     start_http_server,
 )
 from localpost.http.app import HttpApp
@@ -193,7 +193,7 @@ class TestParamInjection:
 
         @app.post("/echo")
         def echo(ctx: HTTPReqCtx):
-            return ctx.body
+            return read_body(ctx)
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with _serve_app(app, cfg) as lt:
@@ -210,7 +210,7 @@ class TestParamInjection:
 
         @app.post("/{name}/profile")
         def update_profile(ctx: HTTPReqCtx, name: str):
-            payload = json.loads(ctx.body)
+            payload = json.loads(read_body(ctx))
             return {"name": name, "payload": payload}
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
@@ -239,12 +239,12 @@ class TestParamInjection:
 
 
 def _add_marker(value: str) -> Middleware:
-    """Pre-body middleware: writes a marker into ctx.attrs."""
+    """Middleware: writes a marker into ctx.attrs before delegating."""
 
     def mw(inner: RequestHandler) -> RequestHandler:
-        def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def wrapped(ctx: HTTPReqCtx) -> None:
             ctx.attrs.setdefault("markers", []).append(value)
-            return inner(ctx)
+            inner(ctx)
 
         return wrapped
 
@@ -253,7 +253,7 @@ def _add_marker(value: str) -> Middleware:
 
 def _short_circuit_with_status(status: int, body: bytes) -> Middleware:
     def mw(inner: RequestHandler) -> RequestHandler:
-        def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def wrapped(ctx: HTTPReqCtx) -> None:
             ctx.complete(
                 Response(
                     status_code=status,
@@ -261,7 +261,7 @@ def _short_circuit_with_status(status: int, body: bytes) -> Middleware:
                 ),
                 body,
             )
-            return None  # do not call inner
+            # Do not call inner.
 
         return wrapped
 
@@ -275,17 +275,8 @@ class TestMiddleware:
         def capturing_mw(inner):
             def wrapped(ctx):
                 captured.append("before")
-                result = inner(ctx)
-                if result is None:
-                    captured.append("after-inline")
-                    return None
-
-                # wrap continuation
-                def post(ctx):
-                    result(ctx)
-                    captured.append("after-body")
-
-                return post
+                inner(ctx)
+                captured.append("after")
 
             return wrapped
 
@@ -304,7 +295,7 @@ class TestMiddleware:
             lt.shutdown()
             await lt.stopped
 
-        assert captured == ["before", "after-body"]
+        assert captured == ["before", "after"]
 
     async def test_app_middleware_short_circuits_pre_body(self, free_port):
         app = HttpApp(middleware=[_short_circuit_with_status(401, b"unauthorized")])
@@ -354,7 +345,7 @@ class TestMiddleware:
         def echo(ctx: HTTPReqCtx):
             return {
                 "markers": ctx.attrs.get("markers", []),
-                "body": ctx.body.decode("utf-8"),
+                "body": read_body(ctx).decode("utf-8"),
             }
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
@@ -500,7 +491,7 @@ class TestStreamingRoutes:
 
         app = HttpApp()
 
-        @app.post("/upload", buffer_body=False)
+        @app.post("/upload")
         def upload(ctx: HTTPReqCtx):
             chunks: list[bytes] = []
             while True:
@@ -531,7 +522,7 @@ class TestStreamingRoutes:
     async def test_streaming_route_oversized_chunked_body_returns_413(self, free_port, http_backend):
         app = HttpApp()
 
-        @app.post("/upload", buffer_body=False)
+        @app.post("/upload")
         def upload(ctx: HTTPReqCtx):
             while ctx.receive(8192):
                 pass
@@ -565,7 +556,7 @@ class TestStreamingRoutes:
 
         app = HttpApp()
 
-        @app.post("/upload", buffer_body=False)
+        @app.post("/upload")
         def upload(ctx: HTTPReqCtx):
             chunks: list[bytes] = []
             while True:
@@ -616,8 +607,8 @@ class TestStreamingRoutes:
             def dispatch(req_ctx: HTTPReqCtx) -> None:
                 conn = cast(Any, req_ctx).conn
                 conn.selector.stop_tracking(conn)
-                captured["buffer_before_receive"] = bytes(conn._streaming_body_buf)
-                captured["eom_before_receive"] = conn._streaming_eom
+                captured["buffer_before_receive"] = bytes(conn._body_buf)
+                captured["eom_before_receive"] = conn._body_eom
                 chunks: list[bytes] = []
                 while True:
                     chunk = req_ctx.receive(8192)
@@ -666,7 +657,7 @@ class TestStreamingRoutes:
 
         app = HttpApp()
 
-        @app.post("/upload", buffer_body=False)
+        @app.post("/upload")
         def upload(ctx: HTTPReqCtx):
             total = 0
             while True:
@@ -716,19 +707,6 @@ class TestStreamingRoutes:
 
         assert captured == ["upload:1024", "ping"]
 
-    def test_streaming_route_with_pool_disabled_raises(self):
-        """Registering a streaming route on an HttpApp with ``pooled=False``
-        raises ``RuntimeError`` when the dispatcher is built."""
-        app = HttpApp(pooled=False)
-
-        @app.post("/upload", buffer_body=False)
-        def upload(ctx: HTTPReqCtx):  # pragma: no cover
-            return "x"
-
-        assert upload is not None
-        # Buffered routes work fine without a pool, but streaming ones don't.
-        with pytest.raises(RuntimeError, match="streaming route"):
-            app._build_router_handler(None)
 
 
 # Avoid "imported but unused" lints — the helper is part of the public smoke API.

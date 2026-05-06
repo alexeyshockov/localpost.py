@@ -23,7 +23,6 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Request,
     Response,
@@ -110,7 +109,7 @@ class _Outcome:
     response: Response | None
 
 
-def _route_handler(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _route_handler(ctx: HTTPReqCtx) -> None:
     ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
     return None
 

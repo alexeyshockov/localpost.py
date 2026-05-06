@@ -46,13 +46,17 @@ The hot path is tuned for the JSON web-API common case, and we cut
 corners on shapes that don't fit it:
 
 - **Reject before body.** Handlers that decide based on headers
-  (no-route, wrong method, auth) return `None` and the body is never
-  recv'd. No worker hop, no allocation.
-- **Body is buffered, not streamed.** When a handler needs the body
-  (e.g. to deserialise JSON), it needs the *whole* body. The selector
-  buffers it into `ctx.body` and invokes a `BodyHandler` continuation;
-  the continuation just reads `ctx.body`. There is still a
-  `ctx.receive(size)` streaming API but it isn't the optimised path.
+  (no-route, wrong method, auth) reply with `ctx.complete(...)`
+  inline; the body is never recv'd. No worker hop, no allocation.
+  `Content-Length` is pre-checked against `max_body_size` on
+  headers-complete — over-cap requests get 413 before the handler
+  ever sees them.
+- **Read body explicitly when you need it.** Handlers that need the
+  whole body (e.g. to deserialise JSON) call
+  `localpost.http.read_body(ctx)` to drain `ctx.receive(size)` into
+  bytes. Frameworks (`HttpApp`, `wrap_wsgi`, `flask_handler`) call it
+  for you when their typed surface needs the body. The server core
+  never pre-buffers.
 - **Response is one chunk or SSE.** Most responses are one
   status+headers+body block; SSE generators emit the same opening
   block then per-event chunks. The response writer auto-buffers
@@ -91,7 +95,8 @@ def hello(name: str):
 @app.post("/{name}/profile")
 def update_profile(ctx: HTTPReqCtx, name: str):
     import json
-    profile = json.loads(ctx.body)
+    from localpost.http import read_body
+    profile = json.loads(read_body(ctx))
     return {"updated": name, "profile": profile}
 
 
@@ -176,7 +181,7 @@ The wire-driver trio (`start_response` / `send` / `finish_response`) is **not** 
 
 ### Dispatch chain
 
-The internals are a four-link, loose-coupled chain:
+The internals are a three-link, loose-coupled chain:
 
 ```
 Selector  ── owns fd→SelectorCallback map; nothing HTTP-specific
@@ -185,10 +190,9 @@ Selector  ── owns fd→SelectorCallback map; nothing HTTP-specific
 ConnHandler  ── after-accept policy; owns RequestHandler + ConnFactory;
    │              decides which Selector tracks the new conn
    ▼
-RequestHandler  ── pre-body dispatch; returns BodyHandler|None
-   │
-   ▼
-BodyHandler  ── post-body continuation
+RequestHandler  ── single-shot dispatch on headers-complete; handlers
+                   that need the body call ``ctx.receive(size)`` /
+                   ``localpost.http.read_body(ctx)`` themselves
 ```
 
 Each link knows only the next. `Selector` doesn't carry a `RequestHandler` —
@@ -213,8 +217,10 @@ thread + N worker selectors) drop in without touching the request hot path.
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
 | `start_http_server(cfg, handler)` | Context manager yielding a `Server` bound to ``handler`` |
-| `HTTPReqCtx`              | Per-request context (`request`, `body`, `complete`, `stream`, `sendfile`, `disconnected`) |
+| `HTTPReqCtx`              | Per-request context (`request`, `complete`, `stream`, `sendfile`, `receive`, `disconnected`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
+| `read_body(ctx, *, max_size=...)` | Drain `ctx.receive(size)` into a single `bytes`. Raises `BodyTooLarge` on overflow. Sync; the conn must be borrowed (or wrapped in `thread_pool_handler`). |
+| `aread_body(ctx, *, max_size=...)` | Async sibling of `read_body` — drains `await ctx.receive(size)`. |
 
 ### Selector / accept-side topology
 
@@ -266,7 +272,7 @@ server.
 | ------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `AsyncHTTPReqCtx`                                       | Async sibling of `HTTPReqCtx`. Same `request` / `body` / `attrs` / addrs / `scheme`; async `complete` / `stream` / `receive` / `sendfile`; `disconnected: bool` poll for peer-gone. Re-exported from `localpost.http`. |
 | `AsyncRequestHandler`                                   | `Callable[[AsyncHTTPReqCtx], Awaitable[None]]`. The handler shape `to_asgi` adapts. |
-| `to_asgi(handler, *, max_body_size=1<<20, streaming=False)` | Wrap an `AsyncRequestHandler` as an ASGI 3 app. Pre-buffers the request body by default (capped by `max_body_size`; over-cap → 413 before dispatch). Pass `streaming=True` to skip the pre-buffer — the handler then pulls chunks via `await ctx.receive(size)`; `Content-Length` is pre-checked against `max_body_size` when present. Same handler code works either way. |
+| `to_asgi(handler, *, max_body_size=1<<20)` | Wrap an `AsyncRequestHandler` as an ASGI 3 app. Body bytes are pulled lazily via `await ctx.receive(size)` (or `aread_body(ctx)` for the whole-body common case); `Content-Length` is pre-checked against `max_body_size` when present (413 before dispatch). |
 
 Deployment is the standard ASGI pattern:
 
@@ -315,7 +321,7 @@ Install: `pip install 'localpost[rsgi]'` (pulls in `granian`).
 
 | Symbol                                                       | Notes                                                                       |
 | ------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `to_rsgi(handler, *, max_body_size=1<<20, streaming=False)`  | Wrap an `AsyncRequestHandler` as an RSGI app for `granian --interface rsgi`. Same buffered / streaming options as `to_asgi`. Single eager `proto.response_bytes` per `complete`; zero-copy `proto.response_file_range` for `sendfile` when the file has a path; chunked stream fallback otherwise. |
+| `to_rsgi(handler, *, max_body_size=1<<20)`  | Wrap an `AsyncRequestHandler` as an RSGI app for `granian --interface rsgi`. Body bytes are pulled lazily via `await ctx.receive(size)`. Single eager `proto.response_bytes` per `complete`; zero-copy `proto.response_file_range` for `sendfile` when the file has a path; chunked stream fallback otherwise. |
 
 Deployment is the standard Granian pattern:
 
@@ -373,10 +379,9 @@ Behavior:
 - **Range**: single byte-range only (`bytes=N-M`, `bytes=N-`, `bytes=-K`).
   Multi-range / unparseable falls back to 200 (RFC 7233 §3.1 compliant).
   Out-of-bounds → 416 with `Content-Range: bytes */<size>`.
-- **Body**: 200 / 206 GET returns a `BodyHandler` that calls
-  `ctx.sendfile(...)` — wrap in `thread_pool_handler` to dispatch the
-  syscall to a worker. HEAD success / 304 / 416 / 404 / 405 complete
-  inline on the selector.
+- **Body**: 200 / 206 GET opens the file and calls `ctx.sendfile(...)`
+  — wrap in `thread_pool_handler` to dispatch the syscall to a worker.
+  HEAD success / 304 / 416 / 404 / 405 complete inline on the selector.
 
 #### Recommended composition
 
@@ -579,8 +584,8 @@ on the documented public Flask API.
 
 #### Threading topologies
 
-`http_server` supports three accept-side shapes, all sharing the same
-`RequestHandler` / `BodyHandler` chain:
+`http_server` supports three accept-side shapes, all driving the same
+`RequestHandler` (single-shot dispatch on headers-complete):
 
 | Configuration                         | Threads                                       | When to use |
 | ------------------------------------- | --------------------------------------------- | ----------- |

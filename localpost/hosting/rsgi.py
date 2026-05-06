@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, final
 from localpost._utils import wait_all
 from localpost.hosting._host import ServiceF, ServiceLifetime, serve
 from localpost.http._async_base import AsyncRequestHandler
-from localpost.http.rsgi import _dispatch_buffered, _dispatch_streaming
+from localpost.http.rsgi import _dispatch
 
 if TYPE_CHECKING:
     from localpost.openapi.aio.app import HttpAsyncApp
@@ -54,9 +54,6 @@ class HostRSGIApp:
             or an :class:`HttpAsyncApp` (the framework will compile its
             route table internally).
         max_body_size: Cap on the request body. See :func:`to_rsgi`.
-        streaming: When ``True``, body chunks are pulled via
-            ``await ctx.receive(size)`` instead of pre-buffered. See
-            :func:`to_rsgi`.
 
     Example::
 
@@ -92,7 +89,6 @@ class HostRSGIApp:
         "_ready",
         "_services",
         "_shutdown_signal",
-        "_streaming",
     )
 
     def __init__(
@@ -101,12 +97,10 @@ class HostRSGIApp:
         services: Sequence[ServiceF],
         rsgi_handler: AsyncRequestHandler | HttpAsyncApp,
         max_body_size: int = 1 << 20,
-        streaming: bool = False,
     ) -> None:
         self._services = tuple(services)
         self._handler = _resolve_handler(rsgi_handler)
         self._max_body_size = max_body_size
-        self._streaming = streaming
         self._ready: asyncio.Event | None = None
         self._shutdown_signal: asyncio.Event | None = None
         self._lifecycle_task: asyncio.Task[None] | None = None
@@ -155,10 +149,7 @@ class HostRSGIApp:
     async def __rsgi__(self, scope: Any, proto: Any) -> None:
         if self._ready is not None and not self._ready.is_set():
             await self._ready.wait()
-        if self._streaming:
-            await _dispatch_streaming(self._handler, self._max_body_size, scope, proto)
-        else:
-            await _dispatch_buffered(self._handler, self._max_body_size, scope, proto)
+        await _dispatch(self._handler, self._max_body_size, scope, proto)
 
     def __rsgi_del__(self, loop: Any) -> None:
         """Signal the lifecycle task to shut down.

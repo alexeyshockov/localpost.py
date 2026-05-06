@@ -48,7 +48,7 @@ class FakeAsyncCtx:
     """Minimal async ctx for unit tests — captures the response."""
 
     request: Request
-    body: bytes = b""
+    _body_chunks: list[bytes] = field(default_factory=list)
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     completed: tuple[Response, bytes] | None = None
@@ -79,8 +79,10 @@ class FakeAsyncCtx:
         self.streamed = (response, captured)
         self.response_status = response.status_code
 
-    async def receive(self, size: int = 65536, /) -> bytes:
-        return self.body if size >= len(self.body) else self.body[:size]
+    async def receive(self, _size: int = 65536, /) -> bytes:
+        if not self._body_chunks:
+            return b""
+        return self._body_chunks.pop(0)
 
     async def sendfile(self, response: Response, file, offset: int, count: int) -> None:
         # Test fake — sendfile isn't exercised in this suite.
@@ -104,7 +106,7 @@ def make_async_ctx(
         headers=headers or [],
         http_version=b"1.1",
     )
-    ctx = FakeAsyncCtx(request=request, body=body)
+    ctx = FakeAsyncCtx(request=request, _body_chunks=[body] if body else [])
     if path_args is not None:
         ctx.attrs[RouteMatch] = RouteMatch(
             method=HTTPMethod(method),
