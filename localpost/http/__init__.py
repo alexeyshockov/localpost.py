@@ -13,6 +13,7 @@ from localpost.http._base import (
     compose,
     start_http_server,
 )
+from localpost.http._body import aread_body, read_body
 from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
@@ -85,4 +86,7 @@ __all__ = [
     # cancellation
     "check_cancelled",
     "RequestCancelled",
+    # body helpers
+    "read_body",
+    "aread_body",
 ]
