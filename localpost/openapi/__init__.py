@@ -38,6 +38,16 @@ To plug in another schema library, supply a custom
 
 from localpost.openapi import spec
 from localpost.openapi.adapters import AdapterRegistry, TypeAdapter, default_registry
+from localpost.openapi.aio import (
+    AsyncApiOperation,
+    AsyncHttpBasicAuth,
+    AsyncHttpBearerAuth,
+    AsyncHTTPReqCtx,
+    AsyncOperation,
+    AsyncOpMiddleware,
+    HttpAsyncApp,
+    async_op_middleware,
+)
 from localpost.openapi.app import HttpApp
 from localpost.openapi.auth import HttpBasicAuth, HttpBearerAuth
 from localpost.openapi.middleware import ApiOperation, OpMiddleware, op_middleware
@@ -49,6 +59,7 @@ from localpost.openapi.resolvers import (
     FromHeader,
     FromPath,
     FromQuery,
+    ResolverCtx,
 )
 from localpost.openapi.results import (
     Accepted,
@@ -70,20 +81,31 @@ from localpost.openapi.schemas import REF_TEMPLATE, SchemaRegistry
 from localpost.openapi.sse import Event, EventStream
 
 __all__ = [
-    # core
+    # core (sync)
     "HttpApp",
     "Operation",
+    # core (async)
+    "HttpAsyncApp",
+    "AsyncOperation",
+    "AsyncHTTPReqCtx",
     # spec sub-module (advanced; not all symbols flattened)
     "spec",
-    # middleware
+    # middleware (sync)
     "ApiOperation",
     "OpMiddleware",
     "op_middleware",
     "HttpBearerAuth",
     "HttpBasicAuth",
+    # middleware (async)
+    "AsyncApiOperation",
+    "AsyncOpMiddleware",
+    "async_op_middleware",
+    "AsyncHttpBearerAuth",
+    "AsyncHttpBasicAuth",
     # arg resolvers
     "ArgResolver",
     "ArgResolverFactory",
+    "ResolverCtx",
     "FromPath",
     "FromQuery",
     "FromHeader",

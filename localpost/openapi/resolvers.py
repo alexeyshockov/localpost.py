@@ -16,7 +16,7 @@ import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from types import NoneType, UnionType
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Protocol, Union, get_args, get_origin, runtime_checkable
 from urllib.parse import parse_qs
 
 import msgspec
@@ -28,11 +28,12 @@ from localpost.openapi.results import BadRequest, OpResult
 from localpost.openapi.schemas import SchemaRegistry
 
 if TYPE_CHECKING:
-    from localpost.http import HTTPReqCtx
+    from localpost.http._types import Request
 
 __all__ = [
     "ArgResolver",
     "ArgResolverFactory",
+    "ResolverCtx",
     "FromBody",
     "FromHeader",
     "FromPath",
@@ -46,8 +47,24 @@ __all__ = [
 _QUERY_CACHE_KEY = "__lp_openapi_query__"
 
 
+@runtime_checkable
+class ResolverCtx(Protocol):
+    """Minimal request-context shape an :class:`ArgResolver` reads.
+
+    Both :class:`localpost.http.HTTPReqCtx` (sync) and
+    :class:`localpost.openapi.aio.AsyncHTTPReqCtx` (async) are
+    structurally compatible — they both expose ``request`` / ``body`` /
+    ``attrs`` synchronously. Restricting :class:`ArgResolver` to this
+    minimal protocol means the same factories work in both flavours.
+    """
+
+    request: Request
+    body: bytes
+    attrs: dict[Any, Any]
+
+
 class ArgResolver(Protocol):
-    def __call__(self, ctx: HTTPReqCtx, /) -> object | OpResult: ...
+    def __call__(self, ctx: ResolverCtx, /) -> object | OpResult: ...
 
 
 class ArgResolverFactory(Protocol):
@@ -154,11 +171,11 @@ def is_body_type(t: Any, adapters: AdapterRegistry | None = None) -> bool:
     return registry.for_type(t).is_body_type(t)
 
 
-def _route_match(ctx: HTTPReqCtx) -> RouteMatch:
+def _route_match(ctx: ResolverCtx) -> RouteMatch:
     return ctx.attrs[RouteMatch]
 
 
-def _query_args(ctx: HTTPReqCtx) -> dict[str, list[str]]:
+def _query_args(ctx: ResolverCtx) -> dict[str, list[str]]:
     cached = ctx.attrs.get(_QUERY_CACHE_KEY)
     if cached is not None:
         return cached
@@ -182,7 +199,7 @@ class FromPath:
         var_name = self.name or param.name
         target = _unwrap_annotated(param.annotation)
 
-        def resolve(ctx: HTTPReqCtx) -> object | OpResult:
+        def resolve(ctx: ResolverCtx) -> object | OpResult:
             raw = _route_match(ctx).path_args.get(var_name)
             if raw is None:
                 return BadRequest(f"Missing path parameter: {var_name}")
@@ -237,7 +254,7 @@ class FromQuery:
         elem_type = _list_element_type(target)
         is_list = elem_type is not None
 
-        def resolve(ctx: HTTPReqCtx) -> object | OpResult:
+        def resolve(ctx: ResolverCtx) -> object | OpResult:
             values = _query_args(ctx).get(param_name)
             if not values:
                 if optional:
@@ -289,7 +306,7 @@ class FromHeader:
         header_name = (self.name or param.name.replace("_", "-")).lower().encode("ascii")
         target, optional, default = _is_optional_param(param)
 
-        def resolve(ctx: HTTPReqCtx) -> object | OpResult:
+        def resolve(ctx: ResolverCtx) -> object | OpResult:
             value: str | None = None
             for name, val in ctx.request.headers:
                 if name == header_name:
@@ -368,7 +385,7 @@ class FromBody:
 
             converter = _adapter_decode
 
-        def resolve(ctx: HTTPReqCtx) -> object | OpResult:
+        def resolve(ctx: ResolverCtx) -> object | OpResult:
             try:
                 return converter(ctx.body, target)
             except validation_errors as exc:
