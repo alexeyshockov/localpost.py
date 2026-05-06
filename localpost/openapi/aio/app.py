@@ -6,6 +6,13 @@ default — :meth:`asgi` returns an ASGI 3 callable suitable for
 ``uvicorn``, ``hypercorn``, or ``granian --interface asgi``.
 :meth:`service` wires up uvicorn under :mod:`localpost.hosting` for
 ``hosting.run_app(app.service(config))`` parity with the sync flavour.
+
+Transport translation lives in :mod:`localpost.http.asgi` —
+:meth:`asgi` is sugar over :func:`localpost.http.to_asgi`. The route
+table + 404/405/built-ins are built once in
+:meth:`_build_async_handler` as a plain :data:`AsyncRequestHandler`,
+exactly mirroring how :class:`HttpApp` builds a sync
+:data:`RequestHandler` for :func:`localpost.http.to_wsgi`.
 """
 
 from __future__ import annotations
@@ -16,22 +23,13 @@ from dataclasses import dataclass, replace
 from http import HTTPMethod
 from typing import Any, Literal
 
-import anyio
-
+from localpost.http import AsyncHTTPReqCtx, AsyncRequestHandler, to_asgi
 from localpost.http._types import Response
+from localpost.http.asgi import ASGIApp
 from localpost.http.router import RouteMatch, URITemplate
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi._docs import redoc_html, scalar_html, swagger_html
 from localpost.openapi.adapters import AdapterRegistry, default_registry
-from localpost.openapi.aio._ctx import (
-    ASGIReceive,
-    ASGIScope,
-    ASGISend,
-    _ASGIReqCtx,
-    addrs_from_scope,
-    build_request_from_scope,
-    read_body,
-)
 from localpost.openapi.aio.middleware import AsyncOpMiddleware
 from localpost.openapi.aio.operation import AsyncOperation
 from localpost.openapi.schemas import SchemaRegistry
@@ -41,9 +39,6 @@ __all__ = ["HttpAsyncApp"]
 
 _FluentDecorator = Callable[[Callable[..., Any]], Callable[..., Any]]
 DocsUI = Literal["swagger", "redoc", "scalar", "all"]
-
-# Per-request callable: builds and writes the response over ``ctx``.
-type _AsyncHandler = Callable[[_ASGIReqCtx], Awaitable[None]]
 
 
 class HttpAsyncApp:
@@ -178,19 +173,16 @@ class HttpAsyncApp:
 
     # ----- Hosting -----
 
-    def asgi(self) -> Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]:
+    def asgi(self) -> ASGIApp:
         """Return an ASGI 3 callable that dispatches this app.
 
-        Deploy with e.g. ``uvicorn myapp:asgi_app`` or
-        ``granian --interface asgi myapp:asgi_app``::
-
-            app = HttpAsyncApp()
-            asgi_app = app.asgi()
-
-        The returned callable handles ``lifespan`` (no-op) and ``http``
-        scopes. WebSocket scopes are rejected.
+        Sugar over :func:`localpost.http.to_asgi` — the app's route
+        table plus built-in ``/openapi.json`` and ``/docs`` UIs are
+        compiled once into a single :data:`AsyncRequestHandler`, then
+        wrapped by the ASGI bridge. Deploy with e.g. ``uvicorn
+        myapp:asgi_app`` or ``granian --interface asgi myapp:asgi_app``.
         """
-        return _AsgiDispatch.from_app(self)
+        return to_asgi(self._build_async_handler(), max_body_size=self._max_body_size)
 
     def service(
         self,
@@ -204,10 +196,6 @@ class HttpAsyncApp:
         :class:`uvicorn.Config` for ``server="uvicorn"`` (the default) or
         :class:`hypercorn.Config` for ``server="hypercorn"``. Both
         servers are configured with the ASGI app from :meth:`asgi`.
-
-        Pulls the ``localpost.hosting.services.uvicorn`` /
-        ``hypercorn`` adapters lazily so the import only happens when
-        the user picks that server.
         """
         asgi_app = self.asgi()
         if server == "uvicorn":
@@ -220,6 +208,85 @@ class HttpAsyncApp:
 
             return hypercorn_server(asgi_app, config)
         raise ValueError(f"Unknown ASGI server: {server!r}")
+
+    # ----- Internals -----
+
+    def _build_async_handler(self) -> AsyncRequestHandler:
+        """Compile the route table + built-ins into a single
+        :data:`AsyncRequestHandler`. Symmetric with
+        :meth:`HttpApp._build_router_handler`."""
+        bucket: dict[str, _RouteEntry] = {}
+
+        def add(method: HTTPMethod, template: URITemplate, handler: _AsyncMatchedHandler) -> None:
+            entry = bucket.setdefault(template.template, _RouteEntry(template=template, methods={}))
+            if method in entry.methods:
+                raise ValueError(f"Duplicate route: {method.value} {template.template}")
+            entry.methods[method] = handler
+
+        for op in self._operations:
+            add(op.method, op.template, _async_op_handler(op))
+
+        if self._openapi_path:
+            add(
+                HTTPMethod.GET,
+                URITemplate.parse(self._openapi_path),
+                _static_handler(self._openapi_bytes, b"application/json"),
+            )
+        if self._docs_path and self._openapi_path:
+            ui = self._docs_ui
+            html_ct = b"text/html; charset=utf-8"
+            if ui in ("swagger", "all"):
+                add(
+                    HTTPMethod.GET,
+                    URITemplate.parse(self._docs_path),
+                    _static_handler(_const_bytes(swagger_html(self._openapi_path)), html_ct),
+                )
+            if ui in ("redoc", "all"):
+                add(
+                    HTTPMethod.GET,
+                    URITemplate.parse(f"{self._docs_path}/redoc"),
+                    _static_handler(_const_bytes(redoc_html(self._openapi_path)), html_ct),
+                )
+            if ui in ("scalar", "all"):
+                add(
+                    HTTPMethod.GET,
+                    URITemplate.parse(f"{self._docs_path}/scalar"),
+                    _static_handler(_const_bytes(scalar_html(self._openapi_path)), html_ct),
+                )
+
+        entries = tuple(bucket.values())
+
+        async def dispatch(ctx: AsyncHTTPReqCtx) -> None:
+            path = ctx.request.path.decode("iso-8859-1")
+            method_str = ctx.request.method.decode("ascii")
+            try:
+                method = HTTPMethod(method_str)
+            except ValueError:
+                method = None
+
+            match = _match(entries, path, method)
+            if isinstance(match, _MatchNotFound):
+                await ctx.complete(_canned_response(404, b"Not Found"), b"Not Found")
+                return
+            if isinstance(match, _MatchMethodNotAllowed):
+                await ctx.complete(
+                    _canned_response(
+                        405,
+                        b"Method Not Allowed",
+                        extra_headers=[(b"allow", match.allow.encode("ascii"))],
+                    ),
+                    b"Method Not Allowed",
+                )
+                return
+
+            ctx.attrs[RouteMatch] = RouteMatch(
+                method=method or HTTPMethod.GET,
+                matched_template=match.template,
+                path_args=match.path_args,
+            )
+            await match.handler(ctx)
+
+        return dispatch
 
 
 def _ensure_async_middleware(mw: object) -> None:
@@ -244,20 +311,24 @@ def _ensure_async_middleware(mw: object) -> None:
         )
 
 
-# --- ASGI dispatch -------------------------------------------------------
+# --- Route-table helpers ------------------------------------------------
+
+# Matched-handler shape — same as AsyncRequestHandler but spelled out so
+# the route table types stay readable.
+type _AsyncMatchedHandler = Callable[[AsyncHTTPReqCtx], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
 class _RouteEntry:
     template: URITemplate
-    methods: dict[HTTPMethod, _AsyncHandler]
+    methods: dict[HTTPMethod, _AsyncMatchedHandler]
 
 
 @dataclass(frozen=True, slots=True)
 class _MatchOk:
     template: URITemplate
     path_args: dict[str, str]
-    handler: _AsyncHandler
+    handler: _AsyncMatchedHandler
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,153 +344,39 @@ class _MatchMethodNotAllowed:
 _MATCH_NOT_FOUND = _MatchNotFound()
 
 
-class _AsgiDispatch:
-    """Composed ASGI dispatcher for an :class:`HttpAsyncApp`.
-
-    Built once per :meth:`HttpAsyncApp.asgi` call. Stores the route table
-    and exposes a single ``__call__(scope, receive, send)`` that handles
-    ``lifespan`` and ``http`` scopes.
-    """
-
-    __slots__ = ("_entries", "_max_body_size")
-
-    def __init__(self, entries: tuple[_RouteEntry, ...], max_body_size: int) -> None:
-        self._entries = entries
-        self._max_body_size = max_body_size
-
-    @classmethod
-    def from_app(cls, app: HttpAsyncApp) -> _AsgiDispatch:
-        bucket: dict[str, _RouteEntry] = {}
-
-        def add(method: HTTPMethod, template: URITemplate, handler: _AsyncHandler) -> None:
-            entry = bucket.setdefault(template.template, _RouteEntry(template=template, methods={}))
-            if method in entry.methods:
-                raise ValueError(f"Duplicate route: {method.value} {template.template}")
-            entry.methods[method] = handler
-
-        for op in app.operations:
-            add(op.method, op.template, _async_op_handler(op))
-
-        if app._openapi_path:
-            add(
-                HTTPMethod.GET,
-                URITemplate.parse(app._openapi_path),
-                _static_handler(app._openapi_bytes, b"application/json"),
-            )
-        if app._docs_path and app._openapi_path:
-            ui = app._docs_ui
-            html_ct = b"text/html; charset=utf-8"
-            if ui in ("swagger", "all"):
-                add(
-                    HTTPMethod.GET,
-                    URITemplate.parse(app._docs_path),
-                    _static_handler(_const_bytes(swagger_html(app._openapi_path)), html_ct),
-                )
-            if ui in ("redoc", "all"):
-                add(
-                    HTTPMethod.GET,
-                    URITemplate.parse(f"{app._docs_path}/redoc"),
-                    _static_handler(_const_bytes(redoc_html(app._openapi_path)), html_ct),
-                )
-            if ui in ("scalar", "all"):
-                add(
-                    HTTPMethod.GET,
-                    URITemplate.parse(f"{app._docs_path}/scalar"),
-                    _static_handler(_const_bytes(scalar_html(app._openapi_path)), html_ct),
-                )
-
-        return cls(entries=tuple(bucket.values()), max_body_size=app._max_body_size)
-
-    async def __call__(self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend) -> None:
-        kind = scope.get("type")
-        if kind == "lifespan":
-            await _handle_lifespan(receive, send)
-            return
-        if kind != "http":
-            raise ValueError(f"HttpAsyncApp: unsupported ASGI scope type: {kind!r}")
-        await self._handle_http(scope, receive, send)
-
-    async def _handle_http(self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend) -> None:
-        path = scope["path"]
-        method_str = scope["method"]
-        try:
-            method = HTTPMethod(method_str)
-        except ValueError:
-            method = None
-
-        match = self._match(path, method)
-        if isinstance(match, _MatchNotFound):
-            await _send_canned(send, 404, b"Not Found")
-            return
-        if isinstance(match, _MatchMethodNotAllowed):
-            await _send_canned(
-                send,
-                405,
-                b"Method Not Allowed",
-                extra_headers=[(b"allow", match.allow.encode("ascii"))],
-            )
-            return
-
-        try:
-            body = await read_body(receive, self._max_body_size)
-        except ValueError:
-            await _send_canned(send, 413, b"Payload Too Large")
-            return
-
-        request = build_request_from_scope(scope)
-        remote, local = addrs_from_scope(scope)
-        disconnected = threading.Event()
-        ctx = _ASGIReqCtx(
-            request=request,
-            body=body,
-            remote_addr=remote,
-            local_addr=local,
-            scheme=str(scope.get("scheme", "http")),
-            _send=send,
-            _disconnected=disconnected,
-        )
-        ctx.attrs[RouteMatch] = RouteMatch(
-            method=method or HTTPMethod.GET,
-            matched_template=match.template,
-            path_args=match.path_args,
-        )
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_watch_disconnect, receive, disconnected)
-            try:
-                await match.handler(ctx)
-            finally:
-                tg.cancel_scope.cancel()
-
-    def _match(self, path: str, method: HTTPMethod | None) -> _MatchOk | _MatchNotFound | _MatchMethodNotAllowed:
-        any_template_matched = False
-        allow: set[HTTPMethod] = set()
-        for entry in self._entries:
-            args = entry.template.match(path)
-            if args is None:
-                continue
-            any_template_matched = True
-            allow.update(entry.methods)
-            if method is None:
-                continue
-            handler = entry.methods.get(method)
-            if handler is None:
-                continue
-            return _MatchOk(template=entry.template, path_args=args, handler=handler)
-        if any_template_matched:
-            return _MatchMethodNotAllowed(allow=", ".join(sorted(m.value for m in allow)))
-        return _MATCH_NOT_FOUND
+def _match(
+    entries: tuple[_RouteEntry, ...],
+    path: str,
+    method: HTTPMethod | None,
+) -> _MatchOk | _MatchNotFound | _MatchMethodNotAllowed:
+    any_template_matched = False
+    allow: set[HTTPMethod] = set()
+    for entry in entries:
+        args = entry.template.match(path)
+        if args is None:
+            continue
+        any_template_matched = True
+        allow.update(entry.methods)
+        if method is None:
+            continue
+        handler = entry.methods.get(method)
+        if handler is None:
+            continue
+        return _MatchOk(template=entry.template, path_args=args, handler=handler)
+    if any_template_matched:
+        return _MatchMethodNotAllowed(allow=", ".join(sorted(m.value for m in allow)))
+    return _MATCH_NOT_FOUND
 
 
-def _async_op_handler(op: AsyncOperation) -> _AsyncHandler:
-    async def run(ctx: _ASGIReqCtx) -> None:
+def _async_op_handler(op: AsyncOperation) -> _AsyncMatchedHandler:
+    async def run(ctx: AsyncHTTPReqCtx) -> None:
         await op.run(ctx)
 
     return run
 
 
-def _static_handler(body_provider: Callable[[], bytes], content_type: bytes) -> _AsyncHandler:
-    async def run(ctx: _ASGIReqCtx) -> None:
+def _static_handler(body_provider: Callable[[], bytes], content_type: bytes) -> _AsyncMatchedHandler:
+    async def run(ctx: AsyncHTTPReqCtx) -> None:
         body = body_provider()
         response = Response(
             status_code=200,
@@ -440,48 +397,15 @@ def _const_bytes(value: bytes) -> Callable[[], bytes]:
     return provider
 
 
-async def _watch_disconnect(receive: ASGIReceive, flag: threading.Event) -> None:
-    """Drain ASGI events while the handler runs; flip ``flag`` on
-    ``http.disconnect``. Loop ends silently when the task group cancels."""
-    try:
-        while True:
-            event = await receive()
-            if event.get("type") == "http.disconnect":
-                flag.set()
-                return
-    except Exception:  # noqa: BLE001
-        # ``receive`` may raise once the response is fully sent; treat as benign.
-        return
-
-
-# --- ASGI lifespan / canned responses -----------------------------------
-
-
-async def _handle_lifespan(receive: ASGIReceive, send: ASGISend) -> None:
-    """Minimal lifespan loop — accept startup / shutdown events without
-    plugging into the user's hosting service. (The hosting integration
-    drives lifecycle through :mod:`localpost.hosting`.)"""
-    while True:
-        event = await receive()
-        kind = event.get("type")
-        if kind == "lifespan.startup":
-            await send({"type": "lifespan.startup.complete"})
-        elif kind == "lifespan.shutdown":
-            await send({"type": "lifespan.shutdown.complete"})
-            return
-
-
-async def _send_canned(
-    send: ASGISend,
+def _canned_response(
     status: int,
     body: bytes,
     *,
     extra_headers: Sequence[tuple[bytes, bytes]] = (),
-) -> None:
-    headers = [
+) -> Response:
+    headers: list[tuple[bytes, bytes]] = [
         (b"content-type", b"text/plain; charset=utf-8"),
         (b"content-length", str(len(body)).encode("ascii")),
         *extra_headers,
     ]
-    await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": body, "more_body": False})
+    return Response(status_code=status, headers=headers)

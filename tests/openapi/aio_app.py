@@ -14,7 +14,6 @@ Two layers of coverage:
 
 from __future__ import annotations
 
-import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from http import HTTPMethod
@@ -38,7 +37,6 @@ from localpost.openapi import (
     OpResult,
     async_op_middleware,
 )
-from localpost.openapi.aio._ctx import _ASGIReqCtx
 from localpost.openapi.aio.middleware import AsyncApiOperation
 from localpost.openapi.aio.operation import AsyncOperation
 
@@ -80,6 +78,13 @@ class FakeAsyncCtx:
         captured: list[bytes] = [bytes(chunk) async for chunk in chunks]
         self.streamed = (response, captured)
         self.response_status = response.status_code
+
+    async def receive(self, size: int = 65536, /) -> bytes:
+        return self.body if size >= len(self.body) else self.body[:size]
+
+    async def sendfile(self, response: Response, file, offset: int, count: int) -> None:
+        # Test fake — sendfile isn't exercised in this suite.
+        raise NotImplementedError
 
 
 def make_async_ctx(
@@ -575,47 +580,5 @@ class TestAsyncAuth:
         assert {"bearerAuth": ()} in op_spec.security
 
 
-# --- ASGI ctx unit tests ------------------------------------------------
-
-
-class TestAsgiCtxUnit:
-    @pytest.mark.anyio
-    async def test_complete_emits_start_then_body(self):
-        events: list[dict[str, Any]] = []
-
-        async def send(event: dict[str, Any]) -> None:
-            events.append(event)
-
-        ctx = _ASGIReqCtx(
-            request=Request(b"GET", b"/", b"/", b"", []),
-            body=b"",
-            remote_addr=None,
-            local_addr="0.0.0.0:0",
-            scheme="http",
-            _send=send,
-            _disconnected=threading.Event(),
-        )
-        await ctx.complete(Response(status_code=200, headers=[(b"x-y", b"z")]), b"hello")
-        assert [e["type"] for e in events] == ["http.response.start", "http.response.body"]
-        assert events[0]["status"] == 200
-        assert (b"x-y", b"z") in events[0]["headers"]
-        assert events[1]["body"] == b"hello"
-        assert events[1]["more_body"] is False
-
-    @pytest.mark.anyio
-    async def test_complete_twice_raises(self):
-        async def send(_event: dict[str, Any]) -> None:
-            pass
-
-        ctx = _ASGIReqCtx(
-            request=Request(b"GET", b"/", b"/", b"", []),
-            body=b"",
-            remote_addr=None,
-            local_addr="0.0.0.0:0",
-            scheme="http",
-            _send=send,
-            _disconnected=threading.Event(),
-        )
-        await ctx.complete(Response(200), b"x")
-        with pytest.raises(RuntimeError, match="already started"):
-            await ctx.complete(Response(200), b"y")
+# Ctx-level unit tests live in tests/http/asgi.py — that's where the
+# ``_ASGIReqCtx`` implementation lives now (moved out of localpost.openapi.aio).

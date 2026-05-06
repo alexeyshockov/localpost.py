@@ -1,3 +1,4 @@
+from localpost.http._async_base import AsyncHTTPReqCtx, AsyncRequestHandler
 from localpost.http._base import (
     BodyHandler,
     ConnFactory,
@@ -16,6 +17,7 @@ from localpost.http._cancel import RequestCancelled, check_cancelled
 from localpost.http._pool import streaming_pool_handler, thread_pool_handler
 from localpost.http._service import http_server, wsgi_server
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
+from localpost.http.asgi import to_asgi
 from localpost.http.compress import DEFAULT_COMPRESSIBLE_TYPES, compress_handler
 from localpost.http.config import LOGGER_NAME, ServerConfig
 from localpost.http.router import (
@@ -33,13 +35,16 @@ __all__ = [
     # config
     "ServerConfig",
     "LOGGER_NAME",
-    # server
+    # server (sync)
     "start_http_server",
     "HTTPReqCtx",
     "RequestHandler",
     "BodyHandler",
     "Middleware",
     "compose",
+    # async ctx (transport-neutral; concrete adapters in localpost.http.asgi etc.)
+    "AsyncHTTPReqCtx",
+    "AsyncRequestHandler",
     # selector / accept-side topology
     "Selector",
     "SelectorCallback",
@@ -62,6 +67,8 @@ __all__ = [
     # WSGI adapters
     "to_wsgi",
     "wrap_wsgi",
+    # ASGI adapters
+    "to_asgi",
     # hosting
     "http_server",
     "wsgi_server",
