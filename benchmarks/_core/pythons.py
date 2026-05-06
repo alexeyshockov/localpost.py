@@ -1,8 +1,8 @@
 """Bench-matrix Python interpreters.
 
-Single source of truth for which Python interpreters the HTTP benchmark
-runs against. Read by both ``_setup.py`` (to provision each venv) and
-``runner.py`` (as the default value for ``--pythons``).
+Single source of truth for which Python interpreters macro benchmarks run
+against. Read by suite ``_setup.py`` modules (to provision each venv) and
+by the shared CLI (as the default value for ``--pythons``).
 
 Bench venvs live in ``.venv-bench/<name>/`` — fully separate from the
 project's primary ``.venv``.

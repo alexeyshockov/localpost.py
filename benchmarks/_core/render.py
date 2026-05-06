@@ -1,13 +1,12 @@
-"""HTML report renderer for the HTTP benchmark.
+"""Markdown + HTML report renderers, dim-driven.
 
-Self-contained ``RESULTS.html`` next to ``RESULTS.md``. Renders one section
-per scenario, with sortable tables and per-dimension dropdown filters. The
-raw report is embedded as a JSON ``<script>`` blob, so the page is the
-single source of truth (no AJAX, no build step).
+The HTML page generates filter dropdowns and result columns from
+``report.dim_keys`` — every suite gets its own dimensions for free. The
+raw report payload is embedded as a JSON ``<script>`` blob, so the page
+is the single source of truth (no AJAX, no build step).
 
 No third-party Python dep — just stdlib + a CDN-loaded `Grid.js`_ for sort /
-search. Markdown stays as the GitHub-friendly view; this is for deeper
-slicing on a developer's laptop.
+search. Markdown stays as the GitHub-friendly view.
 
 .. _Grid.js: https://gridjs.io/
 """
@@ -18,14 +17,48 @@ import html
 import json
 from typing import Any
 
+from benchmarks._core.types import Cell, RunReport
+
 GRIDJS_VERSION = "6.2.0"
 _CDN_BASE = f"https://cdn.jsdelivr.net/npm/gridjs@{GRIDJS_VERSION}/dist"
 
 
+def render_markdown(report: RunReport) -> str:
+    out: list[str] = []
+    out.append(f"# {report.title} results — Python {report.python}\n")
+    out.append(f"- Run at: `{report.started_at}`")
+    out.append(f"- Host: `{report.host}`")
+    out.append(f"- Python: `{report.python}` (`{report.python_version}`)")
+    out.append(f"- Duration per cell: `{report.duration_s}s`")
+    if report.selection:
+        out.append(f"- Selection: {report.selection}")
+    out.append("")
+    out.append("> Numbers are single-process, single-host. Don't read absolute RPS as gospel —")
+    out.append("> what matters is the relative ordering on the same machine in one run.")
+    out.append("")
+
+    cells_by_scenario: dict[str, list[Cell]] = {}
+    for c in report.cells:
+        cells_by_scenario.setdefault(c.scenario, []).append(c)
+
+    for scenario_name, cells in cells_by_scenario.items():
+        cells.sort(key=lambda c: c.rps, reverse=True)
+        out.append(f"## {scenario_name}\n")
+        out.append("| Stack | RPS | p50 (ms) | p90 (ms) | p99 (ms) | 2xx | non-2xx |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|")
+        out.extend(
+            f"| `{c.stack}` | {c.rps:,.0f} | {c.p50_ms:.2f} | {c.p90_ms:.2f} "
+            f"| {c.p99_ms:.2f} | {c.status_2xx:,} | {c.status_other:,} |"
+            for c in cells
+        )
+        out.append("")
+    return "\n".join(out)
+
+
 def render_html(report: dict[str, Any]) -> str:
-    """Render a `RunReport` payload (already `asdict`ed) as a single HTML doc."""
+    """Render an asdict'd :class:`RunReport` as a single HTML doc."""
     blob = json.dumps(report)
-    title = f"HTTP benchmark — Python {report.get('python', '?')}"
+    title = f"{report.get('title', 'Benchmark')} — Python {report.get('python', '?')}"
     return _TEMPLATE.format(
         title=html.escape(title),
         gridjs_css=f"{_CDN_BASE}/theme/mermaid.min.css",
@@ -84,29 +117,7 @@ _TEMPLATE = """<!doctype html>
   header to sort.
 </div>
 
-<div class="toolbar">
-  <label>app
-    <select id="filter-app"><option value="">all</option></select>
-  </label>
-  <label>backend
-    <select id="filter-backend"><option value="">all</option></select>
-  </label>
-  <label>selectors
-    <select id="filter-selectors"><option value="">all</option></select>
-  </label>
-  <label>pool
-    <select id="filter-pool">
-      <option value="">all</option><option value="true">on</option><option value="false">off</option>
-    </select>
-  </label>
-  <label>acceptor
-    <select id="filter-acceptor">
-      <option value="">all</option><option value="true">on</option><option value="false">off</option>
-    </select>
-  </label>
-  <label>scenario
-    <select id="filter-scenario"><option value="">all</option></select>
-  </label>
+<div class="toolbar" id="toolbar">
   <span style="flex:1"></span>
   <span style="font-size:0.8rem;color:#666">filters AND together</span>
 </div>
@@ -119,39 +130,70 @@ _TEMPLATE = """<!doctype html>
 (function () {{
   const report = JSON.parse(document.getElementById('report-data').textContent);
   const cells = report.cells || [];
+  const dimKeys = report.dim_keys || [];
 
-  // --- populate filter dropdowns from observed values
-  function distinctSorted(field) {{
-    return Array.from(new Set(cells.map(c => c[field]))).sort();
+  // --- helpers
+  function dimVal(c, key) {{ return (c.dims && c.dims[key] != null) ? String(c.dims[key]) : ''; }}
+  function distinctSorted(extract) {{
+    return Array.from(new Set(cells.map(extract).filter(v => v !== ''))).sort();
   }}
-  function fillSelect(id, values, render) {{
-    const el = document.getElementById(id);
+
+  // --- dynamically build dim filter dropdowns + a scenario filter
+  const toolbar = document.getElementById('toolbar');
+  function addSelect(id, label, values) {{
+    const wrap = document.createElement('label');
+    wrap.textContent = label + ' ';
+    const sel = document.createElement('select');
+    sel.id = id;
+    const allOpt = document.createElement('option');
+    allOpt.value = '';
+    allOpt.textContent = 'all';
+    sel.appendChild(allOpt);
     for (const v of values) {{
       const o = document.createElement('option');
       o.value = String(v);
-      o.textContent = render ? render(v) : String(v);
-      el.appendChild(o);
+      o.textContent = String(v);
+      sel.appendChild(o);
     }}
+    wrap.appendChild(sel);
+    // Insert before the trailing spacer span(s).
+    toolbar.insertBefore(wrap, toolbar.firstChild);
+    return sel;
   }}
-  fillSelect('filter-app', distinctSorted('app'));
-  fillSelect('filter-backend', distinctSorted('backend'));
-  fillSelect('filter-selectors', distinctSorted('selectors'));
-  fillSelect('filter-scenario', distinctSorted('scenario'));
+
+  // Build dim filters in declared order (insertBefore prepends, so iterate reverse).
+  for (const key of [...dimKeys].reverse()) {{
+    addSelect('filter-dim-' + key, key, distinctSorted(c => dimVal(c, key)));
+  }}
+  const scenarios = distinctSorted(c => c.scenario);
+  addSelect('filter-scenario', 'scenario', scenarios);
 
   // --- build one Grid.js table per scenario
-  const scenarios = distinctSorted('scenario');
   const root = document.getElementById('scenarios');
   const grids = {{}};
 
-  function rowsFor(scenario) {{
-    return cells
+  function rowsFor(scenario, filtered) {{
+    const list = filtered || cells.filter(c => c.scenario === scenario);
+    return list
       .filter(c => c.scenario === scenario)
       .map(c => [
-        c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off', c.acceptor ? 'on' : 'off',
+        c.stack,
+        ...dimKeys.map(k => dimVal(c, k)),
         Math.round(c.rps), +c.p50_ms.toFixed(2), +c.p90_ms.toFixed(2), +c.p99_ms.toFixed(2),
         c.status_2xx, c.status_other,
       ]);
   }}
+
+  const columns = [
+    {{ name: 'Stack' }},
+    ...dimKeys.map(k => ({{ name: k }})),
+    {{ name: 'RPS', sort: {{ compare: (a, b) => a - b }} }},
+    {{ name: 'p50 (ms)' }},
+    {{ name: 'p90 (ms)' }},
+    {{ name: 'p99 (ms)' }},
+    {{ name: '2xx' }},
+    {{ name: 'non-2xx' }},
+  ];
 
   for (const scenario of scenarios) {{
     const section = document.createElement('section');
@@ -160,20 +202,7 @@ _TEMPLATE = """<!doctype html>
     section.innerHTML = '<h2>' + scenario + '</h2><div class="grid"></div>';
     root.appendChild(section);
     const g = new gridjs.Grid({{
-      columns: [
-        {{ name: 'Stack' }},
-        {{ name: 'app' }},
-        {{ name: 'backend' }},
-        {{ name: 'sel' }},
-        {{ name: 'pool' }},
-        {{ name: 'acc' }},
-        {{ name: 'RPS', sort: {{ compare: (a, b) => a - b }} }},
-        {{ name: 'p50 (ms)' }},
-        {{ name: 'p90 (ms)' }},
-        {{ name: 'p99 (ms)' }},
-        {{ name: '2xx' }},
-        {{ name: 'non-2xx' }},
-      ],
+      columns: columns,
       data: rowsFor(scenario),
       sort: true,
       search: true,
@@ -184,13 +213,13 @@ _TEMPLATE = """<!doctype html>
   }}
 
   // --- top-level filter dropdowns rebuild grids in place
-  const filterIds = ['app', 'backend', 'selectors', 'pool', 'acceptor', 'scenario'];
   function currentFilters() {{
-    const f = {{}};
-    for (const k of filterIds) {{
-      const v = document.getElementById('filter-' + k).value;
-      if (v !== '') f[k] = v;
+    const f = {{ dims: {{}}, scenario: '' }};
+    for (const k of dimKeys) {{
+      const v = document.getElementById('filter-dim-' + k).value;
+      if (v !== '') f.dims[k] = v;
     }}
+    f.scenario = document.getElementById('filter-scenario').value;
     return f;
   }}
   function applyFilters() {{
@@ -204,25 +233,18 @@ _TEMPLATE = """<!doctype html>
       section.style.display = '';
       const filtered = cells.filter(c => {{
         if (c.scenario !== scenario) return false;
-        if (f.app && c.app !== f.app) return false;
-        if (f.backend && c.backend !== f.backend) return false;
-        if (f.selectors && String(c.selectors) !== f.selectors) return false;
-        if (f.pool && (c.pool ? 'true' : 'false') !== f.pool) return false;
-        if (f.acceptor && (c.acceptor ? 'true' : 'false') !== f.acceptor) return false;
+        for (const k of Object.keys(f.dims)) {{
+          if (dimVal(c, k) !== f.dims[k]) return false;
+        }}
         return true;
       }});
-      grids[scenario].updateConfig({{
-        data: filtered.map(c => [
-          c.stack, c.app, c.backend, c.selectors, c.pool ? 'on' : 'off', c.acceptor ? 'on' : 'off',
-          Math.round(c.rps), +c.p50_ms.toFixed(2), +c.p90_ms.toFixed(2), +c.p99_ms.toFixed(2),
-          c.status_2xx, c.status_other,
-        ]),
-      }}).forceRender();
+      grids[scenario].updateConfig({{ data: rowsFor(scenario, filtered) }}).forceRender();
     }}
   }}
-  for (const k of filterIds) {{
-    document.getElementById('filter-' + k).addEventListener('change', applyFilters);
+  for (const k of dimKeys) {{
+    document.getElementById('filter-dim-' + k).addEventListener('change', applyFilters);
   }}
+  document.getElementById('filter-scenario').addEventListener('change', applyFilters);
 }})();
 </script>
 </body>

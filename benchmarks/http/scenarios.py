@@ -16,23 +16,22 @@ the response shape.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from typing import Any, Final
 
+from benchmarks._core.types import Scenario
 
-@dataclass(frozen=True, slots=True)
-class Scenario:
-    name: str
-    method: str
-    path: str
-    body: bytes | None
-    content_type: str | None
-    expected_status: int
-    concurrency: int
-    """oha -c value."""
-
-    def url(self, base: str) -> str:
-        return f"{base}{self.path}"
+__all__ = [
+    "HELLO_PREFIX",
+    "JSON_ECHO_BODY",
+    "PING_BODY",
+    "PROFILE_WORK_DELAYS_S",
+    "SCENARIOS",
+    "Scenario",
+    "build_profile_update",
+    "hello_body",
+    "profile_update_body",
+    "profile_update_payload",
+]
 
 
 _JSON_BODY: Final = b'{"name":"world","numbers":[1,2,3,4,5,6,7,8,9,10]}'

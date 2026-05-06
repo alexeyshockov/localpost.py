@@ -1,8 +1,8 @@
 """Sync every venv in the bench matrix.
 
-Iterates ``benchmarks.http._pythons.PYTHONS`` and runs ``uv sync`` for each,
-redirected to the entry's venv via ``UV_PROJECT_ENVIRONMENT``. Continues on
-failure; exits non-zero if any sync failed.
+Iterates ``benchmarks._core.pythons.PYTHONS`` and runs ``uv sync`` for
+each, redirected to the entry's venv via ``UV_PROJECT_ENVIRONMENT``.
+Continues on failure; exits non-zero if any sync failed.
 
 Only the groups + extras the HTTP benchmark stacks actually import are
 installed — ``--all-groups --all-extras`` drags in native packages
@@ -18,16 +18,16 @@ import os
 import subprocess
 import sys
 
-from benchmarks.http._pythons import PYTHONS
+from benchmarks._core.pythons import PYTHONS
 
 # Just what the HTTP bench stacks need at runtime. See `benchmarks/http/apps/`
 # for the actual imports.
 GROUPS: tuple[str, ...] = (
-    "bench",     # starlette, uvicorn, a2wsgi, cheroot, gunicorn, granian, pytest-benchmark
+    "bench",  # starlette, uvicorn, a2wsgi, cheroot, gunicorn, granian, pytest-benchmark
     "dev-http",  # flask, pydantic, httpx
 )
 EXTRAS: tuple[str, ...] = (
-    "http",       # h11
+    "http",  # h11
     "http-fast",  # httptools
 )
 
