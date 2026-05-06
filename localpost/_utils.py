@@ -175,14 +175,14 @@ def ensure_async_callable[**P, T](
     if is_async_callable(func):
         return func
     limiter = CapacityLimiter(max_threads) if isinstance(max_threads, int | float) else max_threads
-    return functools.partial(to_thread.run_sync, func, limiter=limiter)  # type: ignore[return-value]
+    return cast("Callable[P, Awaitable[T]]", functools.partial(to_thread.run_sync, func, limiter=limiter))
 
 
 def ensure_sync_callable[**P, T](
     func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
 ) -> Callable[P, T]:
     if is_async_callable(func):
-        return functools.partial(from_thread.run, func)
+        return cast("Callable[P, T]", functools.partial(from_thread.run, func))
     return cast("Callable[P, T]", func)
 
 

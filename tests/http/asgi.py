@@ -251,3 +251,70 @@ class TestToAsgi:
 
         with pytest.raises(ValueError, match="unsupported ASGI scope"):
             await asgi_app(scope, receive, send)
+
+
+class TestToAsgiStreaming:
+    """``to_asgi(handler, streaming=True)`` skips the pre-buffer; the
+    handler reads body chunks via ``await ctx.receive(size)``."""
+
+    @pytest.mark.anyio
+    async def test_body_reads_chunks_in_order(self) -> None:
+        captured: list[bytes] = []
+
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
+            assert ctx.body == b""  # streaming mode: no pre-buffer
+            while True:
+                chunk = await ctx.receive(64)
+                if not chunk:
+                    break
+                captured.append(chunk)
+            await ctx.complete(Response(200), b"ok")
+
+        asgi_app = to_asgi(handler, streaming=True)
+        async with _client(asgi_app) as c:
+            resp = await c.post("/", content=b"hello-streaming-world")
+        assert resp.status_code == 200
+        assert b"".join(captured) == b"hello-streaming-world"
+
+    @pytest.mark.anyio
+    async def test_receive_honours_size_with_partial_chunk(self) -> None:
+        sizes: list[int] = []
+
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
+            # Read 3 bytes at a time — chunks arriving on the channel
+            # may be larger; ctx.receive should split them.
+            while True:
+                chunk = await ctx.receive(3)
+                if not chunk:
+                    break
+                sizes.append(len(chunk))
+            await ctx.complete(Response(200), b"ok")
+
+        asgi_app = to_asgi(handler, streaming=True)
+        async with _client(asgi_app) as c:
+            await c.post("/", content=b"abcdefghij")
+        assert all(s <= 3 for s in sizes)
+        assert sum(sizes) == 10
+
+    @pytest.mark.anyio
+    async def test_content_length_pre_check_413(self) -> None:
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:  # noqa: ARG001
+            raise AssertionError("handler should not run")
+
+        asgi_app = to_asgi(handler, streaming=True, max_body_size=4)
+        async with _client(asgi_app) as c:
+            resp = await c.post("/", content=b"too-long-by-far")
+        assert resp.status_code == 413
+
+    @pytest.mark.anyio
+    async def test_handler_can_skip_body_and_respond(self) -> None:
+        """Streaming mode: handler may respond without reading the body —
+        the channel pump drains stragglers; the response still completes."""
+
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
+            await ctx.complete(Response(204), b"")
+
+        asgi_app = to_asgi(handler, streaming=True)
+        async with _client(asgi_app) as c:
+            resp = await c.post("/", content=b"ignored-body")
+        assert resp.status_code == 204
