@@ -28,6 +28,7 @@ from localpost.http.router import (
     URITemplate,
     route_match,
 )
+from localpost.http.rsgi import to_rsgi
 from localpost.http.static import static_handler
 from localpost.http.wsgi import to_wsgi, wrap_wsgi
 
@@ -69,6 +70,8 @@ __all__ = [
     "wrap_wsgi",
     # ASGI adapters
     "to_asgi",
+    # RSGI adapters
+    "to_rsgi",
     # hosting
     "http_server",
     "wsgi_server",

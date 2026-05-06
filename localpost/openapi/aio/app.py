@@ -24,10 +24,11 @@ from http import HTTPMethod
 from typing import Any, Literal
 
 from localpost import hosting
-from localpost.http import AsyncHTTPReqCtx, AsyncRequestHandler, to_asgi
+from localpost.http import AsyncHTTPReqCtx, AsyncRequestHandler, to_asgi, to_rsgi
 from localpost.http._types import Response
 from localpost.http.asgi import ASGIApp
 from localpost.http.router import RouteMatch, URITemplate
+from localpost.http.rsgi import RSGIApplication
 from localpost.openapi import spec as openapi_spec
 from localpost.openapi._docs import redoc_html, scalar_html, swagger_html
 from localpost.openapi.adapters import AdapterRegistry, default_registry
@@ -184,6 +185,24 @@ class HttpAsyncApp:
         myapp:asgi_app`` or ``granian --interface asgi myapp:asgi_app``.
         """
         return to_asgi(self._build_async_handler(), max_body_size=self._max_body_size)
+
+    def as_rsgi(self) -> RSGIApplication:
+        """Return an RSGI application object for native Granian deployment.
+
+        Sugar over :func:`localpost.http.to_rsgi`. Same handler chain as
+        :meth:`asgi` (route table + built-ins), but wrapped for RSGI
+        instead of ASGI — single eager ``response_bytes`` per response,
+        zero-copy ``response_file_range`` for sendfile, no pump task on
+        streaming uploads. Deploy with::
+
+            granian --interface rsgi myapp:rsgi_app
+
+        For deployments with **other hosted services** (scheduler etc.)
+        co-located with the HTTP app inside each Granian worker, use
+        :class:`localpost.hosting.rsgi.HostRSGIApp` instead — it drives
+        the full hosting lifecycle from Granian's per-worker hooks.
+        """
+        return to_rsgi(self._build_async_handler(), max_body_size=self._max_body_size)
 
     def service(
         self,
