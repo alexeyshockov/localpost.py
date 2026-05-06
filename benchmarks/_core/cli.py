@@ -209,7 +209,7 @@ def run(
                 if cell is not None:
                     print(
                         f"    rps={cell.rps:,.0f}  p50={cell.p50_ms:.2f}ms  p99={cell.p99_ms:.2f}ms  "
-                        f"({cell.status_2xx} 2xx / {cell.status_other} other)"
+                        f"({cell.status_expected} expected / {cell.status_other} other)"
                     )
                     cells.append(cell)
 

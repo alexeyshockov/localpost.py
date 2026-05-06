@@ -2,7 +2,13 @@
 
 Idiomatic LocalPost: dataclass models + return-type annotations. Body
 inputs auto-resolve via ``FromBody`` because the parameter type is a
-dataclass. Path ``int`` coercion happens in ``FromPath._cast_str``.
+dataclass. Path/query ``int`` coercion happens in the resolvers'
+``_cast_str``.
+
+LocalPost's body resolver returns ``BadRequest`` (400) on schema
+failure; FastAPI and flask-openapi return 422. To keep the bench's
+``validation_failure`` scenario apples-to-apples we attach a tiny
+middleware that remaps 400 → 422 on the profile endpoint.
 """
 
 from __future__ import annotations
@@ -13,13 +19,27 @@ from typing import Any
 
 from benchmarks.openapi.apps._cli import parse_port
 from localpost import hosting, threadtools
-from localpost.http import ServerConfig
-from localpost.openapi import HttpApp
+from localpost.http import HTTPReqCtx, ServerConfig
+from localpost.openapi import (
+    ApiOperation,
+    BadRequest,
+    HttpApp,
+    OpResult,
+    UnprocessableEntity,
+    op_middleware,
+)
 
 
 @dataclass
 class Item:
     id: int
+
+
+@dataclass
+class SearchResult:
+    q: str
+    limit: int
+    offset: int
 
 
 @dataclass
@@ -41,6 +61,18 @@ class Profile:
     settings: dict[str, Any]
 
 
+@op_middleware
+def remap_validation_status(
+    ctx: HTTPReqCtx,
+    call_next: ApiOperation,
+) -> UnprocessableEntity[str] | OpResult:
+    result = call_next(ctx)
+    if isinstance(result, BadRequest):
+        body = result.body if isinstance(result.body, str) else str(result.body)
+        return UnprocessableEntity(body)
+    return result
+
+
 def build_app() -> HttpApp:
     app = HttpApp()
 
@@ -52,7 +84,11 @@ def build_app() -> HttpApp:
     def get_item(item_id: int) -> Item:
         return Item(id=item_id)
 
-    @app.post("/users/{user_id}/profile")
+    @app.get("/search")
+    def search(q: str, limit: int = 20, offset: int = 0) -> SearchResult:
+        return SearchResult(q=q, limit=limit, offset=offset)
+
+    @app.post("/users/{user_id}/profile", middlewares=[remap_validation_status])
     def update_profile(user_id: str, body: ProfileUpdate) -> Profile:
         tags = sorted({t.strip().lower() for t in body.tags if t.strip()})
         return Profile(
@@ -64,7 +100,7 @@ def build_app() -> HttpApp:
             settings=body.settings,
         )
 
-    _ = (ping, get_item, update_profile)
+    _ = (ping, get_item, search, update_profile)
     return app
 
 

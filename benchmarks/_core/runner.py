@@ -94,13 +94,14 @@ def _as_float(v: float | int | str | None, default: float = 0.0) -> float:
     return default if v is None else float(v)
 
 
-def parse_oha(raw: dict) -> dict:
+def parse_oha(raw: dict, expected_status: int) -> dict:
     summary = raw.get("summary", {})
     pct = raw.get("latencyPercentiles", {})
     status = raw.get("statusCodeDistribution", {})
-    s2xx = sum(v for k, v in status.items() if k.startswith("2"))
-    sother = sum(v for k, v in status.items() if not k.startswith("2"))
-    total = s2xx + sother
+    expected_key = str(expected_status)
+    s_expected = sum(v for k, v in status.items() if k == expected_key)
+    s_other = sum(v for k, v in status.items() if k != expected_key)
+    total = s_expected + s_other
     return {
         "rps": _as_float(summary.get("requestsPerSec")),
         "p50_ms": _as_float(pct.get("p50")) * 1000,
@@ -108,8 +109,8 @@ def parse_oha(raw: dict) -> dict:
         "p99_ms": _as_float(pct.get("p99")) * 1000,
         "total_requests": total,
         "success_rate": _as_float(summary.get("successRate")),
-        "status_2xx": s2xx,
-        "status_other": sother,
+        "status_expected": s_expected,
+        "status_other": s_other,
     }
 
 
@@ -129,7 +130,7 @@ def run_cell(
             print(f"  [{stack.name}/{scenario.name}] FAILED: not ready. stderr={stderr[-400:]!r}", file=sys.stderr)
             return None
         raw = run_oha(scenario, port, duration_s)
-        parsed = parse_oha(raw)
+        parsed = parse_oha(raw, scenario.expected_status)
         return Cell(
             stack=stack.name,
             scenario=scenario.name,

@@ -44,11 +44,11 @@ def render_markdown(report: RunReport) -> str:
     for scenario_name, cells in cells_by_scenario.items():
         cells.sort(key=lambda c: c.rps, reverse=True)
         out.append(f"## {scenario_name}\n")
-        out.append("| Stack | RPS | p50 (ms) | p90 (ms) | p99 (ms) | 2xx | non-2xx |")
+        out.append("| Stack | RPS | p50 (ms) | p90 (ms) | p99 (ms) | expected | other |")
         out.append("|---|---:|---:|---:|---:|---:|---:|")
         out.extend(
             f"| `{c.stack}` | {c.rps:,.0f} | {c.p50_ms:.2f} | {c.p90_ms:.2f} "
-            f"| {c.p99_ms:.2f} | {c.status_2xx:,} | {c.status_other:,} |"
+            f"| {c.p99_ms:.2f} | {c.status_expected:,} | {c.status_other:,} |"
             for c in cells
         )
         out.append("")
@@ -180,7 +180,7 @@ _TEMPLATE = """<!doctype html>
         c.stack,
         ...dimKeys.map(k => dimVal(c, k)),
         Math.round(c.rps), +c.p50_ms.toFixed(2), +c.p90_ms.toFixed(2), +c.p99_ms.toFixed(2),
-        c.status_2xx, c.status_other,
+        c.status_expected, c.status_other,
       ]);
   }}
 
@@ -191,8 +191,8 @@ _TEMPLATE = """<!doctype html>
     {{ name: 'p50 (ms)' }},
     {{ name: 'p90 (ms)' }},
     {{ name: 'p99 (ms)' }},
-    {{ name: '2xx' }},
-    {{ name: 'non-2xx' }},
+    {{ name: 'expected' }},
+    {{ name: 'other' }},
   ];
 
   for (const scenario of scenarios) {{

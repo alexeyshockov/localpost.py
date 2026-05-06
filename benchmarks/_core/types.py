@@ -61,8 +61,12 @@ class Cell:
     p99_ms: float
     total_requests: int
     success_rate: float
-    status_2xx: int
+    status_expected: int
+    """Responses matching :attr:`Scenario.expected_status` exactly."""
+
     status_other: int
+    """Everything else (wrong status code, no response, etc.)."""
+
     dims: dict[str, str] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
 

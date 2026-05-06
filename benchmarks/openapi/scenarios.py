@@ -17,6 +17,7 @@ from typing import Final
 from benchmarks._core.types import Scenario
 
 __all__ = [
+    "INVALID_PROFILE_BODY",
     "PING_BODY",
     "PROFILE_UPDATE_BODY",
     "SCENARIOS",
@@ -35,6 +36,10 @@ PROFILE_UPDATE_BODY: Final = (
     b'"tags":["Python","localpost","Python"," benchmarks "],'
     b'"settings":{"theme":"dark","newsletter":true}}'
 )
+
+# Missing required fields — every framework rejects with a 422 (LocalPost's
+# default 400 is remapped to 422 by a small middleware in the bench app).
+INVALID_PROFILE_BODY: Final = b'{"display_name":"only this field"}'
 
 
 SCENARIOS: Final[tuple[Scenario, ...]] = (
@@ -57,12 +62,30 @@ SCENARIOS: Final[tuple[Scenario, ...]] = (
         concurrency=64,
     ),
     Scenario(
+        name="query_validation",
+        method="GET",
+        path="/search?q=hello&limit=10&offset=0",
+        body=None,
+        content_type=None,
+        expected_status=200,
+        concurrency=64,
+    ),
+    Scenario(
         name="body_roundtrip",
         method="POST",
         path="/users/42/profile",
         body=PROFILE_UPDATE_BODY,
         content_type="application/json",
         expected_status=200,
+        concurrency=32,
+    ),
+    Scenario(
+        name="validation_failure",
+        method="POST",
+        path="/users/42/profile",
+        body=INVALID_PROFILE_BODY,
+        content_type="application/json",
+        expected_status=422,
         concurrency=32,
     ),
 )

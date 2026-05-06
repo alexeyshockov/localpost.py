@@ -2,7 +2,8 @@
 
 Idiomatic flask-openapi v5: declare per-source Pydantic models for path,
 query, body — handler signatures take them as named parameters
-(``path``, ``query``, ``body``).
+(``path``, ``query``, ``body``). Validation failures return 422 by
+default (configured via ``validation_error_status``).
 """
 
 from __future__ import annotations
@@ -26,8 +27,20 @@ class ProfilePath(BaseModel):
     user_id: str
 
 
+class SearchQuery(BaseModel):
+    q: str
+    limit: int = 20
+    offset: int = 0
+
+
 class Item(BaseModel):
     id: int
+
+
+class SearchResult(BaseModel):
+    q: str
+    limit: int
+    offset: int
 
 
 class ProfileUpdate(BaseModel):
@@ -58,6 +71,10 @@ def build_app() -> OpenAPI:
     def get_item(path: ItemPath) -> Response:
         return jsonify(Item(id=path.item_id).model_dump())
 
+    @app.get("/search")
+    def search(query: SearchQuery) -> Response:
+        return jsonify(SearchResult(q=query.q, limit=query.limit, offset=query.offset).model_dump())
+
     @app.post("/users/<string:user_id>/profile")
     def update_profile(path: ProfilePath, body: ProfileUpdate) -> Response:
         tags = sorted({t.strip().lower() for t in body.tags if t.strip()})
@@ -71,7 +88,7 @@ def build_app() -> OpenAPI:
         )
         return jsonify(result.model_dump())
 
-    _ = (ping, get_item, update_profile)
+    _ = (ping, get_item, search, update_profile)
     return app
 
 

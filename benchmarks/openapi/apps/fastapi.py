@@ -1,8 +1,9 @@
 """FastAPI served by Uvicorn (1 worker).
 
 Idiomatic FastAPI: Pydantic v2 models + ``response_model=...`` so the
-typed response goes through Pydantic serialization (the realistic
-deployment shape).
+typed response goes through Pydantic serialization. Validation failures
+return 422 by default — what the bench's ``validation_failure``
+scenario expects.
 """
 
 from __future__ import annotations
@@ -20,6 +21,12 @@ from benchmarks.openapi.apps._cli import parse_port
 
 class Item(BaseModel):
     id: int
+
+
+class SearchResult(BaseModel):
+    q: str
+    limit: int
+    offset: int
 
 
 class ProfileUpdate(BaseModel):
@@ -50,6 +57,10 @@ def build_app() -> FastAPI:
     def get_item(item_id: int) -> Item:
         return Item(id=item_id)
 
+    @app.get("/search", response_model=SearchResult)
+    def search(q: str, limit: int = 20, offset: int = 0) -> SearchResult:
+        return SearchResult(q=q, limit=limit, offset=offset)
+
     @app.post("/users/{user_id}/profile", response_model=Profile)
     def update_profile(user_id: str, body: ProfileUpdate) -> Profile:
         tags = sorted({t.strip().lower() for t in body.tags if t.strip()})
@@ -62,7 +73,7 @@ def build_app() -> FastAPI:
             settings=body.settings,
         )
 
-    _ = (ping, get_item, update_profile)
+    _ = (ping, get_item, search, update_profile)
     return app
 
 
