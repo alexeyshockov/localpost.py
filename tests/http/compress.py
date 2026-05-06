@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import zlib
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx
@@ -503,14 +504,20 @@ class TestStreamingRewriteHeaders:
 
 
 def _sse_handler(events: list[bytes]):
-    """Handler that emits each item in ``events`` as a separate ``send`` call."""
+    """Handler that emits each item in ``events`` via ``ctx.stream(...)`` —
+    the iterator-wrapping path the compression middleware intercepts.
+    """
 
     def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-        # No Content-Length → streaming path.
-        ctx.start_response(Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]))
-        for ev in events:
-            ctx.send(b"data: " + ev + b"\n\n")
-        ctx.finish_response()
+        def chunks() -> Iterator[bytes]:
+            for ev in events:
+                yield b"data: " + ev + b"\n\n"
+
+        # No Content-Length → streaming path eligible for compression.
+        ctx.stream(
+            Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]),
+            chunks(),
+        )
         return None
 
     return handler
@@ -543,17 +550,19 @@ class TestStreamingRoundTripGzip:
         body_chunk = b"x" * 4096
 
         def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-            ctx.start_response(
+            def chunks() -> Iterator[bytes]:
+                yield body_chunk
+
+            ctx.stream(
                 Response(
                     status_code=200,
                     headers=[
                         (b"content-type", b"text/plain"),
                         (b"content-length", str(len(body_chunk)).encode("ascii")),
                     ],
-                )
+                ),
+                chunks(),
             )
-            ctx.send(body_chunk)
-            ctx.finish_response()
             return None
 
         h = compress_handler(handler, algorithms=("gzip",))
@@ -571,18 +580,20 @@ class TestStreamingRoundTripGzip:
         events = [b"a", b"b", b"c"]
 
         def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-            ctx.start_response(
+            def chunks() -> Iterator[bytes]:
+                for ev in events:
+                    yield b"data: " + ev + b"\n\n"
+
+            ctx.stream(
                 Response(
                     status_code=200,
                     headers=[
                         (b"content-type", b"text/event-stream"),
                         (b"cache-control", b"no-transform"),
                     ],
-                )
+                ),
+                chunks(),
             )
-            for ev in events:
-                ctx.send(b"data: " + ev + b"\n\n")
-            ctx.finish_response()
             return None
 
         h = compress_handler(handler, algorithms=("gzip",))
@@ -630,13 +641,17 @@ class TestStreamingFlush:
         gate = threading.Event()
 
         def handler(ctx: HTTPReqCtx) -> BodyHandler | None:
-            ctx.start_response(Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]))
-            ctx.send(b"data: first\n\n")
-            # Block until the test has read+decoded "data: first". If
-            # SYNC_FLUSH didn't happen, this deadlocks at the 5s timeout.
-            gate.wait(timeout=5)
-            ctx.send(b"data: second\n\n")
-            ctx.finish_response()
+            def chunks() -> Iterator[bytes]:
+                yield b"data: first\n\n"
+                # Block until the test has read+decoded "data: first". If
+                # SYNC_FLUSH didn't happen, this deadlocks at the 5s timeout.
+                gate.wait(timeout=5)
+                yield b"data: second\n\n"
+
+            ctx.stream(
+                Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]),
+                chunks(),
+            )
             return None
 
         h = compress_handler(handler, algorithms=("gzip",))

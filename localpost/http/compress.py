@@ -1,15 +1,21 @@
 """Response compression middleware (dynamic responses only).
 
 Wraps a :data:`RequestHandler` so that responses emitted via
-:meth:`HTTPReqCtx.complete` are compressed when the client accepts it,
-the response is large enough to be worth compressing, and the
-content type is in the allowlist.
+:meth:`HTTPReqCtx.complete` and :meth:`HTTPReqCtx.stream` are
+compressed when the client accepts it, the response type / size is
+eligible, and the content type is in the allowlist.
 
-Streaming response paths (``start_response`` / ``send`` /
-``finish_response``) and zero-copy ``sendfile`` pass through
-**uncompressed** in v1 — composition with the static handler stays
-zero-copy. See ``plans/compression-middleware.md`` for the rationale
-and follow-ups.
+The middleware intercepts at the declarative level:
+
+- :meth:`complete` — compress the whole body in memory, replace
+  ``Content-Length``, set ``Content-Encoding``.
+- :meth:`stream` — wrap the chunk iterator with an incremental
+  compressor (sync-flush after each input chunk) so streaming
+  responses (incl. SSE) reach the client decompressed and parseable.
+
+Zero-copy :meth:`sendfile` passes through uncompressed by design —
+composition with the static handler stays zero-copy. See
+``plans/compression-middleware.md`` for rationale and follow-ups.
 
 Encodings:
 
@@ -30,14 +36,11 @@ import importlib.util
 import zlib
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, BinaryIO, Final
+from dataclasses import dataclass
+from typing import Any, BinaryIO, Final
 
-from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler, native_stream
-from localpost.http._types import InformationalResponse, Request, Response
-
-if TYPE_CHECKING:
-    from collections.abc import Buffer
+from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
+from localpost.http._types import Request, Response
 
 __all__ = [
     "DEFAULT_COMPRESSIBLE_TYPES",
@@ -160,6 +163,27 @@ _STREAM_ENCODER_FACTORIES: dict[str, Callable[[], _StreamEncoder]] = {
     "gzip": _GzipStreamEncoder,
     "br": _BrotliStreamEncoder,
 }
+
+
+def _compress_stream(chunks: Iterator[bytes], encoder: _StreamEncoder) -> Iterator[bytes]:
+    """Wrap ``chunks`` so each non-empty input chunk emits a compressed +
+    sync-flushed block, and the iterator's tail produces the encoder's
+    final flush.
+
+    Empty chunks pass through untouched — handlers sometimes yield ``b""``
+    to flush headers without committing payload bytes; emitting a
+    sync-marker for nothing would be a wasted byte on the wire.
+    """
+    for chunk in chunks:
+        if not chunk:
+            yield chunk
+            continue
+        out = encoder.compress(chunk) + encoder.flush()
+        if out:
+            yield out
+    tail = encoder.finish()
+    if tail:
+        yield tail
 
 
 def _check_algorithm_available(name: str) -> None:
@@ -387,7 +411,8 @@ def _merge_vary(existing: bytes) -> bytes:
 
 @dataclass(slots=True, eq=False)
 class _CompressedCtx:
-    """Forwarding proxy that intercepts :meth:`complete` to compress.
+    """Forwarding proxy that intercepts :meth:`complete` and :meth:`stream`
+    to compress eligible responses.
 
     All other methods / attributes pass through to ``_inner``. The
     proxy is allocated once per request — only when the request is
@@ -398,9 +423,6 @@ class _CompressedCtx:
     _encoding: str
     _min_size: int
     _compressible_types: frozenset[bytes]
-    # Streaming-mode state. ``_stream_encoder`` is non-None between a
-    # final ``start_response`` (eligible) and ``finish_response``.
-    _stream_encoder: _StreamEncoder | None = field(default=None, init=False)
 
     # ----- forwarded attributes -----
 
@@ -446,60 +468,31 @@ class _CompressedCtx:
     def receive(self, size: int = 65536, /) -> bytes:
         return self._inner.receive(size)
 
+    # ----- pass-through (zero-copy) -----
+
+    def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
+        # Zero-copy stays uncompressed by design (compression and sendfile
+        # are at odds; see plans/compression-middleware.md).
+        self._inner.sendfile(response, file, offset, count)
+
     # ----- intercepted streaming-response API -----
 
-    def start_response(self, response: Response | InformationalResponse, /) -> None:
-        # 1xx responses pass through verbatim (multiple may precede the final).
-        if isinstance(response, InformationalResponse):
-            self._inner.start_response(response)
-            return
-        # Final Response. Decide streaming compression eligibility.
-        if _is_streaming_eligible(
+    def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
+        if not _is_streaming_eligible(
             response,
             method=self._inner.request.method,
             compressible_types=self._compressible_types,
         ):
-            self._stream_encoder = _STREAM_ENCODER_FACTORIES[self._encoding]()
-            new_headers = _streaming_rewrite_headers(response.headers, encoding=self._encoding)
-            self._inner.start_response(
-                Response(status_code=response.status_code, headers=new_headers, reason=response.reason),
-            )
-        else:
-            self._inner.start_response(response)
-
-    def send(self, chunk: Buffer, /) -> None:
-        if self._stream_encoder is None:
-            self._inner.send(chunk)
+            self._inner.stream(response, chunks)
             return
-        chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
-        if not chunk_bytes:
-            # Empty send (sometimes used to flush headers): pass through
-            # so we don't emit a sync-marker for nothing.
-            self._inner.send(chunk_bytes)
-            return
-        out = self._stream_encoder.compress(chunk_bytes) + self._stream_encoder.flush()
-        if out:
-            self._inner.send(out)
+        encoder = _STREAM_ENCODER_FACTORIES[self._encoding]()
+        new_headers = _streaming_rewrite_headers(response.headers, encoding=self._encoding)
+        new_response = Response(
+            status_code=response.status_code, headers=new_headers, reason=response.reason
+        )
+        self._inner.stream(new_response, _compress_stream(chunks, encoder))
 
-    def finish_response(self) -> None:
-        if self._stream_encoder is not None:
-            tail = self._stream_encoder.finish()
-            self._stream_encoder = None
-            if tail:
-                self._inner.send(tail)
-        self._inner.finish_response()
-
-    def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
-        # Pass-through: zero-copy is preserved (compression and sendfile
-        # are at odds; see plans/compression-middleware.md).
-        self._inner.sendfile(response, file, offset, count)
-
-    def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
-        # Default impl: drives the imperative trio on ``self``, which the
-        # compression middleware already intercepts per-chunk.
-        native_stream(self, response, chunks)
-
-    # ----- intercepted -----
+    # ----- intercepted one-shot path -----
 
     def complete(self, response: Response, body: bytes | None = None) -> None:
         if not _is_compressible_response(
@@ -557,10 +550,14 @@ def compress_handler(
             installed (install via ``pip install localpost[http-compress]``).
 
     Returns:
-        A :data:`RequestHandler` that wraps ``inner``. Compression only
-        intercepts :meth:`HTTPReqCtx.complete`; streaming responses
-        (``start_response`` / ``send`` / ``finish_response``) and
-        :meth:`HTTPReqCtx.sendfile` pass through unchanged.
+        A :data:`RequestHandler` that wraps ``inner``. Compression
+        intercepts :meth:`HTTPReqCtx.complete` (whole-body compress)
+        and :meth:`HTTPReqCtx.stream` (per-chunk incremental compress
+        with sync-flush); :meth:`HTTPReqCtx.sendfile` and the imperative
+        trio (``start_response`` / ``send`` / ``finish_response``) pass
+        through unchanged. Use :meth:`HTTPReqCtx.stream` for true
+        streaming compression — the trio path is for low-level
+        wire-driver code (e.g. the WSGI bridge).
     """
     if not algorithms:
         raise ValueError("compress_handler: ``algorithms`` must be non-empty")

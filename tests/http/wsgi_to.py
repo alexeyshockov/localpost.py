@@ -252,27 +252,6 @@ class TestToWsgiStream:
         assert captured["status"].startswith("200 ")
 
 
-class TestToWsgiImperative:
-    def test_imperative_chunks_buffered(self):
-        def handler(ctx: HTTPReqCtx):
-            ctx.start_response(Response(200, [(b"content-type", b"text/plain")]))
-            ctx.send(b"foo")
-            ctx.send(b"bar")
-            ctx.finish_response()
-
-        status, headers, body = _drive(to_wsgi(handler), _base_environ())
-        assert status.startswith("200 ")
-        assert ("content-type", "text/plain") in headers
-        assert body == b"foobar"
-
-    def test_send_before_start_response_raises(self):
-        def handler(ctx: HTTPReqCtx):
-            ctx.send(b"oops")  # bug
-
-        with pytest.raises(RuntimeError, match=r"send.*before start_response"):
-            _drive(to_wsgi(handler), _base_environ())
-
-
 class TestToWsgiSendfile:
     def test_sendfile_with_file_wrapper(self, tmp_path):
         path = tmp_path / "f.txt"

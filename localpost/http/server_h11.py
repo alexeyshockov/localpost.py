@@ -38,11 +38,11 @@ from localpost.http._base import (
     BodyHandler,
     RequestHandler,
     Selector,
+    _native_stream,
     _peek_disconnected,
     _send_all,
     content_length,
     emit_handler_error,
-    native_stream,
     scan_response_headers,
 )
 from localpost.http._types import BodyTooLarge, InformationalResponse, Request, Response
@@ -395,7 +395,7 @@ class _HTTPReqCtx:
         self.finish_response()
 
     def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
-        native_stream(self, response, chunks)
+        _native_stream(self, response, chunks)
 
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
         # ``Content-Length`` framing is required — otherwise h11's writer

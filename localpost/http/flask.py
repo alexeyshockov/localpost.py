@@ -65,17 +65,14 @@ def _write_response(http_ctx: HTTPReqCtx, response) -> None:
     # response is a werkzeug.Response (Flask's Response subclasses it)
     reason = (response.status.split(" ", 1)[1] if " " in response.status else "").encode("iso-8859-1")
     wire_headers = [(name.encode("iso-8859-1"), value.encode("iso-8859-1")) for name, value in response.headers.items()]
-    http_ctx.start_response(
+    http_ctx.stream(
         _Response(
             status_code=response.status_code,
             headers=wire_headers,
             reason=reason,
-        )
+        ),
+        (chunk for chunk in response.iter_encoded() if chunk),
     )
-    for chunk in response.iter_encoded():
-        if chunk:
-            http_ctx.send(chunk)
-    http_ctx.finish_response()
 
 
 def flask_server(config: ServerConfig, app: Flask, /):

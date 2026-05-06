@@ -11,7 +11,7 @@ from urllib.parse import unquote_to_bytes
 from wsgiref.types import WSGIApplication
 
 from localpost.http._base import BodyHandler, HTTPReqCtx, RequestHandler
-from localpost.http._types import InformationalResponse, Request
+from localpost.http._types import Request
 from localpost.http._types import Response as _Response
 from localpost.http.config import DEFAULT_BUFFER_SIZE
 
@@ -101,24 +101,29 @@ def wrap_wsgi(app: WSGIApplication) -> RequestHandler:
 
         body_iter = app(environ, start_response)
         try:
-            first_nonempty: bytes | None = None
-            # Materialize the first chunk (even if empty) — guarantees start_response has been called.
             iterator = iter(body_iter)
+            # Pull the first chunk so the WSGI app commits to calling
+            # start_response before we hand the response to ctx.stream
+            # (PEP 3333 only guarantees start_response is called by the
+            # time the iterable yields its first value).
+            first_chunk: bytes | None = None
             for chunk in iterator:
                 if chunk:
-                    first_nonempty = chunk
+                    first_chunk = chunk
                     break
             response = response_state.get("response")
             if response is None:
                 raise RuntimeError("WSGI app returned without calling start_response")
-            ctx.start_response(response)
             response_state["started"] = True
-            if first_nonempty is not None:
-                ctx.send(first_nonempty)
-                for chunk in iterator:
-                    if chunk:
-                        ctx.send(chunk)
-            ctx.finish_response()
+
+            def chunks() -> Iterator[bytes]:
+                if first_chunk is not None:
+                    yield first_chunk
+                for c in iterator:
+                    if c:
+                        yield c
+
+            ctx.stream(response, chunks())
         finally:
             close = getattr(body_iter, "close", None)
             if close is not None:
@@ -198,17 +203,16 @@ class _WSGIReqCtx:
     server is tuned for). ``receive`` slices the buffered body for any
     handler that wants chunked reads.
 
-    Three response shapes are supported:
+    Three response shapes are supported, all via the public
+    :class:`HTTPReqCtx` Protocol:
 
     - **Eager** (``complete``): captured into ``_completed`` and returned
       as a single-element iterable.
     - **Declarative streaming** (``stream``): the chunk iterator is
       handed to the WSGI server lazily — no thread / queue, the WSGI
       worker drives iteration and flushing.
-    - **Imperative** (``start_response`` + ``send`` + ``finish_response``):
-      chunks are appended to a list. The handler runs synchronously, so
-      the full list is returned at the end. **No per-chunk pacing** on
-      this path — for true streaming use :meth:`stream`.
+    - **Zero-copy** (``sendfile``): mapped to ``wsgi.file_wrapper`` when
+      the host server provides it, else a chunked read+yield fallback.
 
     ``borrow()`` is a no-op CM (the WSGI worker already owns the
     connection); ``borrowed`` is always ``True``.
@@ -227,8 +231,6 @@ class _WSGIReqCtx:
     # Response capture state — at most one of these is populated.
     _completed: tuple[_Response, bytes] | None = None
     _streaming: tuple[_Response, Iterator[bytes]] | None = None
-    _imperative_response: _Response | None = None
-    _imperative_chunks: list[bytes] = field(default_factory=list)
     _sendfile: tuple[_Response, BinaryIO, int, int] | None = None
 
     @property
@@ -260,23 +262,6 @@ class _WSGIReqCtx:
         self.response_status = response.status_code
         self._completed = (response, body or b"")
 
-    def start_response(self, response: _Response | InformationalResponse, /) -> None:
-        if isinstance(response, InformationalResponse):
-            # WSGI's start_response is final-response only; 1xx isn't surfaced.
-            return
-        self._check_not_started()
-        self.response_status = response.status_code
-        self._imperative_response = response
-
-    def send(self, chunk: Buffer, /) -> None:
-        if self._imperative_response is None:
-            raise RuntimeError("send() before start_response()")
-        self._imperative_chunks.append(bytes(chunk))
-
-    def finish_response(self) -> None:
-        if self._imperative_response is None:
-            raise RuntimeError("finish_response() before start_response()")
-
     def stream(self, response: _Response, chunks: Iterator[bytes], /) -> None:
         self._check_not_started()
         self.response_status = response.status_code
@@ -306,10 +291,6 @@ class _WSGIReqCtx:
             if file_wrapper is not None:
                 return file_wrapper(_LimitedReader(file, count), DEFAULT_BUFFER_SIZE)
             return _read_chunks(file, count, DEFAULT_BUFFER_SIZE)
-        if self._imperative_response is not None:
-            response = self._imperative_response
-            start_response(_status_line(response), _wsgi_headers(response.headers))
-            return self._imperative_chunks
         raise RuntimeError("Handler returned without producing a response")
 
     def _check_not_started(self) -> None:
@@ -317,7 +298,6 @@ class _WSGIReqCtx:
             self._completed is not None
             or self._streaming is not None
             or self._sendfile is not None
-            or self._imperative_response is not None
         ):
             raise RuntimeError("Response already started")
 
@@ -335,10 +315,6 @@ def to_wsgi(handler: RequestHandler) -> WSGIApplication:
       server (lazy, true per-chunk flushing).
     - ``ctx.sendfile(...)`` → ``wsgi.file_wrapper`` if the host server
       provides it, else a chunked read+yield fallback.
-    - imperative ``start_response`` / ``send`` / ``finish_response`` →
-      chunks buffered in a list and returned as the WSGI body iterable.
-      No per-chunk pacing on this path; if you need true streaming,
-      use :meth:`HTTPReqCtx.stream`.
 
     Deployment::
 

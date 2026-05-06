@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Iterator
 
 from localpost.hosting import run_app, service
 from localpost.http import (
@@ -44,22 +45,24 @@ from localpost.http import (
 
 
 def _events(ctx: HTTPReqCtx) -> None:
-    ctx.start_response(
+    def ticks() -> Iterator[bytes]:
+        n = 0
+        while True:
+            check_cancelled()
+            yield f"data: tick {n} at {time.time():.3f}\n\n".encode()
+            n += 1
+            time.sleep(1)
+
+    ctx.stream(
         Response(
             status_code=200,
             headers=[
                 (b"content-type", b"text/event-stream"),
                 (b"cache-control", b"no-cache"),
             ],
-        )
+        ),
+        ticks(),
     )
-    n = 0
-    while True:
-        check_cancelled()
-        msg = f"data: tick {n} at {time.time():.3f}\n\n".encode()
-        ctx.send(msg)
-        n += 1
-        time.sleep(1)
 
 
 @service

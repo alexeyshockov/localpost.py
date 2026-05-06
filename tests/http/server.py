@@ -133,15 +133,13 @@ class TestRequestBody:
 class TestChunkedResponse:
     def test_streaming_response(self, serve_in_thread):
         def handler(ctx: HTTPReqCtx):
-            ctx.start_response(
+            ctx.stream(
                 Response(
                     status_code=200,
                     headers=[(b"Transfer-Encoding", b"chunked")],
-                )
+                ),
+                iter([b"chunk1", b"chunk2"]),
             )
-            ctx.send(b"chunk1")
-            ctx.send(b"chunk2")
-            ctx.finish_response()
 
         with serve_in_thread(handler) as port:
             resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
@@ -269,14 +267,18 @@ class TestProtocolErrors:
             nonlocal crash_count
             with crash_lock:
                 crash_count += 1
-            ctx.start_response(
+
+            def chunks():
+                yield b"first chunk"
+                raise RuntimeError("crashed mid-stream")
+
+            ctx.stream(
                 Response(
                     status_code=200,
                     headers=[(b"transfer-encoding", b"chunked")],
-                )
+                ),
+                chunks(),
             )
-            ctx.send(b"first chunk")
-            raise RuntimeError("crashed mid-stream")
 
         with serve_in_thread(boom) as port:
             # Two separate TCP connections to the SAME server — the second one
@@ -462,24 +464,6 @@ class TestHeadAndPipelining:
         assert b"resp-for-/b" in data
 
 
-# --- Buffer-protocol body ---------------------------------------------------
-
-
-class TestSendBuffer:
-    def test_send_accepts_memoryview(self, serve_in_thread):
-        """``ctx.send`` accepts any Buffer (memoryview, bytearray, …)."""
-
-        def handler(ctx: HTTPReqCtx) -> None:
-            ctx.start_response(Response(status_code=200, headers=[(b"content-length", b"5")]))
-            payload = bytearray(b"hello")
-            ctx.send(memoryview(payload)[:5])
-            ctx.finish_response()
-
-        with serve_in_thread(handler) as port:
-            resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=5)
-
-        assert resp.status_code == 200
-        assert resp.content == b"hello"
 
 
 # --- Stale-connection cleanup ------------------------------------------------

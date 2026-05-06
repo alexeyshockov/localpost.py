@@ -57,8 +57,8 @@ __all__ = [
     "SelectorCallback",
     "TrackHere",
     "_NativeReqCtx",
+    "_native_stream",
     "compose",
-    "native_stream",
     "start_http_server",
 ]
 
@@ -259,18 +259,20 @@ class HTTPReqCtx(Protocol):
     reports ``borrowed=True`` and :meth:`borrow` is a no-op CM).
 
     **Sync vs. async surface.** Most members mirror
-    :class:`localpost.http.AsyncHTTPReqCtx`. Two members are sync-only by
-    design:
+    :class:`localpost.http.AsyncHTTPReqCtx`. The sync-only members
+    are :meth:`borrow` / :attr:`borrowed` (the native sync server
+    hands a connection between selector and worker threads; async
+    transports own their conn for the coroutine's lifetime and have
+    nothing to borrow — WSGI satisfies this trivially so handler
+    code stays portable).
 
-    - :meth:`borrow` / :attr:`borrowed` — only the native sync server
-      hands a connection between selector and worker threads; async
-      transports own their conn for the duration of the coroutine and
-      have nothing to borrow. WSGI satisfies this surface trivially
-      (always borrowed, no-op CM) so that handler code stays portable.
-    - 1xx :class:`InformationalResponse` accepted by :meth:`start_response`
-      — ASGI / RSGI surfaces don't expose informational responses
-      cleanly, so the async ctx omits them. Native sync handlers can
-      send 100 Continue / 102 Processing through the trio.
+    The wire-driver trio (``start_response`` / ``send`` /
+    ``finish_response``) used to live here too; it has been demoted
+    to :class:`_NativeReqCtx` (internal). Handlers should call
+    :meth:`complete` (one-shot) or :meth:`stream` (declarative chunk
+    iterator) — both transport-portable. Internal sync wire-driver
+    code (the h11 / httptools backends, the ``sendfile`` path) still
+    uses the trio under the hood.
     """
 
     request: Request
@@ -306,9 +308,6 @@ class HTTPReqCtx(Protocol):
     def borrowed(self) -> bool: ...
     def borrow(self) -> AbstractContextManager[HTTPReqCtx]: ...
     def receive(self, size: int = ..., /) -> bytes: ...
-    def start_response(self, response: Response | InformationalResponse, /) -> None: ...
-    def send(self, chunk: Buffer, /) -> None: ...
-    def finish_response(self) -> None: ...
     def complete(self, response: Response, body: bytes | None = None) -> None: ...
     def stream(self, response: Response, chunks: Iterator[bytes], /) -> None:
         """Emit ``response`` then drain ``chunks`` to the wire.
@@ -318,10 +317,6 @@ class HTTPReqCtx(Protocol):
         checks :func:`localpost.http.check_cancelled` between chunks and
         returns silently if the client has gone away. External transports
         (WSGI bridge) hand the iterator straight to their host server.
-
-        Sugar over :meth:`start_response` + :meth:`send` (per-chunk) +
-        :meth:`finish_response`. Pure-imperative callers still have the
-        trio available; ``stream`` is the path most operations want.
         """
 
     def sendfile(self, response: Response, file: BinaryIO, offset: int, count: int) -> None:
@@ -333,21 +328,26 @@ class HTTPReqCtx(Protocol):
         the backend uses that framing to keep its parser state consistent
         with what the kernel actually wrote. The socket is set blocking
         (with ``rw_timeout``) for the duration of the syscall — restored
-        on selector-thread give-back via :meth:`HTTPReqCtx.finish_response`'s
-        ``_maybe_give_back`` path.
+        on selector-thread give-back.
         """
 
 
 class _NativeReqCtx(HTTPReqCtx, Protocol):
     """Internal Protocol — the native ``localpost.http`` ctx.
 
-    Adds back the connection handle that internal callers (worker pool,
-    handler-error recovery) need. External transports (WSGI / ASGI) do
-    not implement this — they only satisfy :class:`HTTPReqCtx`.
+    Adds back the imperative wire-driver trio (``start_response`` /
+    ``send`` / ``finish_response``) and the connection handle that
+    internal callers (worker pool, handler-error recovery, the
+    backends' own ``stream`` / ``sendfile`` impls) need. External
+    transports (WSGI / ASGI / RSGI) do not implement this — they only
+    satisfy :class:`HTTPReqCtx`.
     """
 
     @property
     def conn(self) -> BaseHTTPConn: ...
+    def start_response(self, response: Response | InformationalResponse, /) -> None: ...
+    def send(self, chunk: Buffer, /) -> None: ...
+    def finish_response(self) -> None: ...
 
 
 BodyHandler = Callable[[HTTPReqCtx], None]
@@ -473,8 +473,9 @@ def _peek_disconnected(sock: socket.socket) -> bool:
     return not peeked
 
 
-def native_stream(ctx: HTTPReqCtx, response: Response, chunks: Iterator[bytes]) -> None:
-    """Default :meth:`HTTPReqCtx.stream` impl on top of the imperative trio.
+def _native_stream(ctx: _NativeReqCtx, response: Response, chunks: Iterator[bytes]) -> None:
+    """Internal default :meth:`HTTPReqCtx.stream` impl on top of the
+    imperative trio (sync native backends only).
 
     Delegates to ``ctx.start_response`` / ``ctx.send`` / ``ctx.finish_response``,
     interleaving :func:`localpost.http.check_cancelled` between chunks. On

@@ -146,9 +146,10 @@ A few members are deliberately asymmetric:
 | Member | Sync | Async | Why |
 | --- | --- | --- | --- |
 | `borrow()` / `borrowed` | ✅ | — | Only the sync native server hands a connection between selector and worker threads. Async transports own the conn for the coroutine's lifetime; there's nothing to borrow. The WSGI bridge satisfies the sync member trivially (always borrowed, no-op CM) so handler code stays portable. |
-| 1xx `InformationalResponse` via `start_response` | ✅ | — | ASGI's `http.response.start` and RSGI's response calls are final-only. 100 Continue / 102 Processing are emitted by the host server (sync) or not at all (async). |
 | `disconnected` poll | ✅ | ✅ | Native sync does a non-blocking `MSG_PEEK` per access (sticky once True). WSGI bridge is always False — surface disconnects via `BrokenPipeError` from the host's per-chunk write instead. Async transports flip the flag on `http.disconnect`. |
 | `check_cancelled()` (raises) | ✅ | — | Sync handlers without `ctx` in scope can call it from anywhere on the request thread; async code already has `ctx` and uses `ctx.disconnected`. |
+
+The wire-driver trio (`start_response` / `send` / `finish_response`) is **not** part of the public Protocol on either side. Sync native backends still use it internally to drive h11 / httptools, and 1xx informational responses (100 Continue / 102 Processing) are emitted by the server through that internal path. Handlers express responses declaratively via `complete()` (one-shot) or `stream(response, chunks)` (chunk iterator) — both portable across sync and async.
 
 ## Key concepts
 
@@ -212,7 +213,7 @@ thread + N worker selectors) drop in without touching the request hot path.
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
 | `start_http_server(cfg, handler)` | Context manager yielding a `Server` bound to ``handler`` |
-| `HTTPReqCtx`              | Per-request context (`headers`, `body`, `complete`, `sendfile`) |
+| `HTTPReqCtx`              | Per-request context (`request`, `body`, `complete`, `stream`, `sendfile`, `disconnected`) |
 | `RequestHandler`          | `Callable[[HTTPReqCtx], None]`             |
 
 ### Selector / accept-side topology
@@ -452,22 +453,22 @@ When eligible: body is compressed, `Content-Length` is replaced,
 
 #### Streaming responses (incl. SSE)
 
-`compress_handler` also intercepts the streaming-response path
-(`start_response` → `send`* → `finish_response`). The middleware decides
-per-request:
+`compress_handler` intercepts both `complete(...)` and `stream(...)`.
+The middleware decides per-request:
 
 - One-shot path (`complete(response, body)`) → compress the whole body
   in memory; replace `Content-Length`.
-- Streaming path with **no** `Content-Length` declared → use an
-  incremental compressor; each `send(chunk)` emits the bytes followed
-  by a sync-flush so the decompressor sees each chunk promptly. The
-  backend auto-frames `Transfer-Encoding: chunked` on HTTP/1.1.
+- Streaming path (`stream(response, chunks)`) with **no** `Content-Length`
+  declared → wrap the chunk iterator with an incremental compressor;
+  each input chunk is emitted compressed + sync-flushed so the
+  decompressor sees each chunk promptly. The backend auto-frames
+  `Transfer-Encoding: chunked` on HTTP/1.1.
 - Streaming path **with** `Content-Length` → pass through (we'd
   otherwise lie about the declared length).
 
 For SSE (`Content-Type: text/event-stream`, included in
-`DEFAULT_COMPRESSIBLE_TYPES`), each event you `send(...)` reaches the
-client decompressed and parseable by `EventSource` — same approach
+`DEFAULT_COMPRESSIBLE_TYPES`), each event your generator yields reaches
+the client decompressed and parseable by `EventSource` — same approach
 nginx uses with `gzip on; gzip_types text/event-stream`. All major
 browsers transparently decompress `Content-Encoding: gzip` / `br`
 streams before EventSource sees them.
@@ -478,9 +479,9 @@ static handler stays zero-copy.
 #### Limitations
 
 - **One-shot path allocates a compressed buffer per response.** Fine for
-  typical JSON; for multi-MB single-shot payloads consider building
-  the response with `start_response` + `send` instead so the streaming
-  compressor handles it incrementally.
+  typical JSON; for multi-MB single-shot payloads, hand
+  `compress_handler` a `stream(response, chunks)` instead so the
+  streaming compressor handles it incrementally.
 - **Brotli is opt-in.** `pip install localpost[http-compress]`
   installs `brotli`. If `"br"` is in `algorithms` without the extra,
   `compress_handler` raises `ImportError` at construction time.

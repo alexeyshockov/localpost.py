@@ -174,15 +174,13 @@ def test_handler_exception_returns_500_and_server_survives(serve_backend_in_thre
 
 def test_streaming_response_chunks(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(
+        ctx.stream(
             Response(
                 status_code=200,
                 headers=[],
-            )
+            ),
+            iter([b"chunk1", b"chunk2"]),
         )
-        ctx.send(b"chunk1")
-        ctx.send(b"chunk2")
-        ctx.finish_response()
 
     with serve_backend_in_thread(handler) as port:
         r = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
@@ -193,8 +191,7 @@ def test_streaming_response_chunks(serve_backend_in_thread):
 
 def test_unframed_204_response_has_no_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(Response(status_code=204, headers=[]))
-        ctx.finish_response()
+        ctx.complete(Response(status_code=204, headers=[]))
 
     with serve_backend_in_thread(handler) as port:
         r = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
@@ -206,8 +203,7 @@ def test_unframed_204_response_has_no_transfer_encoding(serve_backend_in_thread)
 
 def test_unframed_304_response_has_no_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(Response(status_code=304, headers=[]))
-        ctx.finish_response()
+        ctx.complete(Response(status_code=304, headers=[]))
 
     with serve_backend_in_thread(handler) as port:
         r = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
@@ -219,8 +215,7 @@ def test_unframed_304_response_has_no_transfer_encoding(serve_backend_in_thread)
 
 def test_unframed_head_response_has_no_body_or_transfer_encoding(serve_backend_in_thread):
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(Response(status_code=200, headers=[]))
-        ctx.finish_response()
+        ctx.complete(Response(status_code=200, headers=[]))
 
     with serve_backend_in_thread(handler) as port:
         with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
@@ -250,18 +245,16 @@ def test_user_supplied_chunked_te_frames_chunks(serve_backend_in_thread):
     import socket  # noqa: PLC0415
 
     def handler(ctx: HTTPReqCtx) -> None:
-        ctx.start_response(
+        ctx.stream(
             Response(
                 status_code=200,
                 headers=[
                     (b"content-type", b"text/plain"),
                     (b"transfer-encoding", b"chunked"),
                 ],
-            )
+            ),
+            iter([b"chunk1", b"chunk2"]),
         )
-        ctx.send(b"chunk1")
-        ctx.send(b"chunk2")
-        ctx.finish_response()
 
     with serve_backend_in_thread(handler) as port, socket.create_connection(("127.0.0.1", port), timeout=5) as s:
         s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
