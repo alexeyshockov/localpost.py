@@ -1,7 +1,5 @@
 # localpost.hosting
 
-> **Status:** stable — public API is not expected to break in patch/minor releases.
-
 Service lifecycle management and orchestration. A `service` is any async (or
 sync) function wrapped with a lifecycle — it goes through `Starting →
 Running → ShuttingDown → Stopped`, reacts to signals, and can spawn child
@@ -52,22 +50,6 @@ See `examples/host/finite_service.py`, `examples/host/channel.py`.
 - **`current_service()` / `current_app()`** — read-only views of the enclosing
   lifetimes via contextvars, without threading them through every call.
 
-## Public API
-
-| Symbol                           | Where                | Notes                                      |
-| -------------------------------- | -------------------- | ------------------------------------------ |
-| `service`                        | decorator            | Wrap a factory into a hosted service       |
-| `run_app(*services)`             | entry point          | Signal handling + `anyio.run`              |
-| `run(svc, parent=None)`          | low-level            | Run a single service, return exit code     |
-| `serve(svc, *, parent=None)`     | low-level            | Async CM yielding `ServiceLifetimeView`    |
-| `observe_services(*lifetimes)`   | async CM             | Wait for all to start; shut down on exit   |
-| `current_service()`              | contextvar accessor  | Raises if outside a hosting context        |
-| `ServiceLifetime`                | dataclass            | Mutable lifetime (internal-ish)            |
-| `ServiceLifetimeView`            | dataclass            | Read-only view + `observe()`, `shutdown()` |
-| `ServiceState`                   | type alias           | `Starting` \| `Running` \| `ShuttingDown` \| `Stopped` |
-| `Starting` / `Running` / `ShuttingDown` / `Stopped` | dataclasses | Individual states            |
-| `shutdown_on_signal(*signals)`   | middleware           | SIGINT + SIGTERM by default                |
-
 ## Writing a service
 
 Four signatures are supported; `@service` picks the right adapter:
@@ -100,26 +82,19 @@ def my_middleware(arg) -> Callable[[ServiceF], ServiceF]:
 
 ## Adapters for external servers (`services/`)
 
-| Adapter       | What it wraps                             |
-| ------------- | ----------------------------------------- |
-| `uvicorn.py`  | `uvicorn.Server` (`config` input; reload and multi-worker disabled) |
-| `hypercorn.py`| `hypercorn.asyncio.serve(app, config)` with a shutdown trigger |
-| `grpc.py`     | `grpc.aio.Server` with configurable grace period |
-| `_asgi.py`    | Shared ASGI lifespan helpers              |
-
-Each adapter is decorated with `@hosting.service`, so it plugs into
-`run_app()` the same way as any other service.
+`uvicorn.py` wraps `uvicorn.Server` (with reload and multi-worker disabled);
+`hypercorn.py` wraps `hypercorn.asyncio.serve(app, config)` with a shutdown
+trigger; `grpc.py` wraps `grpc.aio.Server` with a configurable grace period;
+`_asgi.py` holds shared ASGI lifespan helpers. Each adapter is decorated
+with `@hosting.service`, so it plugs into `run_app()` the same way as any
+other service.
 
 ## Host as RSGI for Granian
 
-uvicorn / hypercorn run *inside* our process — they're hosted services
-in `run_app()`. **Granian is the opposite direction**: it's a process
-supervisor that spawns workers, then loads our app via its RSGI
-interface. To deploy a hosted app (multiple services + an HTTP handler)
-under Granian, flip the topology: the host *itself* implements RSGI,
-and runs the full hosting lifecycle inside each Granian worker.
-
-`localpost.hosting.HostRSGIApp` does this:
+`localpost.hosting.HostRSGIApp` runs the full hosting lifecycle (multiple
+services + an HTTP handler) inside each Granian worker. Granian is a process
+supervisor that spawns workers and loads our app via its RSGI interface, so
+the topology flips: the host *itself* implements RSGI.
 
 ```python
 from localpost import hosting
@@ -147,32 +122,16 @@ rsgi_app = hosting.HostRSGIApp(
 # granian --interface rsgi --workers 4 myapp:rsgi_app
 ```
 
-Per-worker behaviour:
-
-- `__rsgi_init__` schedules a long-lived task that enters
-  `hosting.serve(...)` for the supplied services. The task holds the
-  lifetime open for the worker's whole life.
-- `__rsgi__` waits on a "ready" event before dispatching the first
-  request, so requests never see a half-started host.
-- `__rsgi_del__` signals the lifecycle task to exit its
-  `serve()` block — services drain and stop in dependency order before
-  the worker finishes shutdown.
-
 `shutdown_on_signal` is **not** applied — Granian owns signal handling;
-`__rsgi_del__` is how shutdown reaches us.
-
-> **Per-worker side effects.** Granian spawns N workers; every service
-> in `services=` runs in *each* worker. Cron-style "run once" jobs need
-> either `--workers 1` or external coordination (DB lock, leader
-> election). Process-shared state across workers doesn't exist — that's
-> normal multi-process territory.
+`__rsgi_del__` is how shutdown reaches us. Every service in `services=`
+runs in *each* worker, so cron-style "run once" jobs need either
+`--workers 1` or external coordination (DB lock, leader election).
 
 For the bridge layer (RSGI translation, no hosting integration), see
-[`localpost.http.rsgi`](../http/README.md#localposthttprsgi).
-The
-[deployment-topologies design note](../../docs/design/deployment-topologies.md)
-explains why uvicorn-as-a-hosted-service and Granian-as-a-supervisor
-are asymmetric.
+[`localpost.http.rsgi`](../http/README.md#localposthttprsgi). The
+asymmetry between uvicorn-as-a-hosted-service and Granian-as-a-supervisor
+(plus per-worker lifecycle details) is covered in
+[deployment-topologies.md](../../docs/design/deployment-topologies.md).
 
 ## Implementation notes
 

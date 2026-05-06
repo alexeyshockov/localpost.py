@@ -1,7 +1,5 @@
 # localpost.scheduler
 
-> **Status:** stable — public API is not expected to break in patch/minor releases.
-
 Composable in-process task scheduler. Tasks are triggered by **conditions**
 (time intervals, cron expressions, completion of another task), and triggers
 are built up with operators — `//` to compose middleware, `>>` to extend a
@@ -78,23 +76,6 @@ See [`examples/scheduler/`](../../examples/scheduler/) for more
   are `ServiceF`s. Pass them to `localpost.hosting.run_app(...)` (entry point,
   signal handling) or `localpost.hosting.serve(...)` (async CM, e.g. for
   embedding in a FastAPI lifespan).
-
-## Public API
-
-| Symbol                          | Notes                                         |
-| ------------------------------- | --------------------------------------------- |
-| `scheduled_task(trigger)`       | Decorator that wraps a handler into a task    |
-| `Task`                          | Base task type                                |
-| `ScheduledTask`                 | Runtime task object                           |
-| `ScheduledTaskTemplate`         | Trigger + middleware, not yet bound to handler |
-| `Scheduler`                     | Groups multiple tasks. Itself a `ServiceF` — pass to `run_app(...)` / `serve(...)` from `localpost.hosting` |
-| `every(period)`                 | Trigger: every `timedelta` or string ("3s")   |
-| `after(task)`                   | Trigger: after each success of `task`         |
-| `after_all(task)`               | Trigger: after every run of `task` (success or failure) |
-| `delay(factor)`                 | Middleware: sleep between events              |
-| `take_first(n)`                 | Middleware: emit first N, then stop           |
-| `trigger_factory_middleware`    | Helper for writing middleware                 |
-| `scheduler.cond.cron.cron(...)` | Cron-string trigger (needs `[cron]` extra)    |
 
 ## Writing a custom trigger
 

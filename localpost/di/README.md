@@ -1,7 +1,5 @@
 # localpost.di
 
-> **Status:** stable — public API is not expected to break in patch/minor releases.
-
 Small, `.NET`-style inversion-of-control container: scoped service resolution
 with automatic constructor wiring. No decorators, no async, no "one interface,
 many implementations" — just a registry + provider + scope.
@@ -90,32 +88,16 @@ See [`examples/di/basic.py`](../../examples/di/basic.py),
   Lets request-scoped code call `service_provider.resolve(...)` without
   plumbing the provider through.
 
-## Public API
+## Module layout
 
-All public symbols live under `localpost.di._services` (module layout is
-being stabilised; expect a top-level `__init__` re-export):
+Symbols currently live under `localpost.di._services` — `localpost/di/__init__.py`
+is empty and a top-level re-export is pending. Treat the module path as
+unstable until that lands.
 
-| Symbol                                          | Notes                                    |
-| ----------------------------------------------- | ---------------------------------------- |
-| `ServiceRegistry()`                             | Mutable registry of descriptors          |
-| `registry.register_instance(value, service_type=None, scope=None)` | Bind an already-built value |
-| `registry.register(service_type, factory=None, scope=None, create_on_enter=False)` | Register a type / factory |
-| `registry.app_scope()`                          | Context manager yielding a `ServiceProvider` |
-| `ServiceProvider` (Protocol)                    | `resolve[T](type)`, `sp[Type]`, `create[T](type, **kw)` |
-| `AppContext`                                    | Default scope type                       |
-| `service_provider`                              | `CurrentServiceProvider` proxy (contextvar-backed) |
-| `ServiceDescriptor`                             | Frozen (service_type, scope_type, factory) tuple |
-| `ResolutionContext` (Protocol)                  | Implement for custom scopes              |
-| `ServiceNotRegisteredError`, `NoResolutionContextError` | Exceptions                       |
-
-### Flask adapter — `localpost.di.flask`
-
-| Symbol                                    | Notes                                        |
-| ----------------------------------------- | -------------------------------------------- |
-| `RequestContext`                          | Per-request scope                            |
-| `init_app(app, registry, provider)`       | Opens a `RequestContext` per Flask request; registers `flask.Request` for auto-injection |
-
-A Quart adapter (`localpost/di/quart.py`) exists as a stub only.
+The Flask adapter (`localpost.di.flask`) provides `RequestContext` (per-request
+scope) and `init_app(app, registry, provider)` which opens a `RequestContext`
+per Flask request and registers `flask.Request` for auto-injection. A Quart
+adapter (`localpost/di/quart.py`) exists as a stub only.
 
 ## Defining a custom scope
 
