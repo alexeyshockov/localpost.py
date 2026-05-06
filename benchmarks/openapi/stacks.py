@@ -1,16 +1,19 @@
 """OpenAPI bench stack registry.
 
-Three stacks for v1 — one per peer framework, each on its naturally-fitting
-server. Single-process by design so we measure framework overhead, not
-worker multiplexing.
+Four stacks for v1 — the two LocalPost flavours plus one per peer
+framework. Single-process by design so we measure framework overhead,
+not worker multiplexing.
 
-* ``localpost_openapi``  — ``localpost.openapi.HttpApp`` on ``localpost.http`` (h11).
-* ``flask_openapi``      — ``flask-openapi3`` on Gunicorn (1 worker, 32 threads).
-* ``fastapi``            — FastAPI on Uvicorn (1 worker).
+* ``localpost_openapi``        — ``HttpApp`` on ``localpost.http`` (h11), sync handlers.
+* ``localpost_openapi_async``  — ``HttpAsyncApp`` on Uvicorn (1 worker), async handlers.
+* ``flask_openapi``            — ``flask-openapi3`` on Gunicorn (1 worker, 32 threads).
+* ``fastapi``                  — FastAPI on Uvicorn (1 worker).
 
 Dim keys: ``framework``, ``server``, ``schema`` (the validation library
 each framework drives — ``msgspec`` for LocalPost, ``pydantic`` for the
-other two).
+other two). The two LocalPost stacks share ``framework=localpost`` so
+the ``localpost`` group filter pulls both; ``server`` discriminates
+them in result tables (``lp-h11`` vs ``uvicorn``).
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ def _stack(name: str, *, framework: str, server: str, schema: str) -> Stack:
 
 STACKS: Final[tuple[Stack, ...]] = (
     _stack("localpost_openapi", framework="localpost", server="lp-h11", schema="msgspec"),
+    _stack("localpost_openapi_async", framework="localpost", server="uvicorn", schema="msgspec"),
     _stack("flask_openapi", framework="flask-openapi3", server="gunicorn", schema="pydantic"),
     _stack("fastapi", framework="fastapi", server="uvicorn", schema="pydantic"),
 )
