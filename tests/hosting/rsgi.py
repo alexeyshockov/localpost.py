@@ -76,11 +76,11 @@ class _FakeProto:
     async def client_disconnect(self) -> None:
         await asyncio.Event().wait()  # never resolves
 
-    def response_empty(self, status: int, headers: Any) -> None:  # noqa: ARG002
+    def response_empty(self, status: int, headers: Any) -> None:
         self.response_status = status
         self.response_body = b""
 
-    def response_bytes(self, status: int, headers: Any, body: bytes) -> None:  # noqa: ARG002
+    def response_bytes(self, status: int, headers: Any, body: bytes) -> None:
         self.response_status = status
         self.response_body = body
 

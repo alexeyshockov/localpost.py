@@ -110,6 +110,70 @@ def my_middleware(arg) -> Callable[[ServiceF], ServiceF]:
 Each adapter is decorated with `@hosting.service`, so it plugs into
 `run_app()` the same way as any other service.
 
+## Host as RSGI for Granian
+
+uvicorn / hypercorn run *inside* our process — they're hosted services
+in `run_app()`. **Granian is the opposite direction**: it's a process
+supervisor that spawns workers, then loads our app via its RSGI
+interface. To deploy a hosted app (multiple services + an HTTP handler)
+under Granian, flip the topology: the host *itself* implements RSGI,
+and runs the full hosting lifecycle inside each Granian worker.
+
+`localpost.hosting.HostRSGIApp` does this:
+
+```python
+from localpost import hosting
+from localpost.openapi import HttpAsyncApp
+from localpost.scheduler import every, scheduled_task
+
+
+app = HttpAsyncApp()
+
+
+@app.get("/")
+async def root() -> str:
+    return "ok"
+
+
+@scheduled_task(every(seconds=5))
+async def heartbeat() -> None: ...
+
+
+rsgi_app = hosting.HostRSGIApp(
+    services=[heartbeat.service()],
+    rsgi_handler=app,
+)
+
+# granian --interface rsgi --workers 4 myapp:rsgi_app
+```
+
+Per-worker behaviour:
+
+- `__rsgi_init__` schedules a long-lived task that enters
+  `hosting.serve(...)` for the supplied services. The task holds the
+  lifetime open for the worker's whole life.
+- `__rsgi__` waits on a "ready" event before dispatching the first
+  request, so requests never see a half-started host.
+- `__rsgi_del__` signals the lifecycle task to exit its
+  `serve()` block — services drain and stop in dependency order before
+  the worker finishes shutdown.
+
+`shutdown_on_signal` is **not** applied — Granian owns signal handling;
+`__rsgi_del__` is how shutdown reaches us.
+
+> **Per-worker side effects.** Granian spawns N workers; every service
+> in `services=` runs in *each* worker. Cron-style "run once" jobs need
+> either `--workers 1` or external coordination (DB lock, leader
+> election). Process-shared state across workers doesn't exist — that's
+> normal multi-process territory.
+
+For the bridge layer (RSGI translation, no hosting integration), see
+[`localpost.http.rsgi`](../http/README.md#localposthttprsgi).
+The
+[deployment-topologies design note](../../docs/design/deployment-topologies.md)
+explains why uvicorn-as-a-hosted-service and Granian-as-a-supervisor
+are asymmetric.
+
 ## Implementation notes
 
 - A service may spawn child services via `lt.start(child_svc)` — they run in

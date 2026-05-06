@@ -298,7 +298,7 @@ class TestToAsgiStreaming:
 
     @pytest.mark.anyio
     async def test_content_length_pre_check_413(self) -> None:
-        async def handler(ctx: AsyncHTTPReqCtx) -> None:  # noqa: ARG001
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
             raise AssertionError("handler should not run")
 
         asgi_app = to_asgi(handler, streaming=True, max_body_size=4)

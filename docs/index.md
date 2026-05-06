@@ -20,9 +20,13 @@ Architectural decisions and contract explanations — read these when
 building on top of `localpost` or extending an existing module.
 
 - [Request body handling across transports](design/request-body-handling.md) —
-  what `ctx.receive(size)` does on the native server, WSGI, ASGI (and
-  the planned RSGI bridge); how the pre-buffer / streaming distinction
-  is a transport choice, not a Protocol switch.
+  what `ctx.receive(size)` does on the native server, WSGI, ASGI, and
+  RSGI; how the pre-buffer / streaming distinction is a transport
+  choice, not a Protocol switch.
+- [Deployment topologies](design/deployment-topologies.md) — uvicorn /
+  hypercorn run as hosted services *inside* `run_app`; Granian is a
+  process supervisor that runs the host *inside* its workers. Why the
+  two cases are asymmetric and what `HostRSGIApp` does about it.
 
 ## Plans
 

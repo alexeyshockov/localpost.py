@@ -14,9 +14,10 @@ the test, then shuts it down cleanly.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import httpx
@@ -91,13 +92,13 @@ class _GranianThread:
         self._thread.start()
         self._ready.wait(timeout=5)
         # Wait for the port to actually be accepting connections.
-        deadline = asyncio.get_event_loop_policy().new_event_loop().time() + 5.0  # noqa: SLF001
+        deadline = asyncio.get_event_loop_policy().new_event_loop().time() + 5.0
         while True:
             try:
                 with socket.create_connection(("127.0.0.1", self._port), timeout=0.1):
                     break
             except OSError:
-                if asyncio.get_event_loop_policy().new_event_loop().time() > deadline:  # noqa: SLF001
+                if asyncio.get_event_loop_policy().new_event_loop().time() > deadline:
                     raise RuntimeError("Granian failed to start within 5s") from None
                 threading.Event().wait(0.05)
         return self._port
@@ -106,15 +107,11 @@ class _GranianThread:
         loop = self._loop
         srv = self._server
         if loop is not None and srv is not None:
-            try:
+            with contextlib.suppress(Exception):
                 fut = asyncio.run_coroutine_threadsafe(srv.shutdown(), loop)
                 fut.result(timeout=5)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 loop.call_soon_threadsafe(loop.stop)
-            except Exception:  # noqa: BLE001
-                pass
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=5)
 
@@ -208,15 +205,13 @@ class TestModeBHostedApp:
         @hosting.service
         async def heartbeat(sl: hosting.ServiceLifetime) -> None:
             sl.set_started()
-            try:
+            with contextlib.suppress(Exception):
                 while not sl.shutting_down.is_set():
                     with ticks_lock:
                         ticks.append(0.0)
                     # Don't actually sleep on real time — just yield enough
                     # for a few ticks during the test.
                     await asyncio.sleep(0.05)
-            except Exception:  # noqa: BLE001
-                pass
 
         app = _library_app()
         rsgi_app = hosting.HostRSGIApp(

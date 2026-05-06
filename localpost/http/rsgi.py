@@ -327,9 +327,7 @@ class _RSGIReqCtx:
             self._started = True
             self.response_status = response.status_code
             headers = _str_headers(response.headers)
-            self._proto.response_file_range(
-                response.status_code, headers, path, offset, offset + count
-            )
+            self._proto.response_file_range(response.status_code, headers, path, offset, offset + count)
             return
         # No filesystem path — chunked read fallback.
         file.seek(offset)
@@ -355,8 +353,7 @@ def build_request_from_scope(scope: RSGIScope) -> Request:
     query_string = scope.query_string.encode("ascii") if scope.query_string else b""
     target = path + (b"?" + query_string if query_string else b"")
     headers = tuple(
-        (str(name).lower().encode("ascii"), str(value).encode("iso-8859-1"))
-        for name, value in scope.headers.items()
+        (str(name).lower().encode("ascii"), str(value).encode("iso-8859-1")) for name, value in scope.headers.items()
     )
     http_version = scope.http_version.encode("ascii")
     return Request(
@@ -465,5 +462,3 @@ def _read_file_chunks(file: BinaryIO, count: int, blksize: int) -> AsyncIterator
             yield chunk
 
     return gen()
-
-

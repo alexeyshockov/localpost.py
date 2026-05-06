@@ -283,6 +283,51 @@ typed handlers) on top of the same bridge, see
 > covers the contract (one `receive(size)` Protocol method, four host
 > servers, no flag soup).
 
+### `localpost.http.rsgi`
+
+The Granian-flavoured sibling of `localpost.http.asgi`. Same
+`AsyncHTTPReqCtx` Protocol; different wire surface (RSGI exposes
+richer per-method calls than ASGI's two-event response dance), and
+different deployment topology (Granian is a process supervisor, not
+an in-process server).
+
+Install: `pip install 'localpost[rsgi]'` (pulls in `granian`).
+
+| Symbol                                                       | Notes                                                                       |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `to_rsgi(handler, *, max_body_size=1<<20, streaming=False)`  | Wrap an `AsyncRequestHandler` as an RSGI app for `granian --interface rsgi`. Same buffered / streaming options as `to_asgi`. Single eager `proto.response_bytes` per `complete`; zero-copy `proto.response_file_range` for `sendfile` when the file has a path; chunked stream fallback otherwise. |
+
+Deployment is the standard Granian pattern:
+
+```python
+# myapp.py
+from localpost.http import Response
+from localpost.http.rsgi import to_rsgi
+
+
+async def hello(ctx):
+    await ctx.complete(Response(200), b"hi")
+
+
+rsgi_app = to_rsgi(hello)
+```
+
+```bash
+granian --interface rsgi myapp:rsgi_app
+```
+
+For framework-flavoured deployment, see
+[`localpost.openapi.HttpAsyncApp.as_rsgi()`](../openapi/README.md#async-flavour-httpasyncapp).
+For deployments where the HTTP app shares a worker process with
+**other hosted services** (scheduler / gRPC / custom workers),
+[`localpost.hosting.HostRSGIApp`](../hosting/README.md#host-as-rsgi-for-granian)
+runs the full hosting lifecycle inside each Granian worker.
+
+> The asymmetry between uvicorn-as-a-hosted-service (in-process,
+> drives Granian-the-app from inside) and Granian-as-a-supervisor
+> (out-of-process, drives our app from outside) is covered in
+> [docs/design/deployment-topologies.md](../../docs/design/deployment-topologies.md).
+
 ### `localpost.http.static`
 
 Static file serving via `socket.sendfile()` — zero-copy from the page

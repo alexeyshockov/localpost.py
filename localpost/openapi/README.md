@@ -389,7 +389,10 @@ verbatim: see [`examples/openapi/async_app.py`](../../examples/openapi/async_app
 
 ### Deployment
 
-`app.asgi()` returns a plain ASGI 3 callable. Any ASGI server works:
+Two flavours, depending on which target you ship to.
+
+**ASGI** — `app.asgi()` returns a plain ASGI 3 callable; any ASGI
+server runs it:
 
 ```python
 # myapp.py
@@ -406,8 +409,46 @@ hypercorn myapp:asgi_app
 granian --interface asgi myapp:asgi_app
 ```
 
-For native Granian / RSGI deployment (no ASGI bridge), see
-`plans/rsgi-deployment.md` — `as_rsgi()` is a planned follow-up.
+**RSGI (Granian native)** — `app.as_rsgi()` returns an RSGI application:
+
+```python
+rsgi_app = app.as_rsgi()
+```
+
+```bash
+granian --interface rsgi myapp:rsgi_app
+```
+
+The RSGI bridge (`localpost.http.to_rsgi`) is wire-format-only — the
+same handler chain serves both ASGI and RSGI traffic. Granian's RSGI
+gives a single eager `response_bytes` per response (vs ASGI's
+two-event start+body), zero-copy `sendfile` via
+`response_file_range`, and direct `async for` body reads in streaming
+mode. Requires the `[rsgi]` extra (`pip install 'localpost[rsgi]'`).
+
+**Hosted apps under Granian** — when the HTTP app shares its worker
+process with other hosted services (scheduler, gRPC, custom workers),
+deploy through `localpost.hosting.HostRSGIApp` instead, which runs the
+full hosting lifecycle inside each Granian worker:
+
+```python
+from localpost import hosting
+from localpost.scheduler import every, scheduled_task
+
+@scheduled_task(every(seconds=5))
+async def heartbeat(): ...
+
+
+rsgi_app = hosting.HostRSGIApp(
+    services=[heartbeat.service()],
+    rsgi_handler=app,
+)
+
+# granian --interface rsgi --workers 4 myapp:rsgi_app
+```
+
+See the [hosting README](../hosting/README.md#host-as-rsgi-for-granian)
+for the topology details.
 
 ## Design notes
 

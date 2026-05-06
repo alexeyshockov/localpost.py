@@ -68,6 +68,11 @@ http-compress = [
     # Brotli compression for compress_handler. Gzip is stdlib and always available.
     "brotli ~=1.1",
 ]
+rsgi = [
+    # Granian's RSGI bridge — pulled in by users who deploy under Granian
+    # via ``localpost.http.to_rsgi`` or ``localpost.hosting.HostRSGIApp``.
+    "granian ~=2.7",
+]
 openapi = [
 #    "localpost[http]",
     "msgspec ~=0.19",

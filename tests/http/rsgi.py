@@ -21,7 +21,6 @@ import pytest
 from localpost.http import AsyncHTTPReqCtx, Response, to_rsgi
 from localpost.http.rsgi import _RSGIReqCtx, addrs_from_scope, build_request_from_scope
 
-
 # --- Mocks --------------------------------------------------------------
 
 
@@ -324,7 +323,7 @@ class TestToRsgiBuffered:
 
     @pytest.mark.anyio
     async def test_body_too_large_returns_413_via_content_length(self) -> None:
-        async def handler(ctx: AsyncHTTPReqCtx) -> None:  # noqa: ARG001
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
             raise AssertionError("handler should not run")
 
         rsgi_app = to_rsgi(handler, max_body_size=4)
@@ -358,7 +357,7 @@ class TestToRsgiStreaming:
 
     @pytest.mark.anyio
     async def test_content_length_pre_check_413(self) -> None:
-        async def handler(ctx: AsyncHTTPReqCtx) -> None:  # noqa: ARG001
+        async def handler(ctx: AsyncHTTPReqCtx) -> None:
             raise AssertionError("handler should not run")
 
         rsgi_app = to_rsgi(handler, streaming=True, max_body_size=4)
