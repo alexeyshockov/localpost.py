@@ -1,14 +1,50 @@
-"""flask-openapi3 served by Gunicorn (1 worker, gthread, 32 threads)."""
+"""flask-openapi (v5) served by Gunicorn (1 worker, gthread, 32 threads).
+
+Idiomatic flask-openapi v5: declare per-source Pydantic models for path,
+query, body — handler signatures take them as named parameters
+(``path``, ``query``, ``body``).
+"""
 
 from __future__ import annotations
 
 import sys
+from typing import Any
 
-from flask import Response
+from flask import Response, jsonify
 from flask_openapi import OpenAPI
 from gunicorn.app.base import BaseApplication
+from pydantic import BaseModel
 
 from benchmarks.openapi.apps._cli import parse_port
+
+
+class ItemPath(BaseModel):
+    item_id: int
+
+
+class ProfilePath(BaseModel):
+    user_id: str
+
+
+class Item(BaseModel):
+    id: int
+
+
+class ProfileUpdate(BaseModel):
+    display_name: str
+    email: str
+    version: int
+    tags: list[str]
+    settings: dict[str, Any]
+
+
+class Profile(BaseModel):
+    user_id: str
+    display_name: str
+    email: str
+    version: int
+    tags: list[str]
+    settings: dict[str, Any]
 
 
 def build_app() -> OpenAPI:
@@ -18,7 +54,24 @@ def build_app() -> OpenAPI:
     def ping() -> Response:
         return Response(b"pong", mimetype="text/plain")
 
-    _ = ping
+    @app.get("/items/<int:item_id>")
+    def get_item(path: ItemPath) -> Response:
+        return jsonify(Item(id=path.item_id).model_dump())
+
+    @app.post("/users/<string:user_id>/profile")
+    def update_profile(path: ProfilePath, body: ProfileUpdate) -> Response:
+        tags = sorted({t.strip().lower() for t in body.tags if t.strip()})
+        result = Profile(
+            user_id=path.user_id,
+            display_name=body.display_name.strip(),
+            email=body.email.strip().lower(),
+            version=body.version + 1,
+            tags=tags,
+            settings=body.settings,
+        )
+        return jsonify(result.model_dump())
+
+    _ = (ping, get_item, update_profile)
     return app
 
 
