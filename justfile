@@ -49,12 +49,12 @@ integration-tests:
 
 [doc("Set up all venvs in the bench matrix (.venv-bench/<name>)")]
 bench-deps:
-    uv run python -m benchmarks.http._setup
+    uv run python -m benchmarks._setup
 
 [doc("Refresh lock and re-sync all bench-matrix venvs")]
 bench-deps-upgrade:
     uv lock --upgrade
-    uv run python -m benchmarks.http._setup
+    uv run python -m benchmarks._setup
 
 [doc("Run macro HTTP benchmarks (oha-driven, requires `brew install oha`)")]
 bench-http *args:
@@ -72,6 +72,11 @@ bench-http-flask *args:
 [doc("Compare LocalPost variants only (h11/httptools, selectors, inline)")]
 bench-http-localpost *args:
     just bench-http --group localpost {{ args }}
+
+[doc("Run macro OpenAPI-framework benchmarks (LocalPost vs FastAPI vs flask-openapi3)")]
+bench-openapi *args:
+    uv run --group bench --group bench-openapi \
+        python -m benchmarks.openapi.runner {{ args }}
 
 [doc("Run micro-benchmarks (router, URI template) via pytest-benchmark")]
 bench-micro *args:

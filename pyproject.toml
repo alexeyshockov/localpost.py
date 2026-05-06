@@ -142,6 +142,16 @@ bench = [
     # Micro (pytest-benchmark): regression smoke for router / URI template.
     "pytest-benchmark ~=5.2",
 ]
+bench-openapi = [
+    # Macro (OpenAPI framework comparison): peer typed-API frameworks.
+    "fastapi ~=0.136",
+    # flask-openapi3 was renamed to flask-openapi for the v5 line. v5 is
+    # currently rc; we accept pre-releases here (uv tool flag `--prerelease=allow`
+    # at install time, see benchmarks/_setup.py).
+    "flask-openapi >=5.0.0rc1,<6",
+    # Pydantic v2 is what both peers drive; LocalPost tests its msgspec path.
+    "pydantic ~=2.7",
+]
 
 [tool.coverage.run]
 omit = ["tests/*"]

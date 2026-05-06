@@ -425,6 +425,19 @@ wheels = [
 ]
 
 [[package]]
+name = "flask-openapi"
+version = "5.0.0rc1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "flask" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/16/e4/035bd95dc5652391e61a2a04d9e34ba022479c4c9919c946e3312580319a/flask_openapi-5.0.0rc1.tar.gz", hash = "sha256:003a8df8232d56a718f47cba1687f02f658e0835aa64a17d2773adbf385de173", size = 574445, upload-time = "2026-02-09T07:36:15.071Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/11/66f0d176f578c512a917b925eab152d518b9981f7face129773463af780a/flask_openapi-5.0.0rc1-py3-none-any.whl", hash = "sha256:5cd00c6c26435a9e981c67b9580d5e30e1ee7557386752340289b11774691c65", size = 42894, upload-time = "2026-02-09T07:36:16.363Z" },
+]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.74.0"
 source = { registry = "https://pypi.org/simple" }
@@ -780,6 +793,11 @@ bench = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
+bench-openapi = [
+    { name = "fastapi" },
+    { name = "flask-openapi" },
+    { name = "pydantic" },
+]
 dev = [
     { name = "icecream" },
     { name = "structlog" },
@@ -850,6 +868,11 @@ bench = [
     { name = "pytest-benchmark", specifier = "~=5.2" },
     { name = "starlette", specifier = "~=1.0" },
     { name = "uvicorn", specifier = "~=0.30" },
+]
+bench-openapi = [
+    { name = "fastapi", specifier = "~=0.136" },
+    { name = "flask-openapi", specifier = ">=5.0.0rc1,<6" },
+    { name = "pydantic", specifier = "~=2.7" },
 ]
 dev = [
     { name = "icecream", specifier = "~=2.1" },

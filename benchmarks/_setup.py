@@ -1,13 +1,18 @@
 """Sync every venv in the bench matrix.
 
-Iterates ``benchmarks._core.pythons.PYTHONS`` and runs ``uv sync`` for
-each, redirected to the entry's venv via ``UV_PROJECT_ENVIRONMENT``.
-Continues on failure; exits non-zero if any sync failed.
+Iterates ``benchmarks._core.pythons.PYTHONS`` and runs ``uv sync`` for each,
+redirected to the entry's venv via ``UV_PROJECT_ENVIRONMENT``. Continues on
+failure; exits non-zero if any sync failed.
 
-Only the groups + extras the HTTP benchmark stacks actually import are
-installed — ``--all-groups --all-extras`` drags in native packages
-(``grpcio``, ``opentelemetry-*``, …) that have spotty wheel coverage on
-free-threaded Python (e.g. 3.14t).
+The two macro bench suites (``benchmarks/http/``, ``benchmarks/openapi/``)
+share the same venvs, so this installs the union of their groups and
+extras in one pass — ``uv sync`` would otherwise wipe groups not named on
+the current invocation.
+
+Only the groups + extras the bench stacks actually import are installed —
+``--all-groups --all-extras`` drags in native packages (``grpcio``,
+``opentelemetry-*``, …) that have spotty wheel coverage on free-threaded
+Python (e.g. 3.14t).
 
 Invoked by ``just bench-deps`` and ``just bench-deps-upgrade``.
 """
@@ -20,15 +25,17 @@ import sys
 
 from benchmarks._core.pythons import PYTHONS
 
-# Just what the HTTP bench stacks need at runtime. See `benchmarks/http/apps/`
-# for the actual imports.
+# Union across all bench suites. See per-suite ``apps/`` for the actual
+# imports.
 GROUPS: tuple[str, ...] = (
     "bench",  # starlette, uvicorn, a2wsgi, cheroot, gunicorn, granian, pytest-benchmark
-    "dev-http",  # flask, pydantic, httpx
+    "bench-openapi",  # fastapi, flask-openapi3, pydantic
+    "dev-http",  # flask, httpx
 )
 EXTRAS: tuple[str, ...] = (
     "http",  # h11
     "http-fast",  # httptools
+    "openapi",  # msgspec (used by localpost.openapi)
 )
 
 
