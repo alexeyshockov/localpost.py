@@ -271,6 +271,24 @@ class HTTPReqCtx(Protocol):
     @property
     def scheme(self) -> str: ...
     @property
+    def disconnected(self) -> bool:
+        """True once the peer has gone away (mid-request / mid-response).
+
+        Native backends do a non-blocking ``recv(1, MSG_PEEK | MSG_DONTWAIT)``
+        on the request socket; the result is sticky once ``True``. The WSGI
+        bridge has no socket handle and always returns ``False`` — surface
+        host-server disconnects via ``BrokenPipeError`` from the per-chunk
+        write path instead.
+
+        Mirrors :attr:`localpost.http.AsyncHTTPReqCtx.disconnected` so SSE
+        / long-running handlers can poll the same property regardless of
+        transport. Sync handlers that don't have ctx in scope can still
+        use :func:`localpost.http.check_cancelled` (raises) — this
+        property is the pull-style alternative.
+        """
+        ...
+
+    @property
     def borrowed(self) -> bool: ...
     def borrow(self) -> AbstractContextManager[HTTPReqCtx]: ...
     def receive(self, size: int = ..., /) -> bytes: ...
@@ -418,6 +436,27 @@ def _send_all(conn: BaseHTTPConn, payload: bytes | bytearray | memoryview) -> No
         if n == 0:
             raise ConnectionAbortedError("socket is broken")
         sent += n
+
+
+def _peek_disconnected(sock: socket.socket) -> bool:
+    """Non-blocking PEEK probe for peer FIN. Used by native ``_HTTPReqCtx``
+    implementations to back ``ctx.disconnected``.
+
+    Returns ``True`` iff the peer half-closed (read side) — ``recv`` returns
+    ``b""`` or the socket is broken (any non-``BlockingIOError`` ``OSError``).
+    Returns ``False`` when no signal is available (``BlockingIOError``) or
+    when bytes are buffered and waiting to be read.
+
+    ``MSG_PEEK`` doesn't consume bytes, so calling this from a worker holding
+    a borrowed conn is safe alongside the worker's own send/recv.
+    """
+    try:
+        peeked = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return not peeked
 
 
 def native_stream(ctx: HTTPReqCtx, response: Response, chunks: Iterator[bytes]) -> None:

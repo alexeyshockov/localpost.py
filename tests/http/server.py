@@ -302,6 +302,47 @@ class TestClientDisconnects:
             resp = httpx.get(f"http://127.0.0.1:{port}/", timeout=2)
             assert resp.status_code == 200
 
+    def test_disconnected_starts_false_and_flips_on_peer_close(self, serve_in_thread):
+        """``ctx.disconnected`` is False on a connected peer and flips True after FIN.
+
+        The handler runs on a worker (via ``borrow``) and polls
+        ``ctx.disconnected`` after the client closes its socket.
+        """
+        before: list[bool] = []
+        after: list[bool] = []
+        client_closed = threading.Event()
+        observed = threading.Event()
+
+        def handler(ctx: HTTPReqCtx) -> None:
+            with ctx.borrow():
+                before.append(ctx.disconnected)
+                client_closed.wait(2.0)
+                # PEEK may need a moment after FIN; poll briefly.
+                for _ in range(50):
+                    if ctx.disconnected:
+                        break
+                    threading.Event().wait(0.02)
+                after.append(ctx.disconnected)
+                observed.set()
+                # Best-effort response — the peer is gone, so writes may fail.
+                with contextlib.suppress(Exception):
+                    ctx.complete(
+                        Response(status_code=200, headers=[(b"content-length", b"2")]),
+                        b"ok",
+                    )
+
+        with serve_in_thread(handler) as port:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            # Give the handler a moment to enter borrow + read ``before``.
+            threading.Event().wait(0.05)
+            sock.close()
+            client_closed.set()
+            assert observed.wait(3.0)
+
+        assert before == [False]
+        assert after == [True]
+
     def test_client_half_close_after_partial_body_keeps_loop_alive(self, serve_in_thread):
         """Headers say Content-Length: 100; client sends 5 bytes then half-closes.
 

@@ -212,6 +212,7 @@ thread + N worker selectors) drop in without touching the request hot path.
 
 | Symbol                | Notes                                                          |
 | --------------------- | -------------------------------------------------------------- |
+| `HTTPReqCtx.disconnected` | Pull-style poll for peer-gone, mirroring `AsyncHTTPReqCtx.disconnected`. Native backends do a non-blocking `recv(1, MSG_PEEK | MSG_DONTWAIT)` on the request socket and stick `True` once seen; the WSGI bridge always returns `False` (no socket handle). Use it inside SSE generators / long handlers when you have `ctx` in scope. |
 | `check_cancelled()`   | Cooperative cancel check for sync handlers. Raises `RequestCancelled` if the client disconnected (detected via non-blocking ``MSG_PEEK``) or the hosted service is shutting down. Call periodically in long-running handlers. |
 | `RequestCancelled`    | Exception raised by `check_cancelled()`. Inherits from `Exception` (not `BaseException`) — catchable with `except Exception:`. |
 

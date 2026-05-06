@@ -232,6 +232,12 @@ class _WSGIReqCtx:
     _sendfile: tuple[_Response, BinaryIO, int, int] | None = None
 
     @property
+    def disconnected(self) -> bool:
+        # WSGI exposes no socket handle; host-server disconnects surface as
+        # ``BrokenPipeError`` from the per-chunk write path during streaming.
+        return False
+
+    @property
     def borrowed(self) -> bool:
         return True
 

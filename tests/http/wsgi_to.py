@@ -205,6 +205,19 @@ class TestToWsgiComplete:
         _drive(to_wsgi(handler), environ)
         assert seen["remote"] is None
 
+    def test_disconnected_always_false(self):
+        seen: dict[str, Any] = {}
+
+        def handler(ctx: HTTPReqCtx):
+            seen["disconnected"] = ctx.disconnected
+            ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
+
+        environ = _base_environ()
+        _drive(to_wsgi(handler), environ)
+        # WSGI has no socket handle — disconnects surface as BrokenPipeError
+        # from the host's per-chunk write, not as a poll signal here.
+        assert seen["disconnected"] is False
+
 
 class TestToWsgiStream:
     def test_stream_iterator_handed_off_lazily(self):

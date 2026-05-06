@@ -38,6 +38,7 @@ from localpost.http._base import (
     BodyHandler,
     RequestHandler,
     Selector,
+    _peek_disconnected,
     _send_all,
     content_length,
     emit_handler_error,
@@ -329,6 +330,7 @@ class _HTTPReqCtx:
     response_status: int | None = None
     attrs: dict[Any, Any] = field(default_factory=dict)
     _pending_header_bytes: bytes | None = None
+    _disconnected: bool = False
 
     @property
     def remote_addr(self) -> str | None:
@@ -344,6 +346,15 @@ class _HTTPReqCtx:
     def scheme(self) -> str:
         # No TLS support today; native server is plain HTTP.
         return "http"
+
+    @property
+    def disconnected(self) -> bool:
+        if self._disconnected:
+            return True
+        if _peek_disconnected(self.conn.sock):
+            self._disconnected = True
+            return True
+        return False
 
     @property
     def borrowed(self) -> bool:

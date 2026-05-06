@@ -433,6 +433,10 @@ class _CompressedCtx:
         return self._inner.scheme
 
     @property
+    def disconnected(self) -> bool:
+        return self._inner.disconnected
+
+    @property
     def borrowed(self) -> bool:
         return self._inner.borrowed
 
