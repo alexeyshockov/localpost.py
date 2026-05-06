@@ -39,24 +39,33 @@ Output lands in `benchmarks/openapi/results/<UTC-timestamp>/<python-label>/`:
 
 ## What's compared
 
-Four stacks — the two `localpost.openapi` flavours plus one peer framework each:
+Five stacks — the three `localpost.openapi` flavours plus one peer framework each:
 
-| Stack ID                   | Framework             | Server                       | Schema   |
-|----------------------------|-----------------------|------------------------------|----------|
-| `localpost_openapi`        | `localpost.openapi`   | `localpost.http` (h11), sync | msgspec  |
-| `localpost_openapi_async`  | `localpost.openapi`   | uvicorn (1 worker), async    | msgspec  |
-| `flask_openapi`            | `flask-openapi` (v5)  | gunicorn sync (32 threads)   | pydantic |
-| `fastapi`                  | FastAPI               | uvicorn (1 worker)           | pydantic |
+| Stack ID                       | Framework             | Server                       | Schema   |
+|--------------------------------|-----------------------|------------------------------|----------|
+| `localpost_openapi`            | `localpost.openapi`   | `localpost.http` (h11), sync | msgspec  |
+| `localpost_openapi_async`      | `localpost.openapi`   | uvicorn (1 worker), async    | msgspec  |
+| `localpost_openapi_granian`    | `localpost.openapi`   | granian (1 worker, RSGI), async | msgspec  |
+| `flask_openapi`                | `flask-openapi` (v5)  | gunicorn sync (32 threads)   | pydantic |
+| `fastapi`                      | FastAPI               | uvicorn (1 worker)           | pydantic |
 
 Single-process by design — we measure framework-layer overhead, not the
 multiplicative effect of more workers. All servers configured to be
 roughly comparable (`max_concurrency=32` for LocalPost,
 `--threads 32` for Gunicorn, etc.).
 
-The two LocalPost stacks share `framework=localpost`; the `server` dim
-discriminates them in result tables (`lp-h11` vs `uvicorn`). The async
-flavour is the natural FastAPI comparator (both ASGI / uvicorn / async);
-the sync flavour anchors what dropping the event loop costs / saves.
+The three LocalPost stacks share `framework=localpost`; the `server`
+dim discriminates them in result tables (`lp-h11` / `uvicorn` /
+`granian`). What each pair anchors:
+
+- **async vs sync** (`localpost_openapi_async` vs `localpost_openapi`)
+  — what dropping the event loop costs or saves.
+- **RSGI vs ASGI** (`localpost_openapi_granian` vs
+  `localpost_openapi_async`) — same handler, same uvicorn-class server
+  on both sides; the only delta is the wire bridge (single eager
+  `response_bytes` on RSGI vs ASGI's two-event start+body).
+- **localpost vs FastAPI** (`localpost_openapi_granian` vs `fastapi`)
+  — same Granian-class deployment story, different framework.
 
 `flask-openapi3` was renamed to `flask-openapi` for the v5 line; the
 `bench-openapi` dependency group pins `flask-openapi >=5.0.0rc1`.
@@ -81,10 +90,9 @@ business logic.
 
 For `validation_failure`: LocalPost's body resolver returns
 `BadRequest` (400) by default, while FastAPI and flask-openapi v5
-return 422. To keep the comparison apples-to-apples, both
-`localpost_openapi` and `localpost_openapi_async` attach a small
-middleware that remaps 400 → 422 on the profile endpoint. The framework
-default is unchanged.
+return 422. To keep the comparison apples-to-apples, all three
+LocalPost bench apps attach a small middleware that remaps
+400 → 422 on the profile endpoint. The framework default is unchanged.
 
 ## Adding a new stack / scenario
 
