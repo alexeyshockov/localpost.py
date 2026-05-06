@@ -160,7 +160,7 @@ class _FunctionMiddleware:
         return self.root_contribution(doc, registry)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
-        from localpost.openapi.operation import _build_responses  # noqa: PLC0415
+        from localpost.openapi._operation_core import build_responses  # noqa: PLC0415
 
         # Parameters / requestBody come from the resolver factories.
         for _name, param, factory in self.arg_factories:
@@ -171,7 +171,7 @@ class _FunctionMiddleware:
         # ``OpResult`` passthrough sentinel). Don't overwrite codes the
         # operation already declared (the op's own response is more
         # specific than the middleware's generic one).
-        for code, response in _build_responses(self.return_shapes, registry).items():
+        for code, response in build_responses(self.return_shapes, registry).items():
             if code in op.responses:
                 continue
             op = replace(op, responses={**op.responses, code: response})
@@ -210,10 +210,15 @@ def op_middleware(fn: Callable[..., Any]) -> _FunctionMiddleware:
     the operation already declared). A bare ``OpResult`` member of the
     return union is the passthrough sentinel and contributes nothing.
     """
-    from localpost.openapi.operation import build_arg_resolvers, extract_response_shapes  # noqa: PLC0415
+    from localpost.http import HTTPReqCtx  # noqa: PLC0415
+    from localpost.openapi._operation_core import build_arg_resolvers, extract_response_shapes  # noqa: PLC0415
 
     call_next_param = _identify_call_next_param(fn)
-    sig, runtime, factories = build_arg_resolvers(fn, exclude={call_next_param})
+    sig, runtime, factories = build_arg_resolvers(
+        fn,
+        exclude={call_next_param},
+        ctx_types=(HTTPReqCtx,),
+    )
     shapes_list, _null_is_not_found = extract_response_shapes(sig.return_annotation)
     return _FunctionMiddleware(
         target=fn,

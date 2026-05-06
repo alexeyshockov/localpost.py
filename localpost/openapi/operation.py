@@ -10,52 +10,48 @@ table for dispatch, and its :meth:`build_spec` contributes a
 from __future__ import annotations
 
 import inspect
-from collections.abc import (
-    Callable,
-    Generator,
-    Iterable,
-    Iterator,
-    Mapping,
-)
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from http import HTTPMethod
-from types import UnionType
-from typing import Annotated, Any, Self, Union, get_args, get_origin, get_type_hints
+from typing import Any, Self
 
 from localpost.http import BodyHandler, HTTPReqCtx, RequestHandler
 from localpost.http._types import Response as _Response
 from localpost.http.router import URITemplate
 from localpost.openapi import spec as openapi_spec
+from localpost.openapi._operation_core import SSE_RESPONSE_HEADERS as _SSE_RESPONSE_HEADERS
+from localpost.openapi._operation_core import (
+    ResponseShape,
+    build_arg_resolvers,
+    build_http_response,
+    build_responses,
+    extract_response_shapes,
+    is_sse_payload,
+    iter_response_headers,
+)
+from localpost.openapi._operation_core import (
+    operation_id as _make_operation_id,
+)
+from localpost.openapi._operation_core import (
+    qualname as _qualname,
+)
 from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.middleware import ApiOperation, OpMiddleware
 from localpost.openapi.resolvers import (
     ArgResolver,
     ArgResolverFactory,
-    FromBody,
     FromPath,
-    FromQuery,
-    is_body_type,
 )
-from localpost.openapi.results import EventStreamResult, NoContent, NotFound, Ok, OpResult
+from localpost.openapi.results import EventStreamResult, NotFound, Ok, OpResult
 from localpost.openapi.schemas import SchemaRegistry
-from localpost.openapi.sse import EventStream, iter_events
+from localpost.openapi.sse import iter_events
 
-__all__ = ["Operation", "ResponseShape", "build_arg_resolvers", "extract_response_shapes"]
-
-
-# Sentinel — we expose the request ctx for params explicitly typed as HTTPReqCtx.
-def _resolve_ctx(ctx: HTTPReqCtx) -> HTTPReqCtx:
-    return ctx
-
-
-@dataclass(frozen=True, slots=True)
-class ResponseShape:
-    """One branch of the return type — a (status, body type, content type)."""
-
-    status_code: int
-    description: str
-    body_type: Any | None
-    content_type: str = "application/json"
+__all__ = [
+    "Operation",
+    "ResponseShape",
+    "build_arg_resolvers",
+    "extract_response_shapes",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +100,12 @@ class Operation:
         path_var_names = set(template.variable_names)
         registry = adapters or default_registry()
 
-        sig, arg_resolvers, arg_factories = build_arg_resolvers(fn, path_var_names=path_var_names, adapters=registry)
+        sig, arg_resolvers, arg_factories = build_arg_resolvers(
+            fn,
+            path_var_names=path_var_names,
+            adapters=registry,
+            ctx_types=(HTTPReqCtx,),
+        )
 
         # Validate path bindings: every {var} in the template must be
         # claimed by a parameter (whether implicitly via name match or
@@ -133,7 +134,7 @@ class Operation:
         doc = inspect.getdoc(fn) or ""
         summary = doc.split("\n", 1)[0] if doc else f"{method.value} {path}"
         description = doc[len(summary) :].lstrip("\n") if doc else ""
-        operation_id = _operation_id(method, path, fn)
+        op_id = _make_operation_id(method, path, fn)
 
         return cls(
             method=method,
@@ -146,7 +147,7 @@ class Operation:
             return_shapes=return_shapes,
             null_is_not_found=null_is_not_found,
             summary=summary,
-            operation_id=operation_id,
+            operation_id=op_id,
             description=description,
             adapters=registry,
         )
@@ -190,7 +191,7 @@ class Operation:
         result = self.target(**kwargs)
         if isinstance(result, OpResult):
             return result
-        if _is_sse_payload(result):
+        if is_sse_payload(result):
             return EventStreamResult(result)
         if result is None and self.null_is_not_found:
             # ``T | None`` returning None → implicit 404.
@@ -201,7 +202,7 @@ class Operation:
         if isinstance(result, EventStreamResult):
             _stream_sse(ctx, result, self.adapters)
             return
-        response, body = _build_http_response(result, self.adapters)
+        response, body = build_http_response(result, self.adapters)
         ctx.complete(response, body)
 
     # ----- spec build -----
@@ -216,351 +217,14 @@ class Operation:
             if factory is None:
                 continue
             op = factory.update_doc(param, op, registry)
-        responses = _build_responses(self.return_shapes, registry)
+        responses = build_responses(self.return_shapes, registry)
         op = replace(op, responses=responses)
         for mw in self.middlewares:
             op = mw.contribute_operation(op, registry)
         return op
 
 
-# --- Helpers -------------------------------------------------------------
-
-
-def _qualname(fn: Callable[..., Any]) -> str:
-    return getattr(fn, "__qualname__", None) or getattr(fn, "__name__", repr(fn))
-
-
-def build_arg_resolvers(
-    fn: Callable[..., Any],
-    *,
-    path_var_names: set[str] | None = None,
-    adapters: AdapterRegistry | None = None,
-    exclude: set[str] | None = None,
-) -> tuple[
-    inspect.Signature,
-    list[tuple[str, ArgResolver]],
-    list[tuple[str, inspect.Parameter, ArgResolverFactory | None]],
-]:
-    """Inspect ``fn`` and return ``(resolved_signature, runtime_resolvers,
-    spec_factories)`` for use by :class:`Operation` or :func:`op_middleware`.
-
-    Path-template binding is *not* validated here — pass ``path_var_names``
-    so :class:`FromPath` is auto-picked for matching parameter names; the
-    caller is responsible for any "unbound var" error.
-
-    ``adapters`` flows into auto-picked / un-bound :class:`FromBody`
-    factories so body decoding hits the per-app type adapter registry. If
-    ``None``, falls back to :func:`default_registry` (used by
-    :func:`op_middleware`, which is built outside any app).
-
-    ``exclude`` skips parameters by name — used by :func:`op_middleware`
-    to drop the ``call_next`` parameter from resolver inspection.
-    """
-    path_vars = path_var_names or set()
-    registry = adapters or default_registry()
-    skip = exclude or set()
-
-    # Resolve PEP 563 string annotations (``from __future__ import
-    # annotations`` is in effect for most callers) into the real types
-    # before feeding them to the resolver factories. We build a localns
-    # from the function's closure cells so types defined in an enclosing
-    # scope (common in tests, factories) resolve too.
-    localns = _closure_locals(fn)
-    try:
-        sig = inspect.signature(fn, eval_str=True, locals=localns)
-    except Exception:  # noqa: BLE001
-        sig = inspect.signature(fn)
-    try:
-        hints = get_type_hints(fn, localns=localns, include_extras=True)
-    except Exception:  # noqa: BLE001
-        hints = {}
-    sig = _signature_with_hints(sig, hints)
-
-    runtime: list[tuple[str, ArgResolver]] = []
-    factories: list[tuple[str, inspect.Parameter, ArgResolverFactory | None]] = []
-    for name, param in sig.parameters.items():
-        if name in skip:
-            continue
-        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-            raise ValueError(f"handler {_qualname(fn)!r}: *args / **kwargs not supported")
-        factory = _pick_factory(name, param, path_vars, registry)
-        if factory is None:
-            # HTTPReqCtx pass-through.
-            runtime.append((name, _resolve_ctx))
-            factories.append((name, param, None))
-        else:
-            # Inject the registry into FromBody so its closure binds the
-            # right adapter at build time. User-supplied factories are left
-            # alone — they're trusted to handle their own decoding.
-            if isinstance(factory, FromBody) and factory.adapters is None:
-                factory = replace(factory, adapters=registry)
-            runtime.append((name, factory(param)))
-            factories.append((name, param, factory))
-    return sig, runtime, factories
-
-
-def _closure_locals(fn: Callable[..., Any]) -> dict[str, Any]:
-    """Return a name → value dict from ``fn``'s closure cells.
-
-    Used as ``localns`` for type-annotation resolution so types defined in
-    an enclosing function scope are visible (common in tests, model
-    factories).
-    """
-    closure = getattr(fn, "__closure__", None) or ()
-    code = getattr(fn, "__code__", None)
-    if not closure or code is None:
-        return {}
-    free_vars = code.co_freevars
-    locals_dict: dict[str, Any] = {}
-    for name, cell in zip(free_vars, closure, strict=False):
-        try:
-            locals_dict[name] = cell.cell_contents
-        except ValueError:
-            continue
-    return locals_dict
-
-
-def _signature_with_hints(sig: inspect.Signature, hints: dict[str, Any]) -> inspect.Signature:
-    """Return ``sig`` with each parameter's ``annotation`` replaced by the
-    resolved type from ``hints``. Same for the return annotation.
-
-    With ``from __future__ import annotations`` in effect, ``param.annotation``
-    is a ``str``; we need the real type for runtime introspection.
-    """
-    new_params = [
-        param.replace(annotation=hints[name]) if name in hints else param for name, param in sig.parameters.items()
-    ]
-    return_annotation = hints.get("return", sig.return_annotation)
-    return sig.replace(parameters=new_params, return_annotation=return_annotation)
-
-
-def _path_to_id(path: str) -> str:
-    cleaned = path.replace("/", "_").replace("{", "").replace("}", "").strip("_")
-    return cleaned or "root"
-
-
-def _operation_id(method: HTTPMethod, path: str, fn: Callable[..., Any]) -> str:
-    """Pick an operationId.
-
-    Prefer ``fn.__name__`` when it's a real, non-anonymous identifier — it
-    matches what users see in their codebase (and what FastAPI emits, modulo
-    the path suffix). Fall back to a path-mangled id for lambdas / wrapped
-    callables / anything without a usable name.
-    """
-    name = getattr(fn, "__name__", "") or ""
-    if name and name not in {"<lambda>", "_", ""}:
-        return name
-    return f"{method.value.lower()}_{_path_to_id(path)}"
-
-
-def _pick_factory(
-    name: str,
-    param: inspect.Parameter,
-    path_var_names: set[str],
-    adapters: AdapterRegistry,
-) -> ArgResolverFactory | None:
-    """Return the resolver factory for one parameter, or ``None`` for the
-    ``HTTPReqCtx`` pass-through."""
-    annotation = param.annotation
-
-    # Explicit ``Annotated[T, FromX(...)]`` wins.
-    if get_origin(annotation) is Annotated:
-        for arg in get_args(annotation)[1:]:
-            if _is_resolver_factory(arg):
-                return arg
-
-    target = annotation
-    if get_origin(target) is Annotated:
-        target = get_args(target)[0]
-
-    if name in path_var_names:
-        return FromPath(name=name)
-    if target is HTTPReqCtx:
-        return None
-    if is_body_type(target, adapters):
-        return FromBody()
-    return FromQuery(name=name)
-
-
-def _is_resolver_factory(arg: Any) -> ArgResolverFactory | None:
-    """Duck-typing for our :class:`ArgResolverFactory` ``Protocol``.
-
-    We can't ``isinstance``-check it because the protocol is structural and
-    not ``@runtime_checkable``; resolver factories are tagged by carrying an
-    ``update_doc`` method on top of being callable.
-    """
-    if callable(arg) and hasattr(arg, "update_doc"):
-        return arg
-    return None
-
-
-def extract_response_shapes(return_annotation: Any) -> tuple[list[ResponseShape], bool]:
-    """Return ``(shapes, null_is_not_found)`` from a function's return annotation."""
-    if return_annotation is inspect.Signature.empty:
-        return [ResponseShape(200, "Successful response", None)], False
-
-    origin = get_origin(return_annotation)
-    members = list(get_args(return_annotation)) if origin is Union or origin is UnionType else [return_annotation]
-
-    shapes: list[ResponseShape] = []
-    seen_codes: set[int] = set()
-    has_success = False
-    has_none = False
-    for member in members:
-        if member is type(None):
-            has_none = True
-            continue
-        member_origin = get_origin(member)
-        cls = member_origin if member_origin is not None else member
-        sse_payload = _sse_payload_type(member)
-        if sse_payload is not _NOT_SSE:
-            code = 200
-            description = "Successful response"
-            body_type = sse_payload
-            content_type = "text/event-stream"
-            has_success = True
-        elif isinstance(cls, type) and issubclass(cls, EventStreamResult):
-            code = cls._status_code
-            description = cls._description
-            generic_args = get_args(member) if member_origin is not None else ()
-            body_type = generic_args[0] if generic_args else None
-            content_type = "text/event-stream"
-            has_success = True
-        elif isinstance(cls, type) and issubclass(cls, OpResult):
-            code = cls._status_code
-            description = cls._description
-            body_type = None
-            content_type = "application/json"
-            if cls is not NoContent:
-                generic_args = get_args(member) if member_origin is not None else ()
-                body_type = generic_args[0] if generic_args else None
-            if code < 400:
-                has_success = True
-        else:
-            code = 200
-            description = "Successful response"
-            body_type = member
-            content_type = "application/json"
-            has_success = True
-        if code in seen_codes:
-            continue
-        seen_codes.add(code)
-        shapes.append(ResponseShape(code, description, body_type, content_type))
-
-    # ``T | None`` is the implicit "T or 404 NotFound" — only when paired
-    # with at least one non-None success type (a bare ``-> None`` annotation
-    # still means "204 / empty success", not 404), and only when the user
-    # didn't already declare 404 explicitly via ``NotFound[X]``.
-    null_is_not_found = has_none and has_success and 404 not in seen_codes
-    if null_is_not_found:
-        shapes.append(ResponseShape(404, "Not Found", None))
-        seen_codes.add(404)
-
-    if not has_success and not shapes:
-        shapes.append(ResponseShape(200, "Successful response", None))
-    return shapes, null_is_not_found
-
-
-# Sentinel: unique object so callers can distinguish "not an SSE return"
-# from "SSE return with no payload type" (e.g. a bare Iterator).
-_NOT_SSE: Any = object()
-
-
-def _sse_payload_type(annotation: Any) -> Any:
-    """If ``annotation`` is a ``Generator[T, ...]`` / ``Iterator[T, ...]`` /
-    ``Iterable[T]`` / ``EventStream[T]``, return ``T`` (or ``_NOT_SSE``).
-    """
-    origin = get_origin(annotation)
-    if origin is None:
-        return _NOT_SSE
-    # ``EventStream[T]`` — origin is ``EventStream`` itself.
-    if origin is EventStream:
-        args = get_args(annotation)
-        return args[0] if args else None
-    # ``Generator[T, send, return]`` / ``Iterator[T]`` / ``Iterable[T]``
-    # all live in ``collections.abc``; their generic origins are the abc
-    # classes themselves.
-    if origin not in (Generator, Iterator, Iterable):
-        return _NOT_SSE
-    args = get_args(annotation)
-    return args[0] if args else None
-
-
-def _build_responses(shapes: tuple[ResponseShape, ...], registry: SchemaRegistry) -> dict[str, openapi_spec.Response]:
-    responses: dict[str, openapi_spec.Response] = {}
-    for shape in shapes:
-        if shape.body_type is None:
-            responses[str(shape.status_code)] = openapi_spec.Response(description=shape.description)
-            continue
-        schema = registry.schema_for(shape.body_type)
-        responses[str(shape.status_code)] = openapi_spec.Response(
-            description=shape.description,
-            content={shape.content_type: openapi_spec.MediaType(schema=schema)},
-        )
-    return responses
-
-
-# --- Response building ---------------------------------------------------
-
-_TEXT_CONTENT_TYPE = b"text/plain; charset=utf-8"
-_OCTET_CONTENT_TYPE = b"application/octet-stream"
-
-
-def _encode_body(value: object, adapters: AdapterRegistry) -> tuple[bytes, bytes]:
-    """Return ``(body_bytes, content_type)`` for ``value``.
-
-    Pass-through for ``bytes`` / ``str``; structured values go through the
-    :class:`TypeAdapter` that claims ``type(value)``.
-    """
-    if value is None:
-        return b"", b""
-    if isinstance(value, bytes):
-        return value, _OCTET_CONTENT_TYPE
-    if isinstance(value, bytearray):
-        return bytes(value), _OCTET_CONTENT_TYPE
-    if isinstance(value, str):
-        return value.encode("utf-8"), _TEXT_CONTENT_TYPE
-    body, content_type = adapters.for_value(value).encode(value)
-    return body, content_type.encode("ascii")
-
-
-def _build_http_response(result: OpResult, adapters: AdapterRegistry) -> tuple[_Response, bytes]:
-    body_bytes, default_ct = _encode_body(result.body, adapters)
-    headers: list[tuple[bytes, bytes]] = []
-    headers_seen: set[bytes] = set()
-    for name, value in _iter_headers(result.headers):
-        headers.append((name, value))
-        headers_seen.add(name.lower())
-    if body_bytes and b"content-type" not in headers_seen and default_ct:
-        headers.append((b"content-type", default_ct))
-    if b"content-length" not in headers_seen:
-        headers.append((b"content-length", str(len(body_bytes)).encode("ascii")))
-    return _Response(status_code=result.status_code, headers=headers), body_bytes
-
-
-def _iter_headers(headers: Mapping[str, str]):
-    for name, value in headers.items():
-        yield name.encode("ascii"), value.encode("iso-8859-1")
-
-
 # --- SSE streaming -------------------------------------------------------
-
-_SSE_RESPONSE_HEADERS: list[tuple[bytes, bytes]] = [
-    (b"content-type", b"text/event-stream; charset=utf-8"),
-    (b"cache-control", b"no-cache"),
-    (b"x-accel-buffering", b"no"),  # Disable proxy buffering (nginx).
-]
-
-
-def _is_sse_payload(value: object) -> bool:
-    """True if ``value`` should be streamed as SSE.
-
-    Recognises explicit :class:`EventStream` and any ``Iterator`` (the
-    result of calling a generator function or building one explicitly).
-    Bare ``Iterable`` is too broad — ``list`` / ``tuple`` / ``dict`` are
-    all iterable but should land in JSON.
-    """
-    return isinstance(value, (EventStream, Iterator))
 
 
 def _wrap_middleware(mw: OpMiddleware, call_next: ApiOperation) -> ApiOperation:
@@ -584,7 +248,7 @@ def _stream_sse(ctx: HTTPReqCtx, result: EventStreamResult[Any], adapters: Adapt
     """
     headers = list(_SSE_RESPONSE_HEADERS)
     seen = {name for name, _ in headers}
-    for name, value in _iter_headers(result.headers):
+    for name, value in iter_response_headers(result.headers):
         if name.lower() in seen:
             continue
         headers.append((name, value))
