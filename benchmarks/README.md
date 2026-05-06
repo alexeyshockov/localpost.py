@@ -1,96 +1,72 @@
 # LocalPost benchmarks
 
-Two independent suites:
+Three independent suites:
 
-- **`http/`** — macro HTTP load benchmarks. Compare LocalPost against peer
-  servers (Gunicorn, Cheroot, Granian, Uvicorn) on a fixed Flask / Starlette
-  workload using [`oha`](https://github.com/hatoo/oha) as the load generator.
-  Goal: publishable comparison numbers.
-- **`micro/`** — `pytest-benchmark` micro-benchmarks for `URITemplate` and
-  `Router`. Goal: catch perf regressions in the deterministic core.
+- **[`http/`](http/README.md)** — macro HTTP load benchmarks. Compare
+  LocalPost's HTTP server against peer servers (Gunicorn, Cheroot,
+  Granian, Uvicorn) on a fixed Flask / Starlette workload using
+  [`oha`](https://github.com/hatoo/oha) as the load generator. Measures
+  **HTTP server** overhead.
+- **[`openapi/`](openapi/README.md)** — macro framework benchmarks.
+  Compare `localpost.openapi` against peer typed/OpenAPI frameworks
+  (FastAPI, flask-openapi v5) on a shared workload — typed handlers,
+  schema validation, response serialization. Measures **framework**
+  overhead.
+- **[`micro/`](micro/)** — `pytest-benchmark` micro-benchmarks for
+  `URITemplate` and `Router`. Catches perf regressions in the
+  deterministic core.
 
-Both are kept out of the default test run (`just tests`).
+The two macro suites share the runner, types, filter language, and
+report writers via [`_core/`](_core/). Each defines its own scenarios,
+stacks, and `apps/`.
+
+All three are kept out of the default test run (`just tests`).
 
 ## Quick start
 
 ```bash
-# macro (HTTP load) — 8 stacks × 4 scenarios at 20s each = ~11 minutes
-brew install oha   # one-time prereq
-just bench-http
+brew install oha   # one-time prereq for macro suites
+just bench-deps    # provision .venv-bench/<py>/ for every interpreter
 
-# faster sanity sweep
+# Macro HTTP server bench
+just bench-http
 just bench-http --duration 5 --stacks localpost_h11,flask_gunicorn
 
-# micro (pytest-benchmark)
+# Macro OpenAPI framework bench
+just bench-openapi
+just bench-openapi --duration 5 --stacks fastapi,localpost_openapi
+
+# Micro (pytest-benchmark)
 just bench-micro
 ```
 
-## What's compared (macro)
+Per-suite docs: [`http/README.md`](http/README.md),
+[`openapi/README.md`](openapi/README.md).
 
-Three "app types", each implementing the same four scenarios:
+## Shared CLI surface
 
-| App type   | Stacks                                                                                    |
-|------------|-------------------------------------------------------------------------------------------|
-| Native     | `localpost_h11`, `localpost_httptools`, plus their `_s4` (`SO_REUSEPORT`) and `_acceptor_s4` variants; `localpost_httptools_inline` (no pool) and its multi-selector variants |
-| WSGI/Flask | `localpost_wsgi`, `localpost_flask`, `flask_cheroot`, `flask_gunicorn`, `flask_granian`   |
-| ASGI       | `starlette_uvicorn`, `starlette_granian`                                                  |
+Both macro runners share these flags via
+[`benchmarks/_core/cli.py`](_core/cli.py):
 
-Scenarios — defined in [`http/scenarios.py`](http/scenarios.py):
+- `--duration N`            — seconds per cell (default 20).
+- `--stacks a,b`            — verbatim stack name list (escape hatch).
+- `--group <name>`          — named preset (e.g. `quick`, `localpost`).
+- `--filter key=val`        — dim filter (repeatable, AND together).
+  Supports glob (`backend=lp-*`), comma (`app=flask,starlette`),
+  negation (`app!=starlette`).
+- `--scenarios a,b`         — restrict to specific scenarios.
+- `--pythons name=path,...` — override the bench Python matrix
+  (default: every entry in
+  [`benchmarks._core.pythons.PYTHONS`](_core/pythons.py)).
 
-| Scenario         | Method | Path                        | Concurrency |
-|------------------|--------|-----------------------------|-------------|
-| `plaintext`      | GET    | `/ping`                     | 64          |
-| `path_param`     | GET    | `/hello/{name}`             | 64          |
-| `json_post`      | POST   | `/echo`                     | 32          |
-| `profile_update` | POST   | `/users/{user_id}/profile`  | 32          |
-
-`profile_update` is the more application-shaped case: route parameter, JSON
-request parsing, deterministic profile normalization, three short simulated I/O
-waits, and JSON response serialization.
-
-All servers are configured to be roughly comparable — single process, sized
-worker pool (`max_concurrency=32` for LocalPost, `--threads 32` for
-Gunicorn/Granian-WSGI, etc.). We're measuring server overhead, not the
-multiplicative effect of more processes.
-
-### How a run works
-
-`benchmarks/http/runner.py`, for each (stack, scenario):
-1. `subprocess.Popen` the stack as `python -m benchmarks.http.apps.<stack>`.
-2. Poll `127.0.0.1:<port>` with TCP connect until ready (≤ 10 s).
-3. Fire `oha --no-tui -j -z <duration>s -c <concurrency> ...`.
-4. Parse JSON → RPS, p50/p90/p99, status histogram.
-5. SIGTERM the stack, wait, move on.
-
-Output:
-- `http/results/latest.json` — raw cells (re-parseable).
-- `http/results/RESULTS.md`  — markdown summary, one table per scenario.
-
-### Caveats
-
-- **Single-host noise.** Numbers are sensitive to CPU thermals, kernel
-  scheduling, other processes. Re-run if a cell looks anomalous; consider
-  running with everything else closed. The relative ordering on the *same*
-  run is what matters; absolute RPS will shift run-to-run.
-- **Not for CI gates.** GitHub Actions runners are too noisy for HTTP
-  throughput regression gates. Run macro benchmarks locally / on a
-  dedicated machine.
-- **Single process by design.** All servers configured `workers=1` to
-  isolate the server-layer overhead. Real deployments multiply by N
-  workers; the relative ordering still holds.
-
-## What's compared (micro)
+## Micro suite
 
 `pytest-benchmark`-driven, runs in-process:
 
 - `bench_uri_template.py` — `URITemplate.parse`, `.match` (hit / miss /
   multi-var).
-- `bench_router.py` — `Routes.build`, `Router.wsgi` dispatch (literal hit,
-  parameterised hit, 404, 405).
-
-Use `--benchmark-compare` / `--benchmark-autosave` to compare against a
-saved baseline. See [pytest-benchmark
-docs](https://pytest-benchmark.readthedocs.io/en/latest/comparing.html).
+- `bench_router.py` — `Routes.build`, `Router.wsgi` dispatch (literal
+  hit, parameterised hit, 404, 405).
 
 ```bash
 # Save a baseline before changing code
@@ -102,24 +78,17 @@ just bench-micro --benchmark-compare --benchmark-compare-fail=mean:10%
 
 Micro-benchmarks are **not** wired to a CI check. If you want CI-stable
 regression gates later, swap `pytest-benchmark` for
-[`pytest-codspeed`](https://docs.codspeed.io/) — it runs the same fixtures
-under deterministic instrumentation on Codspeed's infra. No code changes
-beyond the dependency.
+[`pytest-codspeed`](https://docs.codspeed.io/) — it runs the same
+fixtures under deterministic instrumentation on Codspeed's infra. No
+code changes beyond the dependency.
 
-## Adding a new stack / scenario
+## Caveats (macro)
 
-- **Stack:** drop a `python -m`-runnable module under `http/apps/` that
-  takes `--port`, binds 127.0.0.1, and serves the routes from
-  `scenarios.py`. Add the module name to `STACKS` in `http/runner.py`.
-- **Scenario:** add a `Scenario(...)` to `SCENARIOS` in `scenarios.py`,
-  then implement the route in every app (typically by extending
-  `_flask_app.py` and `_starlette_app.py`).
-
-## Roadmap (not committed)
-
-- A FastAPI app variant — same engine as Starlette, but pulls in Pydantic
-  overhead. Useful as a third app type.
-- Streaming + keep-alive scenarios.
-- Plotly-rendered HTML chart from `latest.json`.
-- A scheduler micro-bench suite (trigger composition, `ScheduledTask`
-  setup/teardown).
+- **Single-host noise.** Numbers are sensitive to CPU thermals, kernel
+  scheduling, other processes. Re-run if a cell looks anomalous. The
+  relative ordering on the *same* run is what matters; absolute RPS
+  will shift run-to-run.
+- **Not for CI gates.** GitHub Actions runners are too noisy for HTTP
+  throughput regression gates. Run macro benchmarks locally.
+- **Single process by design.** Real deployments multiply by N
+  workers; the relative ordering still holds.
