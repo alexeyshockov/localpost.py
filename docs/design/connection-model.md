@@ -103,7 +103,8 @@ This replaces an earlier push-based design where the selector kept
 the socket registered in a third "watchdog" mode and fired EOF
 events. That worked but introduced a 3-way state machine with
 cross-thread races. The pull-based variant collapses to two states
-and one syscall per `check_cancelled()` call.
+and one syscall per `check_cancelled()` call. Full rationale in
+[ADR-0004](../adr/0004-pull-based-disconnect-detection.md).
 
 ## Sync vs. async request-context surface
 
@@ -129,3 +130,7 @@ informational responses (100 Continue / 102 Processing) are emitted
 by the server through that internal path. Handlers express responses
 declaratively via `complete()` (one-shot) or `stream(response,
 chunks)` (chunk iterator) — both portable across sync and async.
+
+Why the native server doesn't grow an async path of its own (and
+why async traffic goes through the ASGI bridge instead) is covered
+in [ADR-0003](../adr/0003-sync-native-http-server.md).

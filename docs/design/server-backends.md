@@ -36,6 +36,9 @@ push-callbacks + parse-only. Forcing one shape over both restricts
 the faster backend without buying anything portable, and the share
 that *could* be hoisted (`_base.py`) already is.
 
+The full rationale, including alternatives we rejected, is in
+[ADR-0002](../adr/0002-h11-httptools-coexist.md).
+
 ## httptools backend caveats (initial scope)
 
 - `Content-Length` response bodies only — chunked transfer-encoding

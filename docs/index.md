@@ -37,9 +37,18 @@ freely as the design evolves.
   process supervisor that runs the host *inside* its workers. Why the
   two cases are asymmetric and what `HostRSGIApp` does about it.
 
+## Architecture decisions
+
+[`docs/adr/`](adr/index.md) holds dated, immutable records of the
+non-trivial decisions in the codebase — the *moments* and
+*trade-offs*, not the current shape. Read these when you want to
+know *why* something is the way it is, especially if the rationale
+isn't obvious from the code.
+
 ## Plans
 
 Work-in-progress design plans live at the repo root under
 [`plans/`](../plans/) — e.g. RSGI deployment, the dynamic worker pool.
-They're forward-looking; once a plan lands, its rationale moves into a
-design note here and the plan file is removed.
+They're forward-looking; once a plan lands, the *why* becomes an
+ADR, the stable narrative becomes a design note here, and the plan
+file is removed.
