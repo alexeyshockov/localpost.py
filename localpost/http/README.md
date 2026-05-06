@@ -132,6 +132,24 @@ from localpost.http import http_server, ServerConfig
 sys.exit(run_app(http_server(ServerConfig(), simple_app)))
 ```
 
+## Sync vs. async surface
+
+`HTTPReqCtx` (sync) and `AsyncHTTPReqCtx` (async) share the data side
+(`request`, `body`, `attrs`, `response_status`, `remote_addr` /
+`local_addr` / `scheme`, `disconnected`) and the terminal write
+methods (`complete`, `stream`, `sendfile`, plus `receive` for body
+reads). A handler that only touches that core surface is portable
+between transports.
+
+A few members are deliberately asymmetric:
+
+| Member | Sync | Async | Why |
+| --- | --- | --- | --- |
+| `borrow()` / `borrowed` | ✅ | — | Only the sync native server hands a connection between selector and worker threads. Async transports own the conn for the coroutine's lifetime; there's nothing to borrow. The WSGI bridge satisfies the sync member trivially (always borrowed, no-op CM) so handler code stays portable. |
+| 1xx `InformationalResponse` via `start_response` | ✅ | — | ASGI's `http.response.start` and RSGI's response calls are final-only. 100 Continue / 102 Processing are emitted by the host server (sync) or not at all (async). |
+| `disconnected` poll | ✅ | ✅ | Native sync does a non-blocking `MSG_PEEK` per access (sticky once True). WSGI bridge is always False — surface disconnects via `BrokenPipeError` from the host's per-chunk write instead. Async transports flip the flag on `http.disconnect`. |
+| `check_cancelled()` (raises) | ✅ | — | Sync handlers without `ctx` in scope can call it from anywhere on the request thread; async code already has `ctx` and uses `ctx.disconnected`. |
+
 ## Key concepts
 
 - **`ServerConfig`** — host, port, backlog, `select_timeout`, `rw_timeout`,

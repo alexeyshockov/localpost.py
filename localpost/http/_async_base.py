@@ -53,6 +53,16 @@ class AsyncHTTPReqCtx(Protocol):
     same contract ("give me up to ``size`` bytes of request body, or
     ``b''`` at EOF"). Whether that comes from a slice of a buffered
     body or a fresh wire read is the transport's choice.
+
+    **Members deliberately absent vs. the sync surface.**
+
+    - No ``borrow()`` / ``borrowed`` — async transports (ASGI, RSGI)
+      own the connection for the lifetime of the coroutine; there is
+      no selector / worker thread split to hand off across.
+    - No 1xx :class:`InformationalResponse` path — ASGI's
+      ``http.response.start`` only models the final response, and
+      RSGI's response calls are likewise final-only. 100 Continue /
+      102 Processing are emitted by the host server (or not at all).
     """
 
     request: Request

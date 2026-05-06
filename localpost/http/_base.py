@@ -257,6 +257,20 @@ class HTTPReqCtx(Protocol):
     ``borrowed`` / :meth:`borrow` are degenerate on transports that
     don't manage their own connection lifetime (the WSGI bridge always
     reports ``borrowed=True`` and :meth:`borrow` is a no-op CM).
+
+    **Sync vs. async surface.** Most members mirror
+    :class:`localpost.http.AsyncHTTPReqCtx`. Two members are sync-only by
+    design:
+
+    - :meth:`borrow` / :attr:`borrowed` — only the native sync server
+      hands a connection between selector and worker threads; async
+      transports own their conn for the duration of the coroutine and
+      have nothing to borrow. WSGI satisfies this surface trivially
+      (always borrowed, no-op CM) so that handler code stays portable.
+    - 1xx :class:`InformationalResponse` accepted by :meth:`start_response`
+      — ASGI / RSGI surfaces don't expose informational responses
+      cleanly, so the async ctx omits them. Native sync handlers can
+      send 100 Continue / 102 Processing through the trio.
     """
 
     request: Request
