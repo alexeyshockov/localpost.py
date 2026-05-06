@@ -3,7 +3,7 @@
 > **Status:** stable — public API is not expected to break in patch/minor releases.
 
 A small synchronous HTTP/1.1 server built on [h11](https://h11.readthedocs.io/),
-plus a URI-template router, a WSGI bridge, and a small framework
+plus a URI-template router, WSGI / ASGI bridges, and a small framework
 (`HttpApp`) on top. Three layers, each usable on its own:
 
 - **Server**: `start_http_server` accepts connections, parses HTTP
@@ -26,10 +26,15 @@ The server is intentionally bounded:
   multi-core fanout, run multiple `localpost` processes under an external
   supervisor (systemd, gunicorn, k8s replicas, etc.). Multi-*selector*
   inside one process is on the roadmap.
-- **Sync handlers only.** No `asyncio` / `uvloop` / ASGI on the server side.
-  The hosting layer's AnyIO integration is unaffected — that's lifecycle
-  plumbing, not the request hot path. If you need an async server, use one
-  of the ASGI servers via `localpost.hosting.services/`.
+- **Sync server only.** No `asyncio` / `uvloop` ships in the native
+  server's request hot path. The hosting layer's AnyIO integration is
+  unaffected — that's lifecycle plumbing, not request handling.
+  Production-grade async HTTP servers already exist (uvicorn,
+  hypercorn, granian); for handlers that *want* to be async,
+  `localpost.http.asgi.to_asgi(handler)` adapts an `AsyncRequestHandler`
+  to any of them. The handler still implements the same conceptual
+  contract (read request, write response) — just an async-flavoured
+  Protocol (`AsyncHTTPReqCtx`) instead of the sync one.
 - **GIL or free-threaded.** Standard CPython 3.12+ is the baseline.
   Free-threaded builds (3.13t / 3.14t) are an accepted target — the design
   is single-writer-per-selector and uses only thread-safe primitives, but
@@ -226,6 +231,57 @@ thread + N worker selectors) drop in without touching the request hot path.
 | Symbol                    | Notes                                      |
 | ------------------------- | ------------------------------------------ |
 | `wrap_wsgi(app)`          | Turn a WSGI app into a `RequestHandler`    |
+| `to_wsgi(handler)`        | Turn a `RequestHandler` into a WSGI app    |
+
+### `localpost.http.asgi`
+
+The async sibling of `localpost.http.wsgi` — bridges between a foreign
+async protocol (ASGI 3) and the framework's async request-context shape
+(`AsyncHTTPReqCtx`, defined in `localpost.http`). `localpost.http`
+itself doesn't ship an async server; this module plugs an
+`AsyncRequestHandler` into uvicorn / hypercorn / granian / any ASGI 3
+server.
+
+| Symbol                                                  | Notes                                                                       |
+| ------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `AsyncHTTPReqCtx`                                       | Async sibling of `HTTPReqCtx`. Same `request` / `body` / `attrs` / addrs / `scheme`; async `complete` / `stream` / `receive` / `sendfile`; `disconnected: bool` poll for peer-gone. Re-exported from `localpost.http`. |
+| `AsyncRequestHandler`                                   | `Callable[[AsyncHTTPReqCtx], Awaitable[None]]`. The handler shape `to_asgi` adapts. |
+| `to_asgi(handler, *, max_body_size=1<<20, streaming=False)` | Wrap an `AsyncRequestHandler` as an ASGI 3 app. Pre-buffers the request body by default (capped by `max_body_size`; over-cap → 413 before dispatch). Pass `streaming=True` to skip the pre-buffer — the handler then pulls chunks via `await ctx.receive(size)`; `Content-Length` is pre-checked against `max_body_size` when present. Same handler code works either way. |
+
+Deployment is the standard ASGI pattern:
+
+```python
+# myapp.py
+from localpost.http import Response
+from localpost.http.asgi import to_asgi
+
+
+async def hello(ctx):
+    await ctx.complete(Response(200), b"hi")
+
+
+asgi_app = to_asgi(hello)
+```
+
+```bash
+uvicorn myapp:asgi_app
+hypercorn myapp:asgi_app
+granian --interface asgi myapp:asgi_app
+```
+
+For the framework-flavoured surface (decorators, OpenAPI generation,
+typed handlers) on top of the same bridge, see
+[`localpost.openapi.HttpAsyncApp`](../openapi/README.md#async-flavour-httpasyncapp)
+— `app.asgi()` is sugar over `to_asgi(self._build_async_handler())`.
+
+> Cancellation: `ctx.disconnected` flips on `http.disconnect`. SSE
+> generators / long handlers poll it between events to short-circuit
+> cleanly.
+
+> Body handling across transports —
+> [docs/design/request-body-handling.md](../../docs/design/request-body-handling.md)
+> covers the contract (one `receive(size)` Protocol method, four host
+> servers, no flag soup).
 
 ### `localpost.http.static`
 

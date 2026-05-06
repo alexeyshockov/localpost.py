@@ -23,6 +23,7 @@ from dataclasses import dataclass, replace
 from http import HTTPMethod
 from typing import Any, Literal
 
+from localpost import hosting
 from localpost.http import AsyncHTTPReqCtx, AsyncRequestHandler, to_asgi
 from localpost.http._types import Response
 from localpost.http.asgi import ASGIApp
@@ -189,7 +190,7 @@ class HttpAsyncApp:
         config: Any,
         *,
         server: Literal["uvicorn", "hypercorn"] = "uvicorn",
-    ):
+    ) -> hosting.ServiceF:
         """Return a :func:`localpost.hosting.service` running this app.
 
         ``config`` is the host server's config object —
