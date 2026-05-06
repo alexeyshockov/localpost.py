@@ -301,6 +301,114 @@ cover. `OpenIDConnectAuth` is a follow-up.
 
 Pass `selectors=N` and/or `acceptor=True` to use multi-selector topology.
 
+## Async flavour (`HttpAsyncApp`)
+
+Parallel to `HttpApp`, like `httpx.Client` and `httpx.AsyncClient`.
+Same decorator API, same OpenAPI 3.2 emission, same `OpResult`
+hierarchy — handlers are `async def`, middleware is built with
+`@async_op_middleware`, and the deployment target is **ASGI** (uvicorn,
+hypercorn, or `granian --interface asgi`):
+
+```python
+import sys
+from dataclasses import dataclass
+
+import uvicorn
+
+from localpost.openapi import HttpAsyncApp, NotFound
+
+
+@dataclass
+class Book:
+    id: str
+    title: str
+
+
+app = HttpAsyncApp()
+
+
+@app.get("/books/{book_id}")
+async def get_book(book_id: str) -> Book | NotFound[str]:
+    book = await fetch_book(book_id)   # your async DB call, etc.
+    if book is None:
+        return NotFound(f"Book not found: {book_id}")
+    return book
+
+
+if __name__ == "__main__":
+    sys.exit(uvicorn.run(app.asgi(), host="127.0.0.1", port=8000))
+```
+
+For `localpost.hosting` integration use
+`app.service(uvicorn.Config(...))` and feed it to
+`hosting.run_app(...)` — same shape as `HttpApp.service(config)` but
+running the ASGI app under uvicorn.
+
+A side-by-side example ports the sync `examples/openapi/app.py`
+verbatim: see [`examples/openapi/async_app.py`](../../examples/openapi/async_app.py).
+
+### What's different
+
+- **Handlers are async.** Plain `async def` for normal routes;
+  `async def` generators for SSE. Sync generators are rejected at
+  request time — `HttpAsyncApp` won't silently bridge a blocking
+  generator onto the event loop.
+- **Middleware is async.** Use `@async_op_middleware` to build them.
+  Sync `OpMiddleware` instances are rejected at app construction time:
+
+  ```python
+  from typing import Annotated
+
+  from localpost.openapi import (
+      AsyncApiOperation, AsyncHTTPReqCtx, FromHeader,
+      OpResult, Unauthorized, async_op_middleware,
+  )
+
+
+  @async_op_middleware
+  async def require_api_key(
+      ctx: AsyncHTTPReqCtx,
+      call_next: AsyncApiOperation,
+      x_api_key: Annotated[str, FromHeader("X-API-Key")] = "",
+  ) -> Unauthorized[str] | OpResult:
+      if x_api_key != "secret":
+          return Unauthorized("Invalid or missing X-API-Key")
+      return await call_next(ctx)
+  ```
+- **Auth.** `AsyncHttpBearerAuth` and `AsyncHttpBasicAuth` mirror their
+  sync siblings; the validator may be sync or async.
+- **Body buffering.** The ASGI bridge pre-buffers the request body
+  before dispatch (matches the JSON-API common case the sync flavour
+  is tuned for) so the same `FromBody` resolver works in both
+  flavours. Cap the size with `HttpAsyncApp(max_body_size=N)` (default
+  1 MiB; `-1` disables). Streaming uploads via `ctx.receive(...)` are
+  on the follow-up list.
+- **Resolvers.** `FromPath`, `FromQuery`, `FromHeader`, `FromBody` are
+  shared — they only read sync attributes (`request`, `body`, `attrs`)
+  off the ctx, so the same factories work in both apps.
+
+### Deployment
+
+`app.asgi()` returns a plain ASGI 3 callable. Any ASGI server works:
+
+```python
+# myapp.py
+from localpost.openapi import HttpAsyncApp
+
+app = HttpAsyncApp()
+# … register routes …
+asgi_app = app.asgi()
+```
+
+```bash
+uvicorn myapp:asgi_app
+hypercorn myapp:asgi_app
+granian --interface asgi myapp:asgi_app
+```
+
+For native Granian / RSGI deployment (no ASGI bridge), see
+`plans/rsgi-deployment.md` — `as_rsgi()` is a planned follow-up.
+
 ## Design notes
 
 See the in-tree design doc for rationale and a layout map: keep this README
@@ -310,13 +418,15 @@ focused on user-facing concepts.
 
 | Module | Provides |
 |---|---|
-| `app.py` | `HttpApp`, registration, hosting entrypoint, built-in `/openapi.json` + `/docs` UIs |
-| `operation.py` | `Operation`: signature parsing, return-type inference, runtime closure |
-| `resolvers.py` | `FromPath`, `FromQuery`, `FromHeader`, `FromBody` factories |
+| `app.py` | `HttpApp`, registration, hosting entrypoint, built-in `/openapi.json` + `/docs` UIs (sync) |
+| `operation.py` | `Operation`: sync runtime closure |
+| `_operation_core.py` | Shared type-level core (signature parsing, return-type → response-shape, doc helpers, response encoding) — used by both flavours |
+| `resolvers.py` | `FromPath`, `FromQuery`, `FromHeader`, `FromBody` factories — shared between sync and async |
 | `results.py` | `OpResult` hierarchy (incl. `EventStreamResult`) |
-| `middleware.py` | `OpMiddleware` protocol, `@op_middleware`, `ApiOperation` |
-| `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth middlewares |
-| `sse.py` | `Event`, `EventStream`, encoder — Server-Sent Events |
+| `middleware.py` | `OpMiddleware` protocol, `@op_middleware`, `ApiOperation` (sync) |
+| `auth.py` | `HttpBearerAuth`, `HttpBasicAuth` — concrete auth middlewares (sync) |
+| `aio/` | Async flavour: `HttpAsyncApp`, `AsyncOperation`, `AsyncOpMiddleware`, `@async_op_middleware`, `AsyncHttpBearerAuth`, `AsyncHttpBasicAuth`, `AsyncHTTPReqCtx`, ASGI bridge |
+| `sse.py` | `Event`, `EventStream`, encoder — Server-Sent Events (sync drive) |
 | `spec.py` | OpenAPI 3.2 dataclasses |
 | `schemas.py` | `SchemaRegistry` — msgspec / pydantic JSON Schema generation |
 | `pydantic.py` | Explicit pydantic helpers (auto-detection in `FromBody` works without this) |

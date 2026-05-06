@@ -6,9 +6,10 @@ Two layers of coverage:
    :class:`AsyncHTTPReqCtx`, run it, inspect the captured response.
    Mirrors ``tests/openapi/app.py``'s sync ``run_op`` harness.
 2. **ASGI-level**: drive the ASGI 3 callable from
-   :meth:`HttpAsyncApp.asgi` with a mock ``receive`` / ``send`` pair —
-   exercises the full route table, body buffering, and response
-   translation without spinning up a real server.
+   :meth:`HttpAsyncApp.asgi` via :class:`httpx.ASGITransport` — same
+   surface a real ASGI server would call against, but in-process and
+   without binding sockets. End-to-end tests under a real uvicorn live
+   in :mod:`tests.openapi.aio_integration` (marked ``integration``).
 """
 
 from __future__ import annotations
@@ -383,9 +384,7 @@ class TestSpecParity:
         assert sorted(s_op.responses) == sorted(a_op.responses)
         # ``parameters`` may contain ``Reference`` per OpenAPI; the test only
         # uses inline ``Parameter`` instances, so a getattr fallback is safe.
-        assert [getattr(p, "name", "") for p in s_op.parameters] == [
-            getattr(p, "name", "") for p in a_op.parameters
-        ]
+        assert [getattr(p, "name", "") for p in s_op.parameters] == [getattr(p, "name", "") for p in a_op.parameters]
 
 
 # --- ASGI dispatch -------------------------------------------------------

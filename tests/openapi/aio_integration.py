@@ -228,9 +228,7 @@ class TestSSE:
         assert b"data: tick-0\n\n" in wire
         assert b"data: tick-2\n\n" in wire
 
-    def test_peer_disconnect_mid_stream(
-        self, serve_async_app: ServeAsyncApp, library_app: HttpAsyncApp
-    ) -> None:
+    def test_peer_disconnect_mid_stream(self, serve_async_app: ServeAsyncApp, library_app: HttpAsyncApp) -> None:
         """Close the response stream after one event; the server-side
         generator should be cancelled (no leaked tasks, server stays
         responsive for the next request)."""
