@@ -16,9 +16,18 @@ User-facing references live next to the code:
 
 ## Design notes
 
-Architectural decisions and contract explanations — read these when
-building on top of `localpost` or extending an existing module.
+Stable explanations of how the system works today and why. Edited
+freely as the design evolves.
 
+- [Connection model](design/connection-model.md) — dispatch chain,
+  two-state TRACKED/BORROWED machine, pull-based client-disconnect
+  detection, and the sync-vs-async request-context asymmetry.
+- [Threading topologies](design/threading-topologies.md) — single
+  selector vs `selectors=N` vs acceptor + N workers; the
+  handler/router/`http_server` composition pattern.
+- [Server backends](design/server-backends.md) — h11 and httptools
+  coexistence, why they aren't unified behind a parser Protocol,
+  httptools caveats.
 - [Request body handling across transports](design/request-body-handling.md) —
   what `ctx.receive(size)` does on the native server, WSGI, ASGI, and
   RSGI; how the pre-buffer / streaming distinction is a transport
