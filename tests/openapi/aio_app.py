@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from http import HTTPMethod
 from typing import Annotated, Any
 
+import httpx
 import pytest
 
 from localpost.http import RouteMatch, URITemplate
@@ -161,7 +162,7 @@ class TestRegistration:
         assert isinstance(sync_mw, OpMiddleware)
 
         with pytest.raises(TypeError, match="not an AsyncOpMiddleware"):
-            HttpAsyncApp(middlewares=[sync_mw])  # type: ignore[list-item]
+            HttpAsyncApp(middlewares=[sync_mw])  # ty: ignore[invalid-argument-type]
 
     def test_async_middleware_accepted(self):
         @async_op_middleware
@@ -380,67 +381,26 @@ class TestSpecParity:
         s_op = sync_doc.paths["/items/{item_id}"].operations["get"]
         a_op = async_doc.paths["/items/{item_id}"].operations["get"]
         assert sorted(s_op.responses) == sorted(a_op.responses)
-        assert [p.name for p in s_op.parameters] == [p.name for p in a_op.parameters]
+        # ``parameters`` may contain ``Reference`` per OpenAPI; the test only
+        # uses inline ``Parameter`` instances, so a getattr fallback is safe.
+        assert [getattr(p, "name", "") for p in s_op.parameters] == [
+            getattr(p, "name", "") for p in a_op.parameters
+        ]
 
 
 # --- ASGI dispatch -------------------------------------------------------
 
 
-async def _drive_asgi(
-    asgi_app: Any,
-    method: str,
-    path: str,
-    *,
-    body: bytes = b"",
-    headers: list[tuple[bytes, bytes]] | None = None,
-    query: bytes = b"",
-) -> tuple[int, bytes, list[tuple[bytes, bytes]]]:
-    """Drive a single HTTP request through an ASGI app and capture the response."""
-    scope: dict[str, Any] = {
-        "type": "http",
-        "method": method,
-        "path": path,
-        "raw_path": path.encode("utf-8"),
-        "query_string": query,
-        "headers": headers or [],
-        "scheme": "http",
-        "http_version": "1.1",
-        "client": ["127.0.0.1", 12345],
-        "server": ["127.0.0.1", 8000],
-    }
-    request_done = False
+def _asgi_client(app: HttpAsyncApp) -> httpx.AsyncClient:
+    """Build an httpx AsyncClient bound to ``app``'s ASGI callable.
 
-    async def receive() -> dict[str, Any]:
-        nonlocal request_done
-        if not request_done:
-            request_done = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        # After the body is delivered, hold open until the response is sent.
-        # The dispatcher cancels the watcher task once the handler returns.
-        await _forever()
-        raise AssertionError("unreachable")
-
-    captured_status: list[int] = []
-    captured_headers: list[list[tuple[bytes, bytes]]] = []
-    captured_body = bytearray()
-
-    async def send(event: dict[str, Any]) -> None:
-        kind = event["type"]
-        if kind == "http.response.start":
-            captured_status.append(event["status"])
-            captured_headers.append(list(event["headers"]))
-        elif kind == "http.response.body":
-            captured_body.extend(event.get("body", b""))
-
-    await asgi_app(scope, receive, send)
-    assert captured_status, "handler did not start the response"
-    return captured_status[0], bytes(captured_body), captured_headers[0]
-
-
-async def _forever() -> None:
-    import anyio  # noqa: PLC0415
-
-    await anyio.sleep_forever()
+    ``ASGITransport`` drives the app in-process — no socket, no event loop
+    bridge. Wraps the same surface a real ASGI server would call against,
+    so this is closer to "real" than the mocked-scope helper that lived
+    here before.
+    """
+    asgi_app: Any = app.asgi()
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi_app), base_url="http://testserver")
 
 
 class TestAsgiDispatch:
@@ -452,19 +412,19 @@ class TestAsgiDispatch:
         async def hello(name: str) -> str:
             return f"hi {name}"
 
-        asgi_app = app.asgi()
-        status, body, _ = await _drive_asgi(asgi_app, "GET", "/hello/world")
-        assert status == 200
-        assert body == b"hi world"
+        async with _asgi_client(app) as client:
+            resp = await client.get("/hello/world")
+        assert resp.status_code == 200
+        assert resp.text == "hi world"
 
     @pytest.mark.anyio
     async def test_404(self):
         app = HttpAsyncApp()
 
-        asgi_app = app.asgi()
-        status, body, _ = await _drive_asgi(asgi_app, "GET", "/nope")
-        assert status == 404
-        assert body == b"Not Found"
+        async with _asgi_client(app) as client:
+            resp = await client.get("/nope")
+        assert resp.status_code == 404
+        assert resp.text == "Not Found"
 
     @pytest.mark.anyio
     async def test_405_method_not_allowed(self):
@@ -474,11 +434,10 @@ class TestAsgiDispatch:
         async def foo() -> str:
             return "ok"
 
-        asgi_app = app.asgi()
-        status, _, headers = await _drive_asgi(asgi_app, "POST", "/foo")
-        assert status == 405
-        allow = next(v for k, v in headers if k == b"allow")
-        assert b"GET" in allow
+        async with _asgi_client(app) as client:
+            resp = await client.post("/foo")
+        assert resp.status_code == 405
+        assert "GET" in resp.headers["allow"]
 
     @pytest.mark.anyio
     async def test_post_with_body(self):
@@ -488,10 +447,10 @@ class TestAsgiDispatch:
         async def create(book: Book) -> Created[Book]:
             return Created(book)
 
-        asgi_app = app.asgi()
-        status, body, _ = await _drive_asgi(asgi_app, "POST", "/b", body=b'{"id":"1","title":"t"}')
-        assert status == 201
-        assert body == b'{"id":"1","title":"t"}'
+        async with _asgi_client(app) as client:
+            resp = await client.post("/b", content=b'{"id":"1","title":"t"}')
+        assert resp.status_code == 201
+        assert resp.content == b'{"id":"1","title":"t"}'
 
     @pytest.mark.anyio
     async def test_openapi_endpoint(self):
@@ -501,22 +460,20 @@ class TestAsgiDispatch:
         async def x() -> str:
             return "ok"
 
-        asgi_app = app.asgi()
-        status, body, headers = await _drive_asgi(asgi_app, "GET", "/openapi.json")
-        assert status == 200
-        ct = next(v for k, v in headers if k == b"content-type")
-        assert ct == b"application/json"
-        assert b'"openapi"' in body
+        async with _asgi_client(app) as client:
+            resp = await client.get("/openapi.json")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/json"
+        assert '"openapi"' in resp.text
 
     @pytest.mark.anyio
     async def test_docs_endpoint(self):
         app = HttpAsyncApp()
-        asgi_app = app.asgi()
-        status, body, headers = await _drive_asgi(asgi_app, "GET", "/docs")
-        assert status == 200
-        ct = next(v for k, v in headers if k == b"content-type")
-        assert ct.startswith(b"text/html")
-        assert b"swagger" in body.lower()
+        async with _asgi_client(app) as client:
+            resp = await client.get("/docs")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "swagger" in resp.text.lower()
 
     @pytest.mark.anyio
     async def test_payload_too_large(self):
@@ -526,9 +483,33 @@ class TestAsgiDispatch:
         async def create(book: Book) -> Created[Book]:
             return Created(book)
 
-        asgi_app = app.asgi()
-        status, _, _ = await _drive_asgi(asgi_app, "POST", "/b", body=b'{"id":"1","title":"way-too-long"}')
-        assert status == 413
+        async with _asgi_client(app) as client:
+            resp = await client.post("/b", content=b'{"id":"1","title":"way-too-long"}')
+        assert resp.status_code == 413
+
+    @pytest.mark.anyio
+    async def test_sse_round_trip(self):
+        """Real httpx round-trip over an SSE stream — the mocked helper
+        could only inspect the captured chunks, this drives the actual
+        chunked-response machinery in httpx."""
+        app = HttpAsyncApp()
+
+        @app.get("/events")
+        async def events() -> AsyncIterator[str]:
+            for i in range(3):
+                yield f"tick-{i}"
+
+        async with _asgi_client(app) as client:
+            async with client.stream("GET", "/events") as resp:
+                assert resp.status_code == 200
+                assert resp.headers["content-type"].startswith("text/event-stream")
+                wire = b""
+                async for chunk in resp.aiter_bytes():
+                    wire += chunk
+        # Each event is "data: <payload>\n\n" — three of them.
+        assert wire.count(b"\n\n") == 3
+        assert b"data: tick-0\n\n" in wire
+        assert b"data: tick-2\n\n" in wire
 
 
 # --- Async auth ---------------------------------------------------------
