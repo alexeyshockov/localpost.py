@@ -26,12 +26,14 @@ __all__ = [
 CHECK_TIMEOUT: float = 1.0
 """Timeout (seconds) for cancellation checks (e.g. in the server loop)."""
 
+
 def _noop_check() -> None:
     """Default cancellation probe — a no-op.
 
     Pass ``anyio.from_thread.check_cancelled`` (or any custom callable) to a
     primitive's ``check_cancelled`` argument to opt in to cancellation.
     """
+
 
 current_time = time.monotonic
 
@@ -249,9 +251,7 @@ class ChannelState[T]:
     not_empty: threading.Condition
     not_full: threading.Condition
 
-    def __init__(
-        self, capacity: int | None = None, *, check_cancelled: Callable[[], None] = _noop_check
-    ):
+    def __init__(self, capacity: int | None = None, *, check_cancelled: Callable[[], None] = _noop_check):
         if capacity is not None and capacity < 0:
             raise ValueError("capacity must be >= 0 or None")
         self.buffer = deque()
