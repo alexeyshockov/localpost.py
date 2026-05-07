@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Self, final, overload
 
+from .._utils import is_async_callable
+
 if TYPE_CHECKING:
     from anyio.from_thread import BlockingPortal
 
@@ -148,24 +150,25 @@ class TaskGroup:
     Example::
 
         with TaskGroup() as tg:
-            fut = tg.start_soon(do_work, arg)
-            # ...
+            tg.start_soon(do_work, arg)        # fire-and-forget
+            fut = tg.create_task(other_work)   # observe via Future
         # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
 
-    ``start_soon`` is callable from any thread, including from inside a
-    task running on the same group (recursive spawn). It returns a
-    :class:`concurrent.futures.Future` that captures the task's result
-    or exception. Reading the future is optional — a task exception is
-    surfaced via the ``ExceptionGroup`` raised at ``__exit__`` even if
-    the future is discarded.
+    Both :meth:`start_soon` and :meth:`create_task` are callable from any
+    thread, including from inside a task running on the same group
+    (recursive spawn). ``start_soon`` is fire-and-forget; ``create_task``
+    returns a :class:`concurrent.futures.Future` that captures the task's
+    result or exception. Either way, task exceptions are surfaced via the
+    ``ExceptionGroup`` raised at ``__exit__`` — for ``create_task``,
+    reading the future's exception does not suppress that group raise.
 
-    ``contextvars`` are propagated: each ``start_soon`` snapshots the
-    caller's context with :func:`contextvars.copy_context`, and the task
-    runs inside that snapshot. Mutations the task makes to ContextVars
-    stay confined to its copy — same semantics as
-    :func:`asyncio.to_thread` and Trio / AnyIO task spawn.
+    ``contextvars`` are propagated: each spawn snapshots the caller's
+    context with :func:`contextvars.copy_context`, and the task runs
+    inside that snapshot. Mutations the task makes to ContextVars stay
+    confined to its copy — same semantics as :func:`asyncio.to_thread`
+    and Trio / AnyIO task spawn.
 
-    If ``aio_portal`` is provided, ``start_soon`` also accepts async
+    If ``aio_portal`` is provided, both spawn methods also accept async
     callables: the coroutine is dispatched to the portal's event loop
     via :meth:`anyio.from_thread.BlockingPortal.call`, run from inside
     the worker thread (the worker blocks until the coroutine returns).
@@ -217,14 +220,31 @@ class TaskGroup:
             raise BaseExceptionGroup(label, all_errors)
 
     @overload
-    def start_soon[**P, R](
+    def start_soon[**P](
+        self, fn: Callable[P, Awaitable[Any]], /, *args: P.args, **kwargs: P.kwargs
+    ) -> None: ...
+    @overload
+    def start_soon[**P](
+        self, fn: Callable[P, Any], /, *args: P.args, **kwargs: P.kwargs
+    ) -> None: ...
+    def start_soon(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
+        """Submit ``fn(*args, **kwargs)`` to a worker thread. Fire-and-forget.
+
+        Errors still surface via the ``ExceptionGroup`` raised at
+        ``__exit__``. Use :meth:`create_task` if you need to observe the
+        task's result or exception via a :class:`concurrent.futures.Future`.
+        """
+        self.create_task(fn, *args, **kwargs)
+
+    @overload
+    def create_task[**P, R](
         self, fn: Callable[P, Awaitable[R]], /, *args: P.args, **kwargs: P.kwargs
     ) -> Future[R]: ...
     @overload
-    def start_soon[**P, R](
+    def create_task[**P, R](
         self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
     ) -> Future[R]: ...
-    def start_soon(
+    def create_task(
         self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
     ) -> Future[Any]:
         """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future.
@@ -232,18 +252,21 @@ class TaskGroup:
         ``fn`` may be sync or async. Async callables require ``aio_portal``;
         the worker invokes ``portal.call`` to await the coroutine on the
         event loop.
+
+        The returned future is observation-only. ``Future.cancel()`` only
+        succeeds while the task is still queued; it cannot interrupt a
+        running task. Reading ``.exception()`` does not suppress the
+        ``ExceptionGroup`` raised at ``__exit__``.
         """
-        if inspect.iscoroutinefunction(fn) and self._aio_portal is None:
-            raise RuntimeError(
-                "TaskGroup.start_soon got an async callable but the group has no aio_portal"
-            )
+        if is_async_callable(fn) and self._aio_portal is None:
+            raise RuntimeError("TaskGroup got an async callable but the group has no aio_portal")
         with self._lock:
             if self._closed:
                 raise RuntimeError("TaskGroup is closed")
             self._pending += 1
         fut: Future[Any] = Future()
         # Snapshot the caller's context now (matches Trio / AnyIO / asyncio
-        # ``to_thread`` semantics); each ``start_soon`` captures independently.
+        # ``to_thread`` semantics); each spawn captures independently.
         task = Task(fut, fn, args, kwargs, self, contextvars.copy_context())
         while True:
             try:

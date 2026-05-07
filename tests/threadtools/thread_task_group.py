@@ -6,6 +6,7 @@ import time
 from concurrent.futures import Future
 
 import pytest
+from anyio.from_thread import start_blocking_portal
 
 from localpost.threadtools import TaskGroup, warmup
 from localpost.threadtools import _task_group as _tg
@@ -35,16 +36,23 @@ def _drain_idle_workers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_start_soon_returns_future_with_result():
+def test_start_soon_returns_none():
+    """``start_soon`` is fire-and-forget — explicit ``None`` return."""
     with TaskGroup() as tg:
-        fut = tg.start_soon(lambda x: x * 2, 21)
+        result = tg.start_soon(lambda: 42)
+    assert result is None
+
+
+def test_create_task_returns_future_with_result():
+    with TaskGroup() as tg:
+        fut = tg.create_task(lambda x: x * 2, 21)
         assert isinstance(fut, Future)
         assert fut.result(timeout=5) == 42
 
 
-def test_start_soon_with_kwargs():
+def test_create_task_with_kwargs():
     with TaskGroup() as tg:
-        fut = tg.start_soon(lambda *, a, b: a + b, a=1, b=2)
+        fut = tg.create_task(lambda *, a, b: a + b, a=1, b=2)
         assert fut.result(timeout=5) == 3
 
 
@@ -56,7 +64,7 @@ def test_many_concurrent_tasks_all_complete():
         return i * i
 
     with TaskGroup() as tg:
-        futs = [tg.start_soon(work, i) for i in range(n)]
+        futs = [tg.create_task(work, i) for i in range(n)]
 
     assert sorted(f.result() for f in futs) == [i * i for i in range(n)]
 
@@ -66,7 +74,7 @@ def test_many_concurrent_tasks_all_complete():
 # ---------------------------------------------------------------------------
 
 
-def test_task_exception_captured_in_future_and_raised_at_exit():
+def test_create_task_exception_captured_in_future_and_raised_at_exit():
     class Boom(Exception):
         pass
 
@@ -75,10 +83,28 @@ def test_task_exception_captured_in_future_and_raised_at_exit():
 
     with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
         with TaskGroup() as tg:
-            fut = tg.start_soon(bad)
-            # Future records the exception too
+            fut = tg.create_task(bad)
+            # Future records the exception too — and consuming it does
+            # *not* suppress the group's ExceptionGroup at __exit__.
             with pytest.raises(Boom):
                 fut.result(timeout=5)
+    assert len(ei.value.exceptions) == 1
+    assert isinstance(ei.value.exceptions[0], Boom)
+
+
+def test_start_soon_exception_surfaces_in_group():
+    """Even fire-and-forget tasks have their errors escalate to the group."""
+
+    class Boom(Exception):
+        pass
+
+    def bad():
+        raise Boom("nope")
+
+    with pytest.raises(ExceptionGroup) as ei:
+        with TaskGroup() as tg:
+            tg.start_soon(bad)
+
     assert len(ei.value.exceptions) == 1
     assert isinstance(ei.value.exceptions[0], Boom)
 
@@ -161,8 +187,8 @@ def test_nested_start_soon_during_drain():
             leaf()
             return
         # Each branch spawns 2 children of depth-1, waits for them.
-        f1 = tg.start_soon(branch, tg, depth - 1)
-        f2 = tg.start_soon(branch, tg, depth - 1)
+        f1 = tg.create_task(branch, tg, depth - 1)
+        f2 = tg.create_task(branch, tg, depth - 1)
         f1.result(timeout=5)
         f2.result(timeout=5)
         leaf()
@@ -177,7 +203,7 @@ def test_nested_start_soon_during_drain():
 def test_start_soon_after_close_raises():
     tg = TaskGroup()
     with tg:
-        tg.start_soon(lambda: None).result(timeout=5)
+        tg.create_task(lambda: None).result(timeout=5)
     with pytest.raises(RuntimeError, match="closed"):
         tg.start_soon(lambda: None)
 
@@ -205,7 +231,7 @@ def test_workers_are_shared_across_groups(fast_idle_timeout):
 
     with TaskGroup() as tg:
         for _ in range(4):
-            tg.start_soon(record).result(timeout=5)
+            tg.create_task(record).result(timeout=5)
     first_run = set(seen)
 
     # Second group sees at least some of the same threads (workers parked
@@ -213,7 +239,7 @@ def test_workers_are_shared_across_groups(fast_idle_timeout):
     seen.clear()
     with TaskGroup() as tg:
         for _ in range(4):
-            tg.start_soon(record).result(timeout=5)
+            tg.create_task(record).result(timeout=5)
     second_run = set(seen)
 
     assert first_run & second_run, "no worker reuse across groups"
@@ -228,7 +254,7 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
 
     # Spawn a fresh worker and grab a reference to it.
     with TaskGroup() as tg:
-        tg.start_soon(lambda: None).result(timeout=5)
+        tg.create_task(lambda: None).result(timeout=5)
     assert len(_tg.idle) >= 1
     fresh = _tg.idle[-1]  # LIFO: most recently parked
 
@@ -238,7 +264,7 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
 
     # Submitting again skips the dead tombstone and spawns fresh.
     with TaskGroup() as tg:
-        tg.start_soon(lambda: None).result(timeout=5)
+        tg.create_task(lambda: None).result(timeout=5)
     _drain_idle_workers()
 
 
@@ -266,7 +292,7 @@ def test_claim_vs_idle_timeout_race(fast_idle_timeout):
 
     for _ in range(5):
         with TaskGroup() as tg:
-            futs = [tg.start_soon(tick) for _ in range(n)]
+            futs = [tg.create_task(tick) for _ in range(n)]
         for f in futs:
             f.result(timeout=5)
         # Sleep to let some workers idle-time-out, leaving tombstones.
@@ -331,7 +357,7 @@ def test_warmup_workers_are_used_by_dispatch():
             seen.add(threading.get_ident())
 
     with TaskGroup() as tg:
-        tg.start_soon(record_self).result(timeout=5)
+        tg.create_task(record_self).result(timeout=5)
 
     # The worker that ran is one of the pre-warmed set.
     post = {id(w) for w in _tg.idle}
@@ -360,7 +386,7 @@ def test_task_sees_caller_context():
     var.set("caller-value")
 
     with TaskGroup() as tg:
-        fut = tg.start_soon(var.get)
+        fut = tg.create_task(var.get)
 
     assert fut.result(timeout=5) == "caller-value"
 
@@ -374,7 +400,7 @@ def test_task_mutation_does_not_leak_to_caller():
         return var.get()
 
     with TaskGroup() as tg:
-        fut = tg.start_soon(mutate)
+        fut = tg.create_task(mutate)
 
     assert fut.result(timeout=5) == "task-mutated"
     assert var.get() == "original"  # caller's view unchanged
@@ -387,9 +413,9 @@ def test_each_start_soon_captures_independently():
 
     with TaskGroup() as tg:
         var.set(1)
-        f1 = tg.start_soon(var.get)
+        f1 = tg.create_task(var.get)
         var.set(2)
-        f2 = tg.start_soon(var.get)
+        f2 = tg.create_task(var.get)
 
     assert f1.result(timeout=5) == 1
     assert f2.result(timeout=5) == 2
@@ -412,7 +438,7 @@ def test_concurrent_tasks_see_their_own_context():
         futs: list[Future[int]] = []
         for i in range(10):
             var.set(i)
-            futs.append(tg.start_soon(observe))
+            futs.append(tg.create_task(observe))
 
     assert sorted(f.result(timeout=5) for f in futs) == list(range(10))
 
@@ -423,16 +449,15 @@ def test_concurrent_tasks_see_their_own_context():
 
 
 async def test_async_callable_runs_via_portal():
-    """An async callable submitted to ``start_soon`` is awaited on the
+    """An async callable submitted via ``create_task`` is awaited on the
     portal's event loop; the future resolves with the awaited result."""
-    from anyio.from_thread import start_blocking_portal
 
     async def add(a: int, b: int) -> int:
         return a + b
 
     with start_blocking_portal() as portal:
         with TaskGroup(aio_portal=portal) as tg:
-            fut = tg.start_soon(add, 2, 3)
+            fut = tg.create_task(add, 2, 3)
 
         assert fut.result(timeout=5) == 5
 
@@ -440,7 +465,6 @@ async def test_async_callable_runs_via_portal():
 async def test_async_callable_exception_flows_through_future():
     """Exceptions raised inside an async callable surface on the future
     (and into the TaskGroup's exception group)."""
-    from anyio.from_thread import start_blocking_portal
 
     async def boom():
         raise ValueError("boom")
@@ -449,7 +473,7 @@ async def test_async_callable_exception_flows_through_future():
         tg = TaskGroup(aio_portal=portal)
         with pytest.raises(ExceptionGroup) as ei:
             with tg:
-                fut = tg.start_soon(boom)
+                fut = tg.create_task(boom)
 
         with pytest.raises(ValueError, match="boom"):
             fut.result(timeout=5)
@@ -458,7 +482,7 @@ async def test_async_callable_exception_flows_through_future():
 
 def test_async_callable_without_portal_raises():
     """Submitting a coroutine function to a TaskGroup without an
-    ``aio_portal`` raises immediately at ``start_soon``."""
+    ``aio_portal`` raises immediately — for both spawn methods."""
 
     async def whatever():
         return None
@@ -466,6 +490,8 @@ def test_async_callable_without_portal_raises():
     with TaskGroup() as tg:
         with pytest.raises(RuntimeError, match="aio_portal"):
             tg.start_soon(whatever)
+        with pytest.raises(RuntimeError, match="aio_portal"):
+            tg.create_task(whatever)
 
 
 def test_sync_callable_returning_coroutine_without_portal_raises():
