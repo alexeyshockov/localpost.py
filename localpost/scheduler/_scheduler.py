@@ -64,6 +64,7 @@ class Task(
         self._cm = ExitStack()
         self._subscribers: list[MemoryObjectSendStream[Result[R]]] = []
         self._users = 0
+        self._finished = False
 
     def __repr__(self):
         return f"<{self.__class__.__name__} {self.name!r}>"
@@ -72,6 +73,10 @@ class Task(
         # ``_publish_result`` always uses ``send_nowait`` and never blocks the task. Defaulting to an
         # unbounded buffer means a slow consumer trades memory for never missing a result; pass a finite
         # ``buffer_max_size`` to switch to drop-on-full instead (see WouldBlock branch in publish).
+        if self._finished:
+            # Task is one-shot: once the last user has exited, the underlying ExitStack is closed and
+            # cannot be re-entered. A fresh subscriber would silently never receive anything.
+            raise RuntimeError(f"Cannot subscribe to {self!r}: task has already finished")
         send_stream, receive_stream = MemoryStream[Result[R]].create(buffer_max_size)
         self._subscribers.append(self._cm.enter_context(send_stream))
         return receive_stream
@@ -103,6 +108,7 @@ class Task(
         # A task can be scheduled multiple times, so we need to keep the results streams open until all the scheduled
         # tasks are completed
         if self._users == 0:
+            self._finished = True
             return self._cm.__exit__(exc_type, exc_value, traceback)
         return False  # Do not suppress exceptions
 

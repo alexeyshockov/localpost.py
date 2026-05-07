@@ -7,7 +7,7 @@ import pytest
 from anyio import fail_after
 
 from localpost.hosting import serve
-from localpost.scheduler import Scheduler, after, delay, every, scheduled_task, take_first
+from localpost.scheduler import Scheduler, Task, after, delay, every, scheduled_task, take_first
 
 pytestmark = pytest.mark.anyio
 
@@ -159,3 +159,52 @@ async def test_delay_inserts_wait_between_events():
     intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
     for interval in intervals:
         assert interval >= 0.04, f"delay too short: {interval:.3f}s (expected >=0.04s)"
+
+
+async def test_subscribe_after_task_finishes_raises():
+    """``Task`` is one-shot: once the last user has exited, subscribers can't be added (the underlying
+    ExitStack is closed). The previous code raised a cryptic ``cannot reenter context`` deep in the
+    ExitStack; ``subscribe()`` now raises a clear ``RuntimeError`` up-front."""
+
+    def my_task() -> int:
+        return 7
+
+    task: Task[None, int] = Task(my_task)
+    # Drive the task through one full lifecycle.
+    async with task:
+        pass
+
+    with pytest.raises(RuntimeError, match="already finished"):
+        task.subscribe()
+
+
+async def test_shutdown_during_handler_lets_handler_finish():
+    """When shutdown fires while a handler is in flight, the handler completes naturally, no further
+    events are dispatched, and the service stops cleanly. Locks in the current graceful-shutdown
+    behavior (forced cancellation requires ``lt.stop()``, not ``lt.shutdown()``)."""
+    handler_started = anyio.Event()
+    handler_can_finish = anyio.Event()
+    runs = 0
+
+    @scheduled_task(every(timedelta(seconds=0.02)))
+    async def slow():
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            handler_started.set()
+            await handler_can_finish.wait()
+
+    with fail_after(2):
+        async with serve(slow) as lt:
+            await handler_started.wait()
+            lt.shutdown()
+            # Handler is blocked inside ``handler_can_finish.wait()``; the service must NOT be stopped
+            # yet — graceful shutdown waits for the in-flight handler to return.
+            await anyio.sleep(0.1)
+            assert not lt.stopped, "service stopped while handler was still running"
+            handler_can_finish.set()
+            await lt.stopped
+
+    # Only the first event was dispatched; subsequent ``every`` ticks were dropped (consumer busy)
+    # and after shutdown the trigger closes without firing the handler again.
+    assert runs == 1, f"Expected exactly 1 handler invocation, got {runs}"
