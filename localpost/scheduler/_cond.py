@@ -87,7 +87,6 @@ def every(period: timedelta | str, /) -> ScheduledTaskTemplate[None]:
     """
     Trigger an event every `period`.
     """
-    # return ScheduledTaskTemplate(Every(ensure_td(period))) >> buffer(0, full_mode="drop")
     return ScheduledTaskTemplate(Every(ensure_td(period)))
 
 
