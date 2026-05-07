@@ -1,4 +1,5 @@
 import random
+import time
 from datetime import timedelta
 
 import anyio
@@ -6,7 +7,7 @@ import pytest
 from anyio import fail_after
 
 from localpost.hosting import serve
-from localpost.scheduler import Scheduler, after, every, scheduled_task, take_first
+from localpost.scheduler import Scheduler, after, delay, every, scheduled_task, take_first
 
 pytestmark = pytest.mark.anyio
 
@@ -136,3 +137,25 @@ async def test_after_trigger_skips_failures():
 
     # n = 1, 3 succeed; n = 2, 4 raise. Only odd values reach ``after``.
     assert seen == [1, 3]
+
+
+async def test_delay_inserts_wait_between_events():
+    """``delay(D)`` sleeps ``D`` between receiving an event and forwarding it. With ``every`` emitting
+    fast and ``take_first(N)`` capping the run, total elapsed time must be at least ``N * D``."""
+    timestamps: list[float] = []
+
+    # ``every(1ms)`` keeps the source emitting fast enough that ``delay`` is the bottleneck;
+    # the actual cadence between handler firings is the delay duration.
+    @scheduled_task(every(timedelta(seconds=0.001)) // delay(timedelta(seconds=0.05)) // take_first(3))
+    def tick():
+        timestamps.append(time.monotonic())
+
+    with fail_after(2):
+        async with serve(tick) as lt:
+            await lt.stopped
+
+    assert len(timestamps) == 3
+    # Each consecutive event spent ~50ms inside ``delay``; allow generous slack for CI scheduling jitter.
+    intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+    for interval in intervals:
+        assert interval >= 0.04, f"delay too short: {interval:.3f}s (expected >=0.04s)"
