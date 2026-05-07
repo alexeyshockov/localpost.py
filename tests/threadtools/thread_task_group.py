@@ -7,26 +7,26 @@ from concurrent.futures import Future
 
 import pytest
 
-from localpost import threadtools
 from localpost.threadtools import ThreadTaskGroup, warmup
+from localpost.threadtools import _task_group as _tg
 
 
 @pytest.fixture
 def fast_idle_timeout(monkeypatch: pytest.MonkeyPatch):
     """Make idle-timeout tests fast: 100 ms instead of 60 s."""
-    monkeypatch.setattr(threadtools, "_IDLE_TIMEOUT", 0.1)
+    monkeypatch.setattr(_tg, "IDLE_TIMEOUT", 0.1)
     return 0.1
 
 
 def _drain_idle_workers() -> None:
     """Wait for the global idle deque to empty.
 
-    Tests that monkeypatch ``_IDLE_TIMEOUT`` to a small value rely on this
+    Tests that monkeypatch ``IDLE_TIMEOUT`` to a small value rely on this
     so they don't leak workers (or interact with each other through the
-    shared ``_idle`` deque).
+    shared ``idle`` deque).
     """
     deadline = time.monotonic() + 2.0
-    while threadtools._idle and time.monotonic() < deadline:
+    while _tg.idle and time.monotonic() < deadline:
         time.sleep(0.05)
 
 
@@ -209,7 +209,7 @@ def test_workers_are_shared_across_groups(fast_idle_timeout):
     first_run = set(seen)
 
     # Second group sees at least some of the same threads (workers parked
-    # in the global _idle deque).
+    # in the global idle deque).
     seen.clear()
     with ThreadTaskGroup() as tg:
         for _ in range(4):
@@ -224,13 +224,13 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
     # Drop any leftover workers from earlier tests — they were spawned before
     # the monkeypatch and are stuck on their original 60 s ``inbox.get``.
     # Orphaning them is safe (daemon threads, won't be reused).
-    threadtools._idle.clear()
+    _tg.idle.clear()
 
     # Spawn a fresh worker and grab a reference to it.
     with ThreadTaskGroup() as tg:
         tg.start_soon(lambda: None).result(timeout=5)
-    assert len(threadtools._idle) >= 1
-    fresh = threadtools._idle[-1]  # LIFO: most recently parked
+    assert len(_tg.idle) >= 1
+    fresh = _tg.idle[-1]  # LIFO: most recently parked
 
     # Wait past the idle timeout.
     time.sleep(fast_idle_timeout * 10)
@@ -307,11 +307,11 @@ def _record(i: int, sink: list[int], lock: threading.Lock) -> None:
 
 def test_warmup_adds_workers_to_idle_pool():
     """``warmup(N)`` spawns N workers and puts them in the global idle deque."""
-    threadtools._idle.clear()
+    _tg.idle.clear()
     warmup(4)
-    assert len(threadtools._idle) == 4
+    assert len(_tg.idle) == 4
     # Each entry is a distinct, alive worker.
-    workers = list(threadtools._idle)
+    workers = list(_tg.idle)
     assert all(w._alive for w in workers)
     assert len({id(w) for w in workers}) == 4
 
@@ -319,9 +319,9 @@ def test_warmup_adds_workers_to_idle_pool():
 def test_warmup_workers_are_used_by_dispatch():
     """A subsequent ``start_soon`` reuses a pre-warmed worker rather than
     spawning a fresh one."""
-    threadtools._idle.clear()
+    _tg.idle.clear()
     warmup(2)
-    pre = {id(w) for w in threadtools._idle}
+    pre = {id(w) for w in _tg.idle}
 
     seen: set[int] = set()
     seen_lock = threading.Lock()
@@ -334,14 +334,14 @@ def test_warmup_workers_are_used_by_dispatch():
         tg.start_soon(record_self).result(timeout=5)
 
     # The worker that ran is one of the pre-warmed set.
-    post = {id(w) for w in threadtools._idle}
+    post = {id(w) for w in _tg.idle}
     assert pre & post  # at least one of the warmed workers is still parked
 
 
 def test_warmup_zero_is_noop():
-    threadtools._idle.clear()
+    _tg.idle.clear()
     warmup(0)
-    assert len(threadtools._idle) == 0
+    assert len(_tg.idle) == 0
 
 
 def test_warmup_negative_raises():
