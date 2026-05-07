@@ -69,10 +69,9 @@ class Task(
         return f"<{self.__class__.__name__} {self.name!r}>"
 
     def subscribe(self, buffer_max_size: float = math.inf) -> MemoryObjectReceiveStream[Result[R]]:
-        # By default, a stream is created with a buffer size of 0, which means that any write will be blocked until
-        # there is a free reader. We do not want to block the task execution flow in any way, so:
-        #  - the buffer is unbounded by default
-        #  - if the buffer is full, the result is dropped (see publish method below)
+        # ``_publish_result`` always uses ``send_nowait`` and never blocks the task. Defaulting to an
+        # unbounded buffer means a slow consumer trades memory for never missing a result; pass a finite
+        # ``buffer_max_size`` to switch to drop-on-full instead (see WouldBlock branch in publish).
         send_stream, receive_stream = MemoryStream[Result[R]].create(buffer_max_size)
         self._subscribers.append(self._cm.enter_context(send_stream))
         return receive_stream
