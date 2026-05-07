@@ -35,10 +35,10 @@ def take_first[T](n: int, /) -> TriggerFactoryDecorator[T, T]:
 
     @trigger_factory_middleware
     async def middleware(source: Trigger[T], _):
-        iter_n = 0
-        if iter_n >= n:
+        if n == 0:
             return
         async with source as events:
+            iter_n = 0
             async for event in events:
                 iter_n += 1
                 yield event

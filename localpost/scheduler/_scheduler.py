@@ -36,7 +36,6 @@ T2 = TypeVar("T2")
 R = TypeVar("R")
 
 type TaskHandler[T, R] = Callable[[T], Awaitable[R]] | Callable[[], Awaitable[R]] | Callable[[T], R] | Callable[[], R]
-type HandlerDecorator = Callable[[Any], Any]
 
 logger = logging.getLogger("localpost.scheduler")
 
@@ -90,14 +89,11 @@ class Task(
     # MessageHandler[T]
     async def __call__(self, event: T) -> None:
         try:
-            result = Result.ok(await self._handle(event))
-            self._publish_result(result)
-        except TypeError:
-            raise
+            result: Result[R] = Result.ok(await self._handle(event))
         except Exception as e:
+            logger.exception("Task %r raised", self.name)
             result = Result.failure(e)
-            self._publish_result(result)
-            raise
+        self._publish_result(result)
 
     async def __aenter__(self):
         self._users += 1
@@ -123,7 +119,6 @@ class ScheduledTaskTemplate[T]:
     def __init__(self, tf: TriggerFactory[T]):
         self._tf = tf
         self._tf_queue: tuple[TriggerFactoryDecorator, ...] = ()
-        self._handler_decorators: tuple[HandlerDecorator, ...] = ()
 
     # TriggerFactory[T]
     def __call__(self, *args, **kwargs) -> Trigger[T]:
@@ -138,15 +133,6 @@ class ScheduledTaskTemplate[T]:
         n = ScheduledTaskTemplate(self._tf)
         n._tf_queue = self._tf_queue + (decorator,)
         return cast(ScheduledTaskTemplate[T2], n)
-
-    def __rshift__(self, decorator: HandlerDecorator) -> ScheduledTaskTemplate[T]:
-        n = ScheduledTaskTemplate[T](self._tf)
-        n._handler_decorators = self._handler_decorators + (decorator,)
-        return n
-
-    def resolve_handler(self, task: Task[T, Any]) -> AbstractAsyncContextManager[Callable[[T], Awaitable[None]]]:
-        # TODO: Support handler decorators (flow module)
-        return task
 
     @property
     def tf(self) -> TriggerFactory[T]:
@@ -169,8 +155,6 @@ class _ScheduledTask[T, R]:
     def __init__(self, task: Task[T, R], tf: TriggerFactory[T]):
         self.task = task
         self._trigger_factory = tf
-        tpl = ScheduledTaskTemplate.ensure(tf)
-        self._handler = tpl.resolve_handler(task)
         self._shutting_down: EventView = Event()  # Placeholder, resolved in run()
 
     def __repr__(self):
@@ -188,7 +172,7 @@ class _ScheduledTask[T, R]:
         self._shutting_down = shutting_down
         trigger = self._trigger_factory(self)
 
-        async with trigger as t_events, self._handler as message_handler:
+        async with trigger as t_events, self.task as message_handler:
             async for t_event in t_events:
                 await message_handler(t_event)
             logger.debug("%r trigger is completed", self)

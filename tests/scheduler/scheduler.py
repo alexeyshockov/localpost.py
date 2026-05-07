@@ -6,9 +6,9 @@ import pytest
 from anyio import fail_after
 
 from localpost.hosting import serve
-from localpost.scheduler import Scheduler, every, scheduled_task
+from localpost.scheduler import Scheduler, after, every, scheduled_task, take_first
 
-pytestmark = [pytest.mark.anyio, pytest.mark.integration]
+pytestmark = pytest.mark.anyio
 
 
 async def test_task_decorator():
@@ -73,3 +73,66 @@ async def test_single_scheduled_task():
         lt.shutdown()
 
     assert len(results) == 1
+
+
+async def test_handler_failure_does_not_kill_loop():
+    """A raising handler must be logged and published as Result.failure, but the schedule loop must keep firing."""
+    runs = 0
+
+    @scheduled_task(every(timedelta(seconds=0.05)) // take_first(3))
+    def flaky():
+        nonlocal runs
+        runs += 1
+        raise RuntimeError("boom")
+
+    with fail_after(2):
+        async with serve(flaky) as lt:
+            await lt.stopped  # ``take_first(3)`` makes the service stop on its own
+
+    assert runs == 3
+
+
+async def test_after_trigger_chains_results():
+    """``after(task1)`` fires task2 with task1's return value on every successful run."""
+    scheduler = Scheduler()
+    seen: list[int] = []
+
+    @scheduler.task(every(timedelta(seconds=0.05)) // take_first(3))
+    def producer() -> int:
+        return 42
+
+    @scheduler.task(after(producer))
+    def _consumer(value: int) -> None:
+        seen.append(value)
+
+    with fail_after(2):
+        async with serve(scheduler) as lt:
+            await lt.stopped  # producer stops after 3 firings → consumer sees EndOfStream → scheduler stops
+
+    assert seen == [42, 42, 42]
+
+
+async def test_after_trigger_skips_failures():
+    """``after(task1)`` only fires when task1 succeeds; failures are dropped (``after_all`` would see them)."""
+    scheduler = Scheduler()
+    seen: list[int] = []
+    n = 0
+
+    @scheduler.task(every(timedelta(seconds=0.05)) // take_first(4))
+    def flaky() -> int:
+        nonlocal n
+        n += 1
+        if n % 2 == 0:
+            raise RuntimeError("even runs fail")
+        return n
+
+    @scheduler.task(after(flaky))
+    def _consumer(value: int) -> None:
+        seen.append(value)
+
+    with fail_after(2):
+        async with serve(scheduler) as lt:
+            await lt.stopped
+
+    # n = 1, 3 succeed; n = 2, 4 raise. Only odd values reach ``after``.
+    assert seen == [1, 3]
