@@ -4,7 +4,7 @@ import dataclasses as dc
 import inspect
 import logging
 import math
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, final
 
@@ -185,20 +185,12 @@ class _ScheduledTask[T, R]:
 
 
 type Trigger[T] = AbstractAsyncContextManager[AsyncIterator[T]]
-type TriggerFactory[T] = Callable[
-    [ScheduledTask[T, Any]], AbstractAsyncContextManager[AsyncIterator[T]]  # Trigger[T]
-]
-type TriggerFactoryMiddleware[T, T2] = Callable[
-    [
-        AbstractAsyncContextManager[AsyncIterator[T]],  # Trigger[T] (source)
-        ScheduledTask,
-    ],
-    AsyncIterable[T2],  # TODO AbstractAsyncContextManager[AsyncIterator[T2]]
-]
-type TriggerFactoryDecorator[T, T2] = Callable[
-    [Callable[[ScheduledTask], AbstractAsyncContextManager[AsyncIterator[T]]]],  # TriggerFactory[T]
-    Callable[[ScheduledTask], AbstractAsyncContextManager[AsyncIterator[T2]]],  # TriggerFactory[T2]
-]
+type TriggerFactory[T] = Callable[[ScheduledTask[T, Any]], Trigger[T]]
+# Middleware is written as an async generator function: it consumes the source ``Trigger[T]`` (a context
+# manager so it can install/clean up a task group) and yields ``T2`` items. ``trigger_factory_middleware``
+# wraps the returned async generator into a ``Trigger[T2]`` via ``maybe_closing``.
+type TriggerFactoryMiddleware[T, T2] = Callable[[Trigger[T], ScheduledTask], AsyncIterator[T2]]
+type TriggerFactoryDecorator[T, T2] = Callable[[TriggerFactory[T]], TriggerFactory[T2]]
 
 
 def scheduled_task(  # noqa: UP047 — see TypeVar comment above

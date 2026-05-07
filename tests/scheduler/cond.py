@@ -30,5 +30,5 @@ async def test_every_trigger():
         mock_sleep.assert_awaited_once_with(5.0)
 
 
-async def test_after_trigger():
-    pass  # TODO Implement
+# ``after()`` end-to-end coverage lives in ``tests/scheduler/scheduler.py``
+# (test_after_trigger_chains_results / test_after_trigger_skips_failures).

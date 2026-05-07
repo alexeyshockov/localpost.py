@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-from contextlib import AbstractAsyncContextManager
 from functools import wraps
-from typing import cast
 
 from localpost._utils import DelayFactory, cancellable_from, ensure_delay_factory, maybe_closing, sleep, td_str
 
@@ -15,14 +13,16 @@ logger = logging.getLogger("localpost.scheduler.cond")
 def trigger_factory_middleware[T, T2](
     middleware: TriggerFactoryMiddleware[T, T2],
 ) -> TriggerFactoryDecorator[T, T2]:
+    """Adapt an async-generator middleware into a ``TriggerFactoryDecorator``.
+
+    The middleware receives the source ``Trigger[T]`` and yields ``T2`` items; we wrap the resulting
+    async generator with ``maybe_closing`` so it satisfies the ``Trigger[T2]`` (context manager) shape.
+    """
+
     def _decorator(source: TriggerFactory[T]) -> TriggerFactory[T2]:
         @wraps(source)
-        def _run(task):
-            source_events = source(task)
-            events = middleware(source_events, task)
-            return cast(
-                "Trigger[T2]", events if isinstance(events, AbstractAsyncContextManager) else maybe_closing(events)
-            )
+        def _run(task) -> Trigger[T2]:
+            return maybe_closing(middleware(source(task), task))
 
         return _run
 
