@@ -91,11 +91,11 @@ why package:
 
 [doc("Serve docs locally with live reload")]
 docs-serve:
-    uv run --all-groups --all-extras mkdocs serve
+    uv run --all-groups --all-extras zensical serve
 
 [doc("Build docs to ./site")]
 docs-build:
-    uv run --all-groups --all-extras mkdocs build
+    uv run --all-groups --all-extras zensical build
 
 [doc("Find unused code with vulture (config in pyproject.toml). Pass extra args to override.")]
 deadcode *args:

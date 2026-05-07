@@ -3,8 +3,10 @@
 `localpost.http` exposes two surfaces for accessing the request body:
 `ctx.body: bytes` (the buffered body) and `ctx.receive(size) -> bytes`
 (read up to `size` bytes). Both are present on the sync
-[`HTTPReqCtx`](../../localpost/http/_base.py) and async
-[`AsyncHTTPReqCtx`](../../localpost/http/_async_base.py) Protocols.
+[`HTTPReqCtx`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/_base.py)
+and async
+[`AsyncHTTPReqCtx`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/_async_base.py)
+Protocols.
 This note explains what `receive(size)` does in each transport — and
 why the same Protocol cleanly covers four very different host servers.
 
@@ -35,22 +37,24 @@ implements one strategy that matches what its host transport gave it.
 ### Native h11 (sync)
 
 The h11 parser exposes per-chunk events
-([`server_h11.py:422`](../../localpost/http/server_h11.py)):
+([`server_h11.py:422`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/server_h11.py)):
 `receive(size)` pumps `parser.next_event()`, calls `conn.receive(size)`
 (i.e. `recv` on the socket) when h11 says `NEED_DATA`, and returns the
 next `h11.Data` chunk. **It always reads from the wire** — there's no
 internal buffer.
 
 `ctx.body` gets populated by the **selector**, not by the ctx itself,
-when a [`RequestHandler`](../../localpost/http/_base.py) returns a
-[`BodyHandler`](../../localpost/http/_base.py) continuation. The
+when a [`RequestHandler`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/_base.py)
+returns a
+[`BodyHandler`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/_base.py)
+continuation. The
 selector reads the full body into `ctx.body` *before* invoking the
 continuation, then runs it. After that, `parser.their_state ==
 h11.DONE`, so a follow-up `ctx.receive(...)` correctly returns `b""`.
 This is the JSON-API common case: handler decides "I need the body" by
 returning a `BodyHandler`, then reads `ctx.body` directly.
 
-The streaming case ([`streaming_pool_handler`](../../localpost/http/_pool.py))
+The streaming case ([`streaming_pool_handler`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/_pool.py))
 runs the handler on a borrowed conn *without* pre-buffering — the
 handler calls `ctx.receive(size)` to pull chunks off the wire as they
 arrive. Use it for streaming uploads / large bodies where buffering is
@@ -58,7 +62,7 @@ undesirable.
 
 ### WSGI bridge (sync)
 
-WSGI ([`wsgi.py`](../../localpost/http/wsgi.py)) doesn't expose
+WSGI ([`wsgi.py`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/wsgi.py)) doesn't expose
 chunked input — the WSGI server has already buffered the body for us
 in `wsgi.input`. The bridge reads it once into `ctx.body`;
 `ctx.receive(size)` slices that buffer. There's no wire to read from
@@ -66,7 +70,7 @@ on this side.
 
 ### ASGI bridge (async)
 
-ASGI ([`asgi.py`](../../localpost/http/asgi.py)) hands us body chunks
+ASGI ([`asgi.py`](https://github.com/alexeyshockov/localpost.py/blob/main/localpost/http/asgi.py)) hands us body chunks
 via `http.request` events on the receive channel. The bridge consumes
 them upfront (capped by `max_body_size`) into `ctx.body` before
 dispatch; `ctx.receive(size)` slices the buffered body, same shape as

@@ -35,10 +35,6 @@ theme:
 
 plugins:
   - search
-  - include-markdown
-
-hooks:
-  - docs/_hooks.py
 
 markdown_extensions:
   - admonition
@@ -50,9 +46,6 @@ markdown_extensions:
       alternate_style: true
   - toc:
       permalink: true
-
-not_in_nav: |
-  /adr/template.md
 
 nav:
   - Home: index.md

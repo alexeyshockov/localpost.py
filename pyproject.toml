@@ -158,11 +158,9 @@ bench-openapi = [
     "pydantic ~=2.7",
 ]
 docs = [
-    "mkdocs ~=1.6",
-    "mkdocs-material ~=9.5",
-    # Surfaces per-module READMEs (localpost/<mod>/README.md) on the docs site
-    # without duplication.
-    "mkdocs-include-markdown-plugin ~=7.0",
+    # Pre-1.0; pin to 0.x and accept early-adopter risk. Reads mkdocs.yml
+    # natively. Replaces mkdocs + mkdocs-material.
+    "zensical >=0.0.40,<0.1",
 ]
 
 [tool.coverage.run]
