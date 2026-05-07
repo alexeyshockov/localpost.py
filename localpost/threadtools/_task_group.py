@@ -208,14 +208,14 @@ class TaskGroup:
             while self._pending > 0:
                 self._cv.wait()
             self._closed = True
-        all_errors: list[BaseException] = []
-        if exc is not None:
-            all_errors.append(exc)
-        # Dedup by identity: a task that raised was already recorded in
-        # ``self._errors``. If the caller observed it via ``Future.result()``
-        # and let it propagate into the body, ``exc`` is the same instance —
-        # surface it once, not twice.
-        all_errors.extend(e for e in self._errors if e is not exc)
+        # Seed from ``_errors`` first so recorded tasks keep their original
+        # order. Prepend the body exception only if it isn't already in
+        # there — a task exception observed via ``Future.result()`` and let
+        # to propagate is the same instance as the one in ``_errors``;
+        # surfacing it once preserves both dedup and record order.
+        all_errors: list[BaseException] = list(self._errors)
+        if exc is not None and all(e is not exc for e in all_errors):
+            all_errors.insert(0, exc)
         if all_errors:
             label = f"TaskGroup {self._name!r} failed" if self._name else "TaskGroup failed"
             # ``BaseExceptionGroup(...)`` returns ``ExceptionGroup`` when every

@@ -149,6 +149,39 @@ def test_distinct_body_and_task_exceptions_are_both_surfaced():
     assert messages == ["from-body", "from-task"]
 
 
+def test_dedup_preserves_recorded_order_when_body_reraises_task_error():
+    """If the body re-raises a task exception that wasn't first in
+    ``_errors``, dedup must keep it at its original recorded position
+    rather than promoting it to the front."""
+
+    class A(Exception):
+        pass
+
+    class B(Exception):
+        pass
+
+    def task_a():
+        raise A("a")
+
+    def task_b():
+        raise B("b")
+
+    with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
+        with TaskGroup() as tg:
+            tg.start_soon(task_a)
+            time.sleep(0.05)  # ensure A lands in _errors first
+            fut_b = tg.create_task(task_b)
+            # Pull B's exception (same instance now sitting in _errors)
+            # and re-raise it into the body. Without dedup-with-order,
+            # B would be moved to position 0.
+            b_exc = fut_b.exception(timeout=5)
+            assert b_exc is not None
+            raise b_exc
+
+    types = [type(e) for e in ei.value.exceptions]
+    assert types == [A, B]  # record order, not body-first
+
+
 def test_body_exception_alone_is_wrapped():
     class BodyBoom(Exception):
         pass
