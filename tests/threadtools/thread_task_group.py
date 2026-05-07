@@ -109,6 +109,46 @@ def test_start_soon_exception_surfaces_in_group():
     assert isinstance(ei.value.exceptions[0], Boom)
 
 
+def test_create_task_result_reraise_is_deduped_in_group():
+    """When ``Future.result()`` re-raises a task exception into the body,
+    ``__exit__`` collapses the body copy with the group-recorded copy
+    (same instance) — surfacing the failure exactly once."""
+
+    class Boom(Exception):
+        pass
+
+    def bad():
+        raise Boom("nope")
+
+    with pytest.raises(ExceptionGroup) as ei:
+        with TaskGroup() as tg:
+            tg.create_task(bad).result(timeout=5)
+
+    assert len(ei.value.exceptions) == 1
+    assert isinstance(ei.value.exceptions[0], Boom)
+
+
+def test_distinct_body_and_task_exceptions_are_both_surfaced():
+    """Dedup is by identity — two different exception instances must both
+    appear in the ExceptionGroup, even if they're the same type."""
+
+    class Boom(Exception):
+        pass
+
+    def bad():
+        raise Boom("from-task")
+
+    with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
+        with TaskGroup() as tg:
+            tg.start_soon(bad)
+            time.sleep(0.05)  # let the task land in _errors
+            raise Boom("from-body")
+
+    assert len(ei.value.exceptions) == 2
+    messages = sorted(str(e) for e in ei.value.exceptions)
+    assert messages == ["from-body", "from-task"]
+
+
 def test_body_exception_alone_is_wrapped():
     class BodyBoom(Exception):
         pass

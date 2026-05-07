@@ -211,7 +211,11 @@ class TaskGroup:
         all_errors: list[BaseException] = []
         if exc is not None:
             all_errors.append(exc)
-        all_errors.extend(self._errors)
+        # Dedup by identity: a task that raised was already recorded in
+        # ``self._errors``. If the caller observed it via ``Future.result()``
+        # and let it propagate into the body, ``exc`` is the same instance —
+        # surface it once, not twice.
+        all_errors.extend(e for e in self._errors if e is not exc)
         if all_errors:
             label = f"TaskGroup {self._name!r} failed" if self._name else "TaskGroup failed"
             # ``BaseExceptionGroup(...)`` returns ``ExceptionGroup`` when every
