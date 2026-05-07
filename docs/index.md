@@ -1,54 +1,56 @@
-# LocalPost docs
+# LocalPost
 
-Concept docs and deeper dives that don't fit in the per-module READMEs.
-Layout is mkdocs-ready (one section per top-level dir); a static site
-generator can be wired up later without moving anything.
+A small async Python framework for long-running processes:
 
-## Modules
+- **hosting** — service lifecycle + orchestration (start / stop / signals)
+- **scheduler** — in-process, composable task scheduler
+- **http** — lightweight sync HTTP/1.1 server (h11, ~400 LOC)
+- **di** — `.NET`-style scoped IoC container
 
-User-facing references live next to the code:
+Built on [AnyIO](https://anyio.readthedocs.io/) — runs on **asyncio** *and*
+**Trio**. Python 3.12+.
 
-- [`localpost.hosting`](../localpost/hosting/README.md)
-- [`localpost.scheduler`](../localpost/scheduler/README.md)
-- [`localpost.http`](../localpost/http/README.md)
-- [`localpost.openapi`](../localpost/openapi/README.md)
-- [`localpost.di`](../localpost/di/README.md)
+LocalPost is not a monolith: each module is usable on its own. Pick what you
+need.
 
-## Design notes
+## Install
 
-Stable explanations of how the system works today and why. Edited
-freely as the design evolves.
+```bash
+pip install localpost
+```
 
-- [Connection model](design/connection-model.md) — dispatch chain,
-  two-state TRACKED/BORROWED machine, pull-based client-disconnect
-  detection, and the sync-vs-async request-context asymmetry.
-- [Threading topologies](design/threading-topologies.md) — single
-  selector vs `selectors=N` vs acceptor + N workers; the
-  handler/router/`http_server` composition pattern.
-- [Server backends](design/server-backends.md) — h11 and httptools
-  coexistence, why they aren't unified behind a parser Protocol,
-  httptools caveats.
-- [Request body handling across transports](design/request-body-handling.md) —
-  what `ctx.receive(size)` does on the native server, WSGI, ASGI, and
-  RSGI; how the pre-buffer / streaming distinction is a transport
-  choice, not a Protocol switch.
-- [Deployment topologies](design/deployment-topologies.md) — uvicorn /
-  hypercorn run as hosted services *inside* `run_app`; Granian is a
-  process supervisor that runs the host *inside* its workers. Why the
-  two cases are asymmetric and what `HostRSGIApp` does about it.
+Optional extras turn on individual subsystems:
 
-## Architecture decisions
+| Extra            | Adds                                                    |
+| ---------------- | ------------------------------------------------------- |
+| `[scheduler]`    | `humanize`, `pytimeparse2` — string durations           |
+| `[cron]`         | `croniter` — cron-expression trigger                    |
+| `[http]`         | `h11` — HTTP server                                     |
+| `[http-fast]`    | `httptools` — alternative C-based parser                |
+| `[http-compress]`| `brotli` — Brotli compression (gzip is stdlib)          |
+| `[openapi]`      | `msgspec` — typed HTTP framework with OpenAPI 3.2       |
+| `[rsgi]`         | `granian` — RSGI bridge for Granian deployments         |
 
-[`docs/adr/`](adr/index.md) holds dated, immutable records of the
-non-trivial decisions in the codebase — the *moments* and
-*trade-offs*, not the current shape. Read these when you want to
-know *why* something is the way it is, especially if the rationale
-isn't obvious from the code.
+## Where to next
 
-## Plans
+- **[Getting started](getting-started.md)** — the 60-second tour.
+- **Modules** — per-module references:
+  [hosting](modules/hosting.md),
+  [scheduler](modules/scheduler.md),
+  [http](modules/http.md),
+  [di](modules/di.md),
+  [openapi](modules/openapi.md).
+- **Design notes** — how the system works today and why
+  ([connection model](design/connection-model.md),
+  [threading topologies](design/threading-topologies.md), …).
+- **[ADRs](adr/index.md)** — dated, immutable records of non-trivial design
+  decisions.
 
-Work-in-progress design plans live at the repo root under
-[`plans/`](../plans/) — e.g. RSGI deployment, the dynamic worker pool.
-They're forward-looking; once a plan lands, the *why* becomes an
-ADR, the stable narrative becomes a design note here, and the plan
-file is removed.
+## Status
+
+Beta — actively developed. All four core modules have settled public APIs and
+are not expected to break in patch or minor releases. See the
+[CHANGELOG](https://github.com/alexeyshockov/localpost.py/blob/main/CHANGELOG.md)
+for history.
+
+MIT licensed.

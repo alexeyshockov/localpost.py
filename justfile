@@ -89,6 +89,14 @@ bench-micro *args:
 why package:
     uv tree --invert --package {{ package }}
 
+[doc("Serve docs locally with live reload")]
+docs-serve:
+    uv run --all-groups --all-extras mkdocs serve
+
+[doc("Build docs to ./site")]
+docs-build:
+    uv run --all-groups --all-extras mkdocs build
+
 [doc("Find unused code with vulture (config in pyproject.toml). Pass extra args to override.")]
 deadcode *args:
     vulture {{ args }}

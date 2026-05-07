@@ -1,0 +1,77 @@
+site_name: LocalPost
+site_description: >-
+  A small async Python framework for long-running processes: service hosting,
+  in-process task scheduling, and a lightweight HTTP server.
+site_url: https://alexeyshockov.github.io/localpost.py/
+repo_url: https://github.com/alexeyshockov/localpost.py
+repo_name: alexeyshockov/localpost.py
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  - include-markdown
+
+hooks:
+  - docs/_hooks.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+not_in_nav: |
+  /adr/template.md
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Modules:
+    - hosting: modules/hosting.md
+    - scheduler: modules/scheduler.md
+    - http: modules/http.md
+    - di: modules/di.md
+    - openapi: modules/openapi.md
+  - Design notes:
+    - Connection model: design/connection-model.md
+    - Threading topologies: design/threading-topologies.md
+    - Server backends: design/server-backends.md
+    - Request body handling: design/request-body-handling.md
+    - Deployment topologies: design/deployment-topologies.md
+  - ADRs:
+    - Index: adr/index.md
+    - 0001 — AnyIO as async runtime: adr/0001-anyio-as-async-runtime.md
+    - 0002 — h11 + httptools coexist: adr/0002-h11-httptools-coexist.md
+    - 0003 — Sync-only native HTTP server: adr/0003-sync-native-http-server.md
+    - 0004 — Pull-based disconnect detection: adr/0004-pull-based-disconnect-detection.md

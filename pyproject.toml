@@ -157,6 +157,13 @@ bench-openapi = [
     # Pydantic v2 is what both peers drive; LocalPost tests its msgspec path.
     "pydantic ~=2.7",
 ]
+docs = [
+    "mkdocs ~=1.6",
+    "mkdocs-material ~=9.5",
+    # Surfaces per-module READMEs (localpost/<mod>/README.md) on the docs site
+    # without duplication.
+    "mkdocs-include-markdown-plugin ~=7.0",
+]
 
 [tool.coverage.run]
 omit = ["tests/*"]
@@ -259,6 +266,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "examples/*" = ["T201"]
 "benchmarks/*" = ["T201"]
+# Not a Python package; just a hook file mkdocs loads by path.
+"docs/*" = ["INP001"]
 
 [tool.uv]
 build-backend.module-root = ""
