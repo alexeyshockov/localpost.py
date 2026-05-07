@@ -1,10 +1,10 @@
 from ._channel import Channel, ReceiveChannel, SendChannel
-from ._task_group import ThreadTaskGroup, warmup
+from ._task_group import TaskGroup, warmup
 
 __all__ = [
     "Channel",
     "ReceiveChannel",
     "SendChannel",
-    "ThreadTaskGroup",
+    "TaskGroup",
     "warmup",
 ]

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import contextvars
 import dataclasses as dc
+import inspect
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
-from typing import Any, Self, final
+from typing import TYPE_CHECKING, Any, Self, final, overload
+
+if TYPE_CHECKING:
+    from anyio.from_thread import BlockingPortal
 
 IDLE_TIMEOUT: float = 60.0
 """Seconds an idle worker waits for new work before self-exiting."""
@@ -18,7 +22,7 @@ class Task:
     fn: Callable[..., Any]
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
-    group: ThreadTaskGroup
+    group: TaskGroup
     context: contextvars.Context
     """Snapshot of the caller's ContextVars at ``start_soon`` time. The user
     callable runs inside this context; mutations are confined to the task."""
@@ -27,6 +31,19 @@ class Task:
         try:
             try:
                 result = self.context.run(self.fn, *self.args, **self.kwargs)
+                if inspect.iscoroutine(result):
+                    # The user submitted an async callable; dispatch the
+                    # coroutine to the event loop via the portal. The worker
+                    # thread blocks on ``portal.call`` until the coroutine
+                    # completes — same lifetime model as the sync path.
+                    portal = self.group._aio_portal
+                    if portal is None:
+                        result.close()
+                        raise RuntimeError(  # noqa: TRY301
+                            "TaskGroup received a coroutine but was not given an aio_portal"
+                        )
+                    coro = result
+                    result = portal.call(lambda: coro)
             except BaseException as exc:  # noqa: BLE001 — Trio-style: capture everything
                 self.future.set_exception(exc)
                 self.group._record_error(exc)
@@ -88,7 +105,7 @@ class Worker:
 
 
 idle: deque[Worker] = deque()
-"""Global LIFO stack of idle workers, shared across all ``ThreadTaskGroup``s."""
+"""Global LIFO stack of idle workers, shared across all ``TaskGroup``s."""
 
 
 def warmup(count: int, /) -> None:
@@ -113,14 +130,14 @@ def warmup(count: int, /) -> None:
 
 
 @final
-class ThreadTaskGroup:
+class TaskGroup:
     """Trio-style task group running sync callables on a shared thread pool.
 
     Tasks submitted via :meth:`start_soon` run on a process-wide pool of
     worker threads. Workers are spawned on demand, reused across all
-    ``ThreadTaskGroup`` instances, and self-exit after 60 s of idleness.
-    There is no concurrency cap — ``start_soon`` always succeeds (modulo
-    OS thread limits).
+    ``TaskGroup`` instances, and self-exit after 60 s of idleness. There
+    is no concurrency cap — ``start_soon`` always succeeds (modulo OS
+    thread limits).
 
     Lifetime: sync context manager. On exit, blocks until every task
     started inside the ``with`` block has finished, then re-raises any
@@ -130,7 +147,7 @@ class ThreadTaskGroup:
 
     Example::
 
-        with ThreadTaskGroup() as tg:
+        with TaskGroup() as tg:
             fut = tg.start_soon(do_work, arg)
             # ...
         # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
@@ -147,12 +164,24 @@ class ThreadTaskGroup:
     runs inside that snapshot. Mutations the task makes to ContextVars
     stay confined to its copy — same semantics as
     :func:`asyncio.to_thread` and Trio / AnyIO task spawn.
+
+    If ``aio_portal`` is provided, ``start_soon`` also accepts async
+    callables: the coroutine is dispatched to the portal's event loop
+    via :meth:`anyio.from_thread.BlockingPortal.call`, run from inside
+    the worker thread (the worker blocks until the coroutine returns).
+    Submitting an async callable without a portal raises ``RuntimeError``.
     """
 
-    __slots__ = ("_closed", "_cv", "_errors", "_lock", "_name", "_pending")
+    __slots__ = ("_aio_portal", "_closed", "_cv", "_errors", "_lock", "_name", "_pending")
 
-    def __init__(self, *, name: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        aio_portal: BlockingPortal | None = None,
+    ) -> None:
         self._name = name
+        self._aio_portal = aio_portal
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._pending = 0
@@ -166,7 +195,7 @@ class ThreadTaskGroup:
 
     def __enter__(self) -> Self:
         if self._closed:
-            raise RuntimeError("ThreadTaskGroup cannot be reused")
+            raise RuntimeError("TaskGroup cannot be reused")
         return self
 
     def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
@@ -181,19 +210,38 @@ class ThreadTaskGroup:
             all_errors.append(exc)
         all_errors.extend(self._errors)
         if all_errors:
-            label = f"ThreadTaskGroup {self._name!r} failed" if self._name else "ThreadTaskGroup failed"
+            label = f"TaskGroup {self._name!r} failed" if self._name else "TaskGroup failed"
             # ``BaseExceptionGroup(...)`` returns ``ExceptionGroup`` when every
             # member is an ``Exception`` subclass, ``BaseExceptionGroup`` otherwise
             # — matches Trio semantics for ``KeyboardInterrupt`` / ``SystemExit``.
             raise BaseExceptionGroup(label, all_errors)
 
-    def start_soon[**P, R](self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> Future[R]:
-        """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future."""
+    @overload
+    def start_soon[**P, R](
+        self, fn: Callable[P, Awaitable[R]], /, *args: P.args, **kwargs: P.kwargs
+    ) -> Future[R]: ...
+    @overload
+    def start_soon[**P, R](
+        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+    ) -> Future[R]: ...
+    def start_soon(
+        self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> Future[Any]:
+        """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future.
+
+        ``fn`` may be sync or async. Async callables require ``aio_portal``;
+        the worker invokes ``portal.call`` to await the coroutine on the
+        event loop.
+        """
+        if inspect.iscoroutinefunction(fn) and self._aio_portal is None:
+            raise RuntimeError(
+                "TaskGroup.start_soon got an async callable but the group has no aio_portal"
+            )
         with self._lock:
             if self._closed:
-                raise RuntimeError("ThreadTaskGroup is closed")
+                raise RuntimeError("TaskGroup is closed")
             self._pending += 1
-        fut: Future[R] = Future()
+        fut: Future[Any] = Future()
         # Snapshot the caller's context now (matches Trio / AnyIO / asyncio
         # ``to_thread`` semantics); each ``start_soon`` captures independently.
         task = Task(fut, fn, args, kwargs, self, contextvars.copy_context())
@@ -221,3 +269,5 @@ class ThreadTaskGroup:
         # is established by ``_task_done``'s acquire of ``_cv``, which always
         # runs after ``_record_error`` in the same task.
         self._errors.append(exc)
+
+

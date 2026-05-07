@@ -58,7 +58,7 @@ What this gives you:
   user's composition problem (today there is no per-route pool
   API).
 - **No concurrency cap on `http_server` or the pool.** The pool
-  dispatches every request onto a process-wide `ThreadTaskGroup`;
+  dispatches every request onto a process-wide `TaskGroup`;
   workers are spawned on demand and reused across all
   `thread_pool_handler` instances in the process. There is no
   admission gate and no 503-on-overflow — backpressure is the

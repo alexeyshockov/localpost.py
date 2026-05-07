@@ -1,4 +1,4 @@
-"""Tests for ``localpost.threadtools.ThreadTaskGroup``."""
+"""Tests for ``localpost.threadtools.TaskGroup``."""
 
 import contextvars
 import threading
@@ -7,7 +7,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from localpost.threadtools import ThreadTaskGroup, warmup
+from localpost.threadtools import TaskGroup, warmup
 from localpost.threadtools import _task_group as _tg
 
 
@@ -36,14 +36,14 @@ def _drain_idle_workers() -> None:
 
 
 def test_start_soon_returns_future_with_result():
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         fut = tg.start_soon(lambda x: x * 2, 21)
         assert isinstance(fut, Future)
         assert fut.result(timeout=5) == 42
 
 
 def test_start_soon_with_kwargs():
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         fut = tg.start_soon(lambda *, a, b: a + b, a=1, b=2)
         assert fut.result(timeout=5) == 3
 
@@ -55,7 +55,7 @@ def test_many_concurrent_tasks_all_complete():
         time.sleep(0.01)
         return i * i
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         futs = [tg.start_soon(work, i) for i in range(n)]
 
     assert sorted(f.result() for f in futs) == [i * i for i in range(n)]
@@ -74,7 +74,7 @@ def test_task_exception_captured_in_future_and_raised_at_exit():
         raise Boom("nope")
 
     with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
-        with ThreadTaskGroup() as tg:
+        with TaskGroup() as tg:
             fut = tg.start_soon(bad)
             # Future records the exception too
             with pytest.raises(Boom):
@@ -88,7 +88,7 @@ def test_body_exception_alone_is_wrapped():
         pass
 
     with pytest.raises(ExceptionGroup) as ei:
-        with ThreadTaskGroup():
+        with TaskGroup():
             raise BodyBoom("body")
     assert len(ei.value.exceptions) == 1
     assert isinstance(ei.value.exceptions[0], BodyBoom)
@@ -105,7 +105,7 @@ def test_body_and_task_exceptions_are_merged():
         raise Task("task")
 
     with pytest.raises(ExceptionGroup) as ei:  # noqa: PT012
-        with ThreadTaskGroup() as tg:
+        with TaskGroup() as tg:
             tg.start_soon(bad)
             time.sleep(0.05)  # let the task land
             raise Body("body")
@@ -117,8 +117,8 @@ def test_named_group_uses_name_in_exception_message():
     def bad():
         raise RuntimeError("x")
 
-    with pytest.raises(ExceptionGroup, match="ThreadTaskGroup 'pool-x' failed"):
-        with ThreadTaskGroup(name="pool-x") as tg:
+    with pytest.raises(ExceptionGroup, match="TaskGroup 'pool-x' failed"):
+        with TaskGroup(name="pool-x") as tg:
             tg.start_soon(bad)
 
 
@@ -137,7 +137,7 @@ def test_exit_blocks_until_all_tasks_complete():
         release.wait(timeout=5)
         finished.set()
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         tg.start_soon(slow)
         assert started.wait(timeout=2)
         assert not finished.is_set()
@@ -156,7 +156,7 @@ def test_nested_start_soon_during_drain():
         with counter_lock:
             counter += 1
 
-    def branch(tg: ThreadTaskGroup, depth: int):
+    def branch(tg: TaskGroup, depth: int):
         if depth == 0:
             leaf()
             return
@@ -167,7 +167,7 @@ def test_nested_start_soon_during_drain():
         f2.result(timeout=5)
         leaf()
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         tg.start_soon(branch, tg, 3)
 
     # depth=3 → 1 + 2 + 4 + 8 = 15 leaves
@@ -175,7 +175,7 @@ def test_nested_start_soon_during_drain():
 
 
 def test_start_soon_after_close_raises():
-    tg = ThreadTaskGroup()
+    tg = TaskGroup()
     with tg:
         tg.start_soon(lambda: None).result(timeout=5)
     with pytest.raises(RuntimeError, match="closed"):
@@ -183,7 +183,7 @@ def test_start_soon_after_close_raises():
 
 
 def test_group_cannot_be_reused():
-    tg = ThreadTaskGroup()
+    tg = TaskGroup()
     with tg:
         pass
     with pytest.raises(RuntimeError, match="cannot be reused"):
@@ -203,7 +203,7 @@ def test_workers_are_shared_across_groups(fast_idle_timeout):
     def record():
         seen.add(threading.get_ident())
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         for _ in range(4):
             tg.start_soon(record).result(timeout=5)
     first_run = set(seen)
@@ -211,7 +211,7 @@ def test_workers_are_shared_across_groups(fast_idle_timeout):
     # Second group sees at least some of the same threads (workers parked
     # in the global idle deque).
     seen.clear()
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         for _ in range(4):
             tg.start_soon(record).result(timeout=5)
     second_run = set(seen)
@@ -227,7 +227,7 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
     _tg.idle.clear()
 
     # Spawn a fresh worker and grab a reference to it.
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         tg.start_soon(lambda: None).result(timeout=5)
     assert len(_tg.idle) >= 1
     fresh = _tg.idle[-1]  # LIFO: most recently parked
@@ -237,7 +237,7 @@ def test_idle_workers_self_exit_on_timeout(fast_idle_timeout):
     assert fresh._alive is False
 
     # Submitting again skips the dead tombstone and spawns fresh.
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         tg.start_soon(lambda: None).result(timeout=5)
     _drain_idle_workers()
 
@@ -265,7 +265,7 @@ def test_claim_vs_idle_timeout_race(fast_idle_timeout):
             counter += 1
 
     for _ in range(5):
-        with ThreadTaskGroup() as tg:
+        with TaskGroup() as tg:
             futs = [tg.start_soon(tick) for _ in range(n)]
         for f in futs:
             f.result(timeout=5)
@@ -281,11 +281,11 @@ def test_start_soon_from_arbitrary_thread():
     results: list[int] = []
     results_lock = threading.Lock()
 
-    def producer(tg: ThreadTaskGroup):
+    def producer(tg: TaskGroup):
         for i in range(10):
             tg.start_soon(_record, i, results, results_lock)
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         threads = [threading.Thread(target=producer, args=(tg,)) for _ in range(5)]
         for t in threads:
             t.start()
@@ -330,7 +330,7 @@ def test_warmup_workers_are_used_by_dispatch():
         with seen_lock:
             seen.add(threading.get_ident())
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         tg.start_soon(record_self).result(timeout=5)
 
     # The worker that ran is one of the pre-warmed set.
@@ -359,7 +359,7 @@ def test_task_sees_caller_context():
     var: contextvars.ContextVar[str] = contextvars.ContextVar("test_var")
     var.set("caller-value")
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         fut = tg.start_soon(var.get)
 
     assert fut.result(timeout=5) == "caller-value"
@@ -373,7 +373,7 @@ def test_task_mutation_does_not_leak_to_caller():
         var.set("task-mutated")
         return var.get()
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         fut = tg.start_soon(mutate)
 
     assert fut.result(timeout=5) == "task-mutated"
@@ -385,7 +385,7 @@ def test_each_start_soon_captures_independently():
     the ContextVar between them — capture is per-call, not per-group."""
     var: contextvars.ContextVar[int] = contextvars.ContextVar("test_var", default=0)
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         var.set(1)
         f1 = tg.start_soon(var.get)
         var.set(2)
@@ -408,10 +408,81 @@ def test_concurrent_tasks_see_their_own_context():
         barrier.wait(timeout=5)
         return var.get()
 
-    with ThreadTaskGroup() as tg:
+    with TaskGroup() as tg:
         futs: list[Future[int]] = []
         for i in range(10):
             var.set(i)
             futs.append(tg.start_soon(observe))
 
     assert sorted(f.result(timeout=5) for f in futs) == list(range(10))
+
+
+# ---------------------------------------------------------------------------
+# Async callables via aio_portal
+# ---------------------------------------------------------------------------
+
+
+async def test_async_callable_runs_via_portal():
+    """An async callable submitted to ``start_soon`` is awaited on the
+    portal's event loop; the future resolves with the awaited result."""
+    from anyio.from_thread import start_blocking_portal
+
+    async def add(a: int, b: int) -> int:
+        return a + b
+
+    with start_blocking_portal() as portal:
+        with TaskGroup(aio_portal=portal) as tg:
+            fut = tg.start_soon(add, 2, 3)
+
+        assert fut.result(timeout=5) == 5
+
+
+async def test_async_callable_exception_flows_through_future():
+    """Exceptions raised inside an async callable surface on the future
+    (and into the TaskGroup's exception group)."""
+    from anyio.from_thread import start_blocking_portal
+
+    async def boom():
+        raise ValueError("boom")
+
+    with start_blocking_portal() as portal:
+        tg = TaskGroup(aio_portal=portal)
+        with pytest.raises(ExceptionGroup) as ei:
+            with tg:
+                fut = tg.start_soon(boom)
+
+        with pytest.raises(ValueError, match="boom"):
+            fut.result(timeout=5)
+        assert any(isinstance(e, ValueError) for e in ei.value.exceptions)
+
+
+def test_async_callable_without_portal_raises():
+    """Submitting a coroutine function to a TaskGroup without an
+    ``aio_portal`` raises immediately at ``start_soon``."""
+
+    async def whatever():
+        return None
+
+    with TaskGroup() as tg:
+        with pytest.raises(RuntimeError, match="aio_portal"):
+            tg.start_soon(whatever)
+
+
+def test_sync_callable_returning_coroutine_without_portal_raises():
+    """Defence in depth: a sync callable that returns a coroutine still
+    needs a portal — detected at run time, surfaced through the future."""
+
+    async def inner():
+        return 1
+
+    def returns_coro():
+        return inner()
+
+    with pytest.raises(ExceptionGroup) as ei:
+        with TaskGroup() as tg:
+            tg.start_soon(returns_coro)
+
+    assert any(
+        isinstance(e, RuntimeError) and "aio_portal" in str(e)
+        for e in ei.value.exceptions
+    )

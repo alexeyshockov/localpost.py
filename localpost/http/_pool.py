@@ -6,7 +6,7 @@ reads (``ctx.receive(size)`` / :func:`localpost.http.read_body`) and
 syscalls like ``ctx.sendfile`` block the worker, not the selector.
 
 Workers come from a process-wide
-:class:`localpost.threadtools.ThreadTaskGroup` and are reused across
+:class:`localpost.threadtools.TaskGroup` and are reused across
 all pool wrappers / HTTP servers in the process. There is no
 concurrency cap — admission control is the deployment's job
 (front-LB / OS limits).
@@ -41,12 +41,12 @@ from localpost.http.config import LOGGER_NAME
 
 class _Pool:
     """Dispatcher that runs request handlers on a shared
-    :class:`ThreadTaskGroup`.
+    :class:`TaskGroup`.
     """
 
     __slots__ = ("_shutdown_event", "_tg")
 
-    def __init__(self, tg: threadtools.ThreadTaskGroup, shutdown_event: threading.Event) -> None:
+    def __init__(self, tg: threadtools.TaskGroup, shutdown_event: threading.Event) -> None:
         self._tg = tg
         self._shutdown_event = shutdown_event
 
@@ -126,7 +126,7 @@ def _run_request(ctx: _NativeReqCtx, cancel: RequestCancel, fn: RequestHandler) 
 
 @asynccontextmanager
 async def _pool_context() -> AsyncGenerator[_Pool]:
-    """Open a worker pool backed by a :class:`ThreadTaskGroup`.
+    """Open a worker pool backed by a :class:`TaskGroup`.
 
     The task group is process-wide in spirit (workers are shared across
     all pools), but each ``_pool_context`` owns its own group so its
@@ -137,7 +137,7 @@ async def _pool_context() -> AsyncGenerator[_Pool]:
     surrounding event loop stays responsive.
     """
     shutdown_event = threading.Event()
-    tg = threadtools.ThreadTaskGroup(name="http-pool")
+    tg = threadtools.TaskGroup(name="http-pool")
     tg.__enter__()
     try:
         yield _Pool(tg, shutdown_event)
@@ -169,7 +169,7 @@ async def thread_pool_handler(inner: RequestHandler, /) -> AsyncGenerator[Reques
     ``inner`` runs on a worker on a blocking-with-timeout socket — body
     reads (``ctx.receive(...)`` / :func:`localpost.http.read_body`) and
     other blocking syscalls don't stall the selector. Workers come from
-    a process-wide :class:`localpost.threadtools.ThreadTaskGroup` and
+    a process-wide :class:`localpost.threadtools.TaskGroup` and
     are reused across all pool wrappers; there is no concurrency cap.
 
     Per-request cancellation surfaces through
