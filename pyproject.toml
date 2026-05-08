@@ -164,7 +164,44 @@ docs = [
 ]
 
 [tool.coverage.run]
-omit = ["tests/*"]
+source = ["localpost"]
+branch = true
+# Internal-only entry points and dev/debug shims that don't merit coverage tracking.
+omit = [
+    "localpost/_debug.py",
+    "localpost/http/__main__.py",
+]
+
+[tool.coverage.report]
+# Anything below this fails the report. Set a few points under the current
+# total so day-to-day churn doesn't break CI; raise it as the suite grows.
+fail_under = 85
+show_missing = true
+skip_covered = false
+precision = 2
+exclude_also = [
+    # Type-checking-only branches don't run at test time.
+    "if TYPE_CHECKING:",
+    "if typing\\.TYPE_CHECKING:",
+    # Stub / Protocol / abstract method bodies.
+    "@overload",
+    "@(typing\\.)?overload",
+    "@(abc\\.)?abstractmethod",
+    "raise NotImplementedError",
+    "^\\s*\\.\\.\\.\\s*$",
+    # Defensive guards that aren't reachable from tests.
+    "if __name__ == .__main__.:",
+    # Explicit opt-out marker.
+    "pragma: no cover",
+]
+
+[tool.coverage.paths]
+# Map matrix-cell paths back to a single canonical layout so combined coverage
+# from multiple Python versions / runners merges cleanly.
+source = [
+    "localpost/",
+    "*/localpost/",
+]
 
 [tool.vulture]
 # Dead-code finder. Run via ``just deadcode``.

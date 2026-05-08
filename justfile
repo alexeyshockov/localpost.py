@@ -39,10 +39,10 @@ check file:
     -ty check {{ file }}
 
 tests:
-    pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
+    pytest --cov-report=term --cov-report=xml --cov -v
 
 unit-tests:
-    pytest -m "not integration" --cov-report=term --cov-branch --cov -v
+    pytest -m "not integration" --cov-report=term --cov -v
 
 integration-tests:
     pytest -m "integration" -n auto -v
