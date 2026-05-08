@@ -103,11 +103,10 @@ MIT — see [LICENSE](LICENSE).
 
 ## Contributing
 
-The `main` branch is the only stable branch and will never be force-pushed. Any
-other branch (including release branches) may be rebased or force-pushed at any
-time.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, commit conventions, the
+pull-request checklist, and (for maintainers) the release process.
 
-Dev setup:
+Quick start:
 
 ```bash
 just deps    # uv sync --all-groups --all-extras
