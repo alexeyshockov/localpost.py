@@ -4,12 +4,17 @@ on:
   release:
     types: [ published ]
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      # Required for PyPI trusted publishing
+      contents: read
+      # Required for PyPI trusted publishing + Sigstore-signed PEP 740 attestations
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,4 +24,11 @@ jobs:
           enable-cache: true
           python-version-file: ".python-version"
       - run: uv build
-      - run: uv publish --trusted-publishing always
+      # uv publish (as of 0.11) only uploads pre-existing attestations; it does
+      # not generate them. Use the official PyPA action, which generates PEP 740
+      # PyPI Publish Attestations via Sigstore and uploads them alongside the
+      # distributions. Track astral-sh/uv#15618 — once landed we can swap back
+      # to a single `uv publish` step.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
