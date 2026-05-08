@@ -1,5 +1,5 @@
 [build-system]
-requires = ["uv_build>=0.9.10,<0.10.0"]
+requires = ["uv_build>=0.9.10,<0.13"]
 build-backend = "uv_build"
 
 # See also https://daniel.feldroy.com/posts/2023-08-pypi-project-urls-cheatsheet
