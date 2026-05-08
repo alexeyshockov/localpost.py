@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import cast
 
 from anyio import to_thread
@@ -132,18 +132,32 @@ async def _pool_context() -> AsyncGenerator[_Pool]:
     all pools), but each ``_pool_context`` owns its own group so its
     teardown drains exactly the requests it dispatched.
 
+    Reuses the ambient :class:`localpost.threadtools.ThreadPool` when
+    one is set (the normal case under :func:`localpost.hosting.run_app`
+    / :func:`localpost.hosting.serve`); otherwise opens a private one
+    for the duration of this context so :func:`thread_pool_handler` can
+    be used standalone.
+
     On exit, signals in-flight handlers via the cancel event and waits
     for the group to drain. Drain is offloaded to a thread so the
     surrounding event loop stays responsive.
     """
-    shutdown_event = threading.Event()
-    tg = threadtools.TaskGroup(name="http-pool")
-    tg.__enter__()
-    try:
-        yield _Pool(tg, shutdown_event)
-    finally:
-        shutdown_event.set()
-        await to_thread.run_sync(tg.__exit__, None, None, None)
+    # Imported lazily to avoid importing threadtools internals at
+    # module load time.
+    from localpost.threadtools import thread_pool
+    from localpost.threadtools._task_group import _current_pool
+
+    async with AsyncExitStack() as stack:
+        if _current_pool.get(None) is None:
+            await stack.enter_async_context(thread_pool())
+        shutdown_event = threading.Event()
+        tg = threadtools.TaskGroup(name="http-pool")
+        tg.__enter__()
+        try:
+            yield _Pool(tg, shutdown_event)
+        finally:
+            shutdown_event.set()
+            await to_thread.run_sync(tg.__exit__, None, None, None)
 
 
 def _emit_body_too_large(ctx: _NativeReqCtx) -> None:

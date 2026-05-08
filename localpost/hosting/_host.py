@@ -10,7 +10,6 @@ from contextlib import (
     AbstractContextManager,
     AsyncExitStack,
     asynccontextmanager,
-    nullcontext,
 )
 from dataclasses import dataclass, field
 from dataclasses import dataclass as define
@@ -32,6 +31,7 @@ from localpost._utils import (
     unwrap_exc,
     wait_all,
 )
+from localpost.threadtools import thread_pool
 
 logger = logging.getLogger("localpost.hosting")
 
@@ -436,7 +436,10 @@ async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
         await child_lt.stopped
         wait_tg.cancel_scope.cancel()
 
-    async with BlockingPortal() as portal:
+    # Open an ambient ``thread_pool`` alongside the portal so service
+    # bodies and anything they spawn can use ``threadtools.TaskGroup``
+    # without a per-callsite wrapper.
+    async with BlockingPortal() as portal, thread_pool():
         child_lt = ServiceLifetime(portal)
         app_token = _app_lt.set(child_lt)
         try:
@@ -487,15 +490,24 @@ async def _serve_in(svc: ServiceF, parent: ServiceLifetime) -> AsyncIterator[Ser
 
 
 async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
-    async with nullcontext(parent.portal) if parent else BlockingPortal() as portal:
+    if parent is not None:
+        # Nested run inherits the parent's portal and ambient thread pool
+        # (the latter via contextvar — no extra setup needed here).
+        lt = ServiceLifetime(parent.portal)
+        await _run(svc_f, lt)
+        return lt.exit_code
+    # Root run opens a portal and an ambient thread pool so any service
+    # body — and anything it transitively spawns — runs under an active
+    # ``thread_pool()`` context. Without this, ``threadtools.TaskGroup()``
+    # would raise.
+    async with BlockingPortal() as portal, thread_pool():
         lt = ServiceLifetime(portal)
-        app_token = _app_lt.set(lt) if parent is None else None
+        app_token = _app_lt.set(lt)
         try:
             await _run(svc_f, lt)
             return lt.exit_code
         finally:
-            if app_token is not None:
-                _app_lt.reset(app_token)
+            _app_lt.reset(app_token)
 
 
 def _run_many(*svcs: ServiceF) -> ServiceF:

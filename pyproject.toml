@@ -324,4 +324,5 @@ python_files = [
 ]
 markers = [
     "integration: Consumers (SQS, Kafka,..) integration tests",
+    "no_ambient_pool: opt out of the autouse threadtools ambient pool fixture",
 ]

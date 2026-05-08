@@ -9,13 +9,17 @@ from collections.abc import Awaitable, Callable
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Self, final, overload
 
-from .._utils import is_async_callable
-
 if TYPE_CHECKING:
-    from anyio.from_thread import BlockingPortal
+    from ._pool import ThreadPool
 
 IDLE_TIMEOUT: float = 60.0
 """Seconds an idle worker waits for new work before self-exiting."""
+
+_current_pool: contextvars.ContextVar[ThreadPool] = contextvars.ContextVar(
+    "localpost.threadtools.current_pool"
+)
+"""Ambient :class:`ThreadPool` for the current async context. Set by
+:func:`thread_pool`; read by :class:`TaskGroup` on construction."""
 
 
 @dc.dataclass(slots=True)
@@ -35,17 +39,12 @@ class Task:
                 result = self.context.run(self.fn, *self.args, **self.kwargs)
                 if inspect.iscoroutine(result):
                     # The user submitted an async callable; dispatch the
-                    # coroutine to the event loop via the portal. The worker
-                    # thread blocks on ``portal.call`` until the coroutine
-                    # completes — same lifetime model as the sync path.
-                    portal = self.group._aio_portal
-                    if portal is None:
-                        result.close()
-                        raise RuntimeError(  # noqa: TRY301
-                            "TaskGroup received a coroutine but was not given an aio_portal"
-                        )
+                    # coroutine to the event loop via the pool's portal. The
+                    # worker thread blocks on ``portal.call`` until the
+                    # coroutine completes — same lifetime model as the sync
+                    # path.
                     coro = result
-                    result = portal.call(lambda: coro)
+                    result = self.group._pool.portal.call(lambda: coro)
             except BaseException as exc:  # noqa: BLE001 — Trio-style: capture everything
                 self.future.set_exception(exc)
                 self.group._record_error(exc)
@@ -57,43 +56,60 @@ class Task:
 
 @final
 class Worker:
-    """Idle-tracked worker thread with a per-worker inbox.
+    """Idle-tracked worker with a per-worker inbox.
 
-    Lifecycle: ``alive`` until the thread self-exits after ``IDLE_TIMEOUT``
-    seconds with no work, after which the worker becomes a tombstone in the
-    global ``idle`` deque. The dispatcher detects tombstones via
-    :meth:`submit` returning ``False`` and pops the next worker / spawns a
-    fresh one.
+    Lifecycle: ``alive`` until the worker self-exits — either after
+    ``IDLE_TIMEOUT`` seconds with no work, or when the owning pool calls
+    :meth:`shutdown`. After self-exit the worker becomes a tombstone in
+    the pool's ``idle`` deque. The dispatcher detects tombstones via
+    :meth:`submit` returning ``False`` and pops the next worker / spawns
+    a fresh one.
+
+    The worker thread itself is provided by the pool via
+    ``anyio.to_thread.run_sync(worker._run, abandon_on_cancel=False)`` —
+    AnyIO sets up the thread-local state needed for
+    :func:`anyio.from_thread.check_cancelled` to work inside user tasks.
     """
 
-    __slots__ = ("_alive", "_cv", "_inbox")
+    __slots__ = ("_alive", "_cv", "_inbox", "_pool_idle", "_shutdown")
 
-    def __init__(self) -> None:
+    def __init__(self, pool_idle: deque[Worker]) -> None:
         self._inbox: deque[Task] = deque()
         self._cv = threading.Condition(threading.Lock())
         # Set under ``_cv`` before lock release in ``_run``; that ordering is
-        # what makes ``submit`` race-free vs ``Thread.is_alive()``, which can
-        # still report ``True`` after ``_run`` has released the lock but
-        # before CPython's bootstrap marks the thread stopped.
+        # what makes ``submit`` race-free vs the host ``to_thread.run_sync``
+        # call returning, which can otherwise still report the worker alive
+        # after ``_run`` has released the lock.
         self._alive = True
-        threading.Thread(target=self._run, daemon=True, name="localpost-worker").start()
+        self._shutdown = False
+        # Deque the worker re-enters after each completed task. Per-pool, so
+        # workers spawned by pool A are not picked up by tasks under pool B.
+        self._pool_idle = pool_idle
 
     def submit(self, task: Task) -> bool:
-        """Hand off a task. Returns ``False`` if the worker has self-exited."""
+        """Hand off a task. Returns ``False`` if the worker has self-exited
+        or has been asked to shut down."""
         with self._cv:
-            if not self._alive:
+            if not self._alive or self._shutdown:
                 return False
             self._inbox.append(task)
             self._cv.notify()
             return True
 
+    def shutdown(self) -> None:
+        """Signal the worker to exit at its next opportunity. Wakes a
+        worker parked in ``_cv.wait``; in-flight tasks finish first."""
+        with self._cv:
+            self._shutdown = True
+            self._cv.notify()
+
     def _run(self) -> None:
         while True:
             with self._cv:
-                # Re-check inbox after each wait — covers both spurious wakeups
-                # and the lost-notify race where a submit lands between the
-                # outer ``inbox.popleft`` and the wait re-acquiring the lock.
                 while not self._inbox:
+                    if self._shutdown:
+                        self._alive = False
+                        return
                     if not self._cv.wait(timeout=IDLE_TIMEOUT):
                         # Timed out. One more inbox check under the lock to
                         # close the timeout-vs-notify race.
@@ -103,43 +119,28 @@ class Worker:
                         break
                 task = self._inbox.popleft()
             task.run()
-            idle.append(self)
-
-
-idle: deque[Worker] = deque()
-"""Global LIFO stack of idle workers, shared across all ``TaskGroup``s."""
-
-
-def warmup(count: int, /) -> None:
-    """Pre-spawn ``count`` worker threads and park them in the global idle pool.
-
-    Useful at process startup to amortise thread-creation cost so the first
-    bursts of work don't pay it. Pre-warmed workers are indistinguishable
-    from organically spawned ones — they self-exit on the same idle timeout
-    if unused.
-
-    One-shot: ``warmup(8)`` always spawns 8 fresh workers, regardless of
-    how many idle workers already exist. Calling it again from a long-idle
-    process re-warms.
-
-    Raises:
-        ValueError: ``count`` is negative.
-    """
-    if count < 0:
-        raise ValueError("count must be >= 0")
-    for _ in range(count):
-        idle.append(Worker())
+            if self._shutdown:
+                with self._cv:
+                    self._alive = False
+                return
+            self._pool_idle.append(self)
 
 
 @final
 class TaskGroup:
     """Trio-style task group running sync callables on a shared thread pool.
 
-    Tasks submitted via :meth:`start_soon` run on a process-wide pool of
-    worker threads. Workers are spawned on demand, reused across all
-    ``TaskGroup`` instances, and self-exit after 60 s of idleness. There
-    is no concurrency cap — ``start_soon`` always succeeds (modulo OS
-    thread limits).
+    Tasks submitted via :meth:`start_soon` run on workers borrowed from
+    the ambient :class:`localpost.threadtools.ThreadPool`. Construction
+    requires an active ``thread_pool()`` context — typically provided by
+    :func:`localpost.hosting.run_app`. Without one, ``__init__`` raises
+    :class:`RuntimeError`.
+
+    Workers are spawned on demand, reused across all ``TaskGroup``
+    instances under the same pool, and self-exit after
+    :data:`IDLE_TIMEOUT` seconds of idleness. There is no concurrency
+    cap from this class (the pool may impose one via its
+    :class:`anyio.CapacityLimiter`).
 
     Lifetime: sync context manager. On exit, blocks until every task
     started inside the ``with`` block has finished, then re-raises any
@@ -149,13 +150,14 @@ class TaskGroup:
 
     Example::
 
-        with TaskGroup() as tg:
-            tg.start_soon(do_work, arg)        # fire-and-forget
-            fut = tg.create_task(other_work)   # observe via Future
-        # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
+        async with thread_pool():
+            with TaskGroup() as tg:
+                tg.start_soon(do_work, arg)        # fire-and-forget
+                fut = tg.create_task(other_work)   # observe via Future
+            # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
 
-    Both :meth:`start_soon` and :meth:`create_task` are callable from any
-    thread, including from inside a task running on the same group
+    Both :meth:`start_soon` and :meth:`create_task` are callable from
+    any thread, including from inside a task running on the same group
     (recursive spawn). ``start_soon`` is fire-and-forget; ``create_task``
     returns a :class:`concurrent.futures.Future` that captures the task's
     result or exception. Either way, task exceptions are surfaced via the
@@ -168,23 +170,29 @@ class TaskGroup:
     confined to its copy — same semantics as :func:`asyncio.to_thread`
     and Trio / AnyIO task spawn.
 
-    If ``aio_portal`` is provided, both spawn methods also accept async
-    callables: the coroutine is dispatched to the portal's event loop
-    via :meth:`anyio.from_thread.BlockingPortal.call`, run from inside
-    the worker thread (the worker blocks until the coroutine returns).
-    Submitting an async callable without a portal raises ``RuntimeError``.
+    Async callables are accepted by both spawn methods: the coroutine is
+    dispatched to the pool's portal via
+    :meth:`anyio.from_thread.BlockingPortal.call`, run from inside the
+    worker thread (the worker blocks until the coroutine returns).
+
+    Cancellation: because workers are spawned via
+    ``anyio.to_thread.run_sync`` under the pool, user code can call
+    :func:`anyio.from_thread.check_cancelled` to observe cancellation of
+    the pool's host scope. Tasks that don't poll won't be interrupted.
     """
 
-    __slots__ = ("_aio_portal", "_closed", "_cv", "_errors", "_lock", "_name", "_pending")
+    __slots__ = ("_closed", "_cv", "_errors", "_lock", "_name", "_pending", "_pool")
 
-    def __init__(
-        self,
-        *,
-        name: str | None = None,
-        aio_portal: BlockingPortal | None = None,
-    ) -> None:
+    def __init__(self, *, name: str | None = None) -> None:
+        pool = _current_pool.get(None)
+        if pool is None:
+            raise RuntimeError(
+                "No active thread_pool() context. Wrap your code in "
+                "`async with thread_pool():` or run inside "
+                "`localpost.hosting.run_app()`."
+            )
         self._name = name
-        self._aio_portal = aio_portal
+        self._pool = pool
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
         self._pending = 0
@@ -253,17 +261,15 @@ class TaskGroup:
     ) -> Future[Any]:
         """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future.
 
-        ``fn`` may be sync or async. Async callables require ``aio_portal``;
-        the worker invokes ``portal.call`` to await the coroutine on the
-        event loop.
+        ``fn`` may be sync or async. Async callables are dispatched to
+        the pool's portal; the worker invokes ``portal.call`` to await
+        the coroutine on the event loop.
 
         The returned future is observation-only. ``Future.cancel()`` only
         succeeds while the task is still queued; it cannot interrupt a
         running task. Reading ``.exception()`` does not suppress the
         ``ExceptionGroup`` raised at ``__exit__``.
         """
-        if is_async_callable(fn) and self._aio_portal is None:
-            raise RuntimeError("TaskGroup got an async callable but the group has no aio_portal")
         with self._lock:
             if self._closed:
                 raise RuntimeError("TaskGroup is closed")
@@ -272,13 +278,15 @@ class TaskGroup:
         # Snapshot the caller's context now (matches Trio / AnyIO / asyncio
         # ``to_thread`` semantics); each spawn captures independently.
         task = Task(fut, fn, args, kwargs, self, contextvars.copy_context())
+        pool_idle = self._pool._idle
         while True:
             try:
-                w = idle.pop()
+                w = pool_idle.pop()
             except IndexError:
                 # No idle worker — spawn a fresh one. ``submit`` on a fresh
                 # worker is guaranteed to succeed (``_alive=True``).
-                Worker().submit(task)
+                w = self._pool._spawn_worker_blocking()
+                w.submit(task)
                 return fut
             if w.submit(task):
                 return fut
@@ -291,10 +299,9 @@ class TaskGroup:
                 self._cv.notify_all()
 
     def _record_error(self, exc: BaseException) -> None:
-        # No lock needed: ``list.append`` is atomic in CPython (GIL or
-        # free-threaded per-list mutex). Memory visibility to ``__exit__``
-        # is established by ``_task_done``'s acquire of ``_cv``, which always
-        # runs after ``_record_error`` in the same task.
+        # No lock needed: ``deque.append`` is documented thread-safe (vs
+        # ``list.append`` which is only atomic by CPython implementation
+        # accident). Memory visibility to ``__exit__`` is established by
+        # ``_task_done``'s acquire of ``_cv``, which always runs after
+        # ``_record_error`` in the same task.
         self._errors.append(exc)
-
-
