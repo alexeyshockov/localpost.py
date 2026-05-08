@@ -5,7 +5,6 @@ on:
     types: [ published ]
 
 jobs:
-  # https://pdm-project.org/latest/usage/publish/#publish-with-trusted-publishers
   publish:
     runs-on: ubuntu-latest
     permissions:
@@ -14,13 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Just "fetch-tags: true" does not work, probably because of
-          #
           fetch-depth: 0
-      - uses: pdm-project/setup-pdm@v4
+      - uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version-file: ".python-version"
-          cache: true
-      - run: pdm install --no-lock --no-editable
-      - run: pdm build
-      - run: pdm publish --no-build
+      - run: uv build
+      - run: uv publish --trusted-publishing always
