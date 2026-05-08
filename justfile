@@ -100,3 +100,52 @@ docs-build:
 [doc("Find unused code with vulture (config in pyproject.toml). Pass extra args to override.")]
 deadcode *args:
     vulture {{ args }}
+
+# ---------------------------------------------------------------------------
+# Release automation
+#
+# Workflow:
+#   just release 0.6.0           # bump to 0.6.0, commit, push, open draft GH release
+#   <review draft on GitHub, click Publish>  -> triggers .github/workflows/pypi-publish.yaml
+#   just release-post 0.7.0      # bump to 0.7.0.dev0, commit, push
+# ---------------------------------------------------------------------------
+
+[doc("Cut a release: bump version, commit, push, open draft GH release with CHANGELOG notes")]
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "working tree dirty; commit or stash first" >&2
+        exit 1
+    fi
+    if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+        echo "not on main; checkout main first" >&2
+        exit 1
+    fi
+    notes=$(awk -v v="{{ version }}" '$0 ~ "^## \\[" v "\\]" {flag=1; next} /^## \[/ {flag=0} flag' CHANGELOG.md)
+    if [ -z "$notes" ]; then
+        echo "no [{{ version }}] section in CHANGELOG.md" >&2
+        exit 1
+    fi
+    uv version {{ version }}
+    git commit -am "release: {{ version }}"
+    git push origin main
+    gh release create "v{{ version }}" --target main --draft --title "v{{ version }}" --notes "$notes"
+    echo
+    echo "Draft release created. Review on GitHub and click Publish to trigger the PyPI workflow."
+
+[doc("Open the next dev cycle: bump pyproject to <next>.dev0, commit, push")]
+release-post next:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "working tree dirty; commit or stash first" >&2
+        exit 1
+    fi
+    if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+        echo "not on main; checkout main first" >&2
+        exit 1
+    fi
+    uv version {{ next }}.dev0
+    git commit -am "chore: bump version to {{ next }}.dev0"
+    git push origin main
