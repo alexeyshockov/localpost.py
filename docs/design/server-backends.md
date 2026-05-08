@@ -48,4 +48,4 @@ The full rationale, including alternatives we rejected, is in
   if/when WebSockets come back on the roadmap.
 
 For perf context, see
-[`benchmarks/http/PERF_FINDINGS.md`](https://github.com/alexeyshockov/localpost.py/blob/main/benchmarks/http/PERF_FINDINGS.md).
+[`benchmarks/macro/http/PERF_FINDINGS.md`](https://github.com/alexeyshockov/localpost.py/blob/main/benchmarks/macro/http/PERF_FINDINGS.md).

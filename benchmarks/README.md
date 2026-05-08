@@ -1,24 +1,25 @@
 # LocalPost benchmarks
 
-Three independent suites:
+Two top-level groups:
 
-- **[`http/`](http/README.md)** — macro HTTP load benchmarks. Compare
-  LocalPost's HTTP server against peer servers (Gunicorn, Cheroot,
-  Granian, Uvicorn) on a fixed Flask / Starlette workload using
-  [`oha`](https://github.com/hatoo/oha) as the load generator. Measures
-  **HTTP server** overhead.
-- **[`openapi/`](openapi/README.md)** — macro framework benchmarks.
-  Compare `localpost.openapi` against peer typed/OpenAPI frameworks
-  (FastAPI, flask-openapi v5) on a shared workload — typed handlers,
-  schema validation, response serialization. Measures **framework**
-  overhead.
 - **[`micro/`](micro/)** — `pytest-benchmark` micro-benchmarks for
   `URITemplate` and `Router`. Catches perf regressions in the
   deterministic core.
+- **[`macro/`](macro/)** — load benchmarks driven by
+  [`oha`](https://github.com/hatoo/oha) against a spawned subprocess.
+  Two suites:
+  - **[`macro/http/`](macro/http/README.md)** — compares LocalPost's
+    HTTP server against peer servers (Gunicorn, Cheroot, Granian,
+    Uvicorn) on a fixed Flask / Starlette workload. Measures **HTTP
+    server** overhead.
+  - **[`macro/openapi/`](macro/openapi/README.md)** — compares
+    `localpost.openapi` against peer typed/OpenAPI frameworks (FastAPI,
+    flask-openapi v5) on a shared workload — typed handlers, schema
+    validation, response serialization. Measures **framework** overhead.
 
 The two macro suites share the runner, types, filter language, and
-report writers via [`_core/`](_core/). Each defines its own scenarios,
-stacks, and `apps/`.
+report writers via [`macro/_core/`](macro/_core/). Each defines its own
+scenarios, stacks, and `apps/`.
 
 All three are kept out of the default test run (`just tests`).
 
@@ -40,13 +41,13 @@ just bench-openapi --duration 5 --stacks fastapi,localpost_openapi
 just bench-micro
 ```
 
-Per-suite docs: [`http/README.md`](http/README.md),
-[`openapi/README.md`](openapi/README.md).
+Per-suite docs: [`macro/http/README.md`](macro/http/README.md),
+[`macro/openapi/README.md`](macro/openapi/README.md).
 
 ## Shared CLI surface
 
 Both macro runners share these flags via
-[`benchmarks/_core/cli.py`](_core/cli.py):
+[`benchmarks/macro/_core/cli.py`](macro/_core/cli.py):
 
 - `--duration N`            — seconds per cell (default 20).
 - `--stacks a,b`            — verbatim stack name list (escape hatch).
@@ -57,7 +58,7 @@ Both macro runners share these flags via
 - `--scenarios a,b`         — restrict to specific scenarios.
 - `--pythons name=path,...` — override the bench Python matrix
   (default: every entry in
-  [`benchmarks._core.pythons.PYTHONS`](_core/pythons.py)).
+  [`benchmarks.macro._core.pythons.PYTHONS`](macro/_core/pythons.py)).
 
 ## Micro suite
 

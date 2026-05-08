@@ -116,7 +116,7 @@ def http_server(
             flat (GIL holds during parser callbacks + dispatch + channel
             handoff; macOS ``SO_REUSEPORT`` doesn't load-balance like
             Linux). Useful on Linux (kernel-level distribution) and on
-            free-threaded builds; see ``benchmarks/http/PERF_FINDINGS.md``
+            free-threaded builds; see ``benchmarks/macro/http/PERF_FINDINGS.md``
             Phase 7.
 
             With ``acceptor=True``, ``selectors`` is the number of
