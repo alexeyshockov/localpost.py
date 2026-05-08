@@ -768,6 +768,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+click = [
+    { name = "click" },
+]
 cron = [
     { name = "croniter" },
 ]
@@ -817,6 +820,7 @@ dev = [
     { name = "vulture" },
 ]
 dev-hosting-services = [
+    { name = "click" },
     { name = "grpcio" },
     { name = "hypercorn" },
     { name = "uvicorn" },
@@ -865,6 +869,7 @@ requires-dist = [
     { name = "attrs", marker = "extra == 'openapi-attrs'", specifier = ">=23" },
     { name = "brotli", marker = "extra == 'http-compress'", specifier = "~=1.1" },
     { name = "cattrs", marker = "extra == 'openapi-attrs'", specifier = ">=24" },
+    { name = "click", marker = "extra == 'click'", specifier = "~=8.0" },
     { name = "croniter", marker = "extra == 'cron'", specifier = ">=2.0,<4.0" },
     { name = "granian", marker = "extra == 'rsgi'", specifier = "~=2.7" },
     { name = "h11", marker = "extra == 'http'", specifier = "~=0.16" },
@@ -873,7 +878,7 @@ requires-dist = [
     { name = "msgspec", marker = "extra == 'openapi'", specifier = "~=0.19" },
     { name = "pytimeparse2", marker = "extra == 'scheduler'", specifier = "~=1.6" },
 ]
-provides-extras = ["cron", "scheduler", "http", "http-fast", "http-compress", "rsgi", "openapi", "openapi-attrs"]
+provides-extras = ["cron", "scheduler", "http", "http-fast", "http-compress", "rsgi", "click", "openapi", "openapi-attrs"]
 
 [package.metadata.requires-dev]
 bench = [
@@ -897,6 +902,7 @@ dev = [
     { name = "vulture", specifier = "~=2.14" },
 ]
 dev-hosting-services = [
+    { name = "click", specifier = "~=8.0" },
     { name = "grpcio", specifier = "~=1.68" },
     { name = "hypercorn", specifier = "~=0.17" },
     { name = "uvicorn", specifier = "~=0.30" },

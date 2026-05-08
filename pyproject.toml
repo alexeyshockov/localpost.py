@@ -73,6 +73,9 @@ rsgi = [
     # via ``localpost.http.to_rsgi`` or ``localpost.hosting.HostRSGIApp``.
     "granian ~=2.7",
 ]
+click = [
+    "click ~=8.0",
+]
 openapi = [
 #    "localpost[http]",
     "msgspec ~=0.19",
@@ -97,6 +100,7 @@ dev-hosting-services = [
     "uvicorn ~=0.30",
     "hypercorn ~=0.17",
     "grpcio ~=1.68",
+    "click ~=8.0",
 ]
 dev-http = [
     "flask ~=3.1",
