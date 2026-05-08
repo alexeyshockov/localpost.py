@@ -5,214 +5,176 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-05-08
 
-### Fixed
+**Effectively a rewrite from 0.4.0.** The project's focus — long-running
+async Python processes built on AnyIO — is unchanged, but most internals
+and a number of public APIs have changed. The core pillars (`hosting`,
+`scheduler`, `http`, `di`) are the stable public surface, verified with
+`ty` and `basedpyright --verifytypes`. A new `localpost.openapi` module
+ships alongside them — a type-driven HTTP framework with OpenAPI 3.2
+generation built in. Several exploratory modules from the 0.4 line
+(`flow`, `consumers`, `experimental`) are gone; they may return as a
+separate package once the design settles.
 
-### Changed
+0.5.0 was drafted in `CHANGELOG.md` but never released. Its still-relevant
+items are folded into this entry; the consumer/SQS/Kafka rework is dropped
+along with the rest of `experimental`.
 
-- **HTTP backend selection moved to `ServerConfig.backend`** (BREAKING).
-  A single entry point — `start_http_server(config, handler)` — and a
-  single hosted-service wrapper — `http_server(config, handler)` —
-  now pick between h11 and httptools based on the new
-  `ServerConfig.backend: Literal["h11", "httptools"] = "h11"` field
-  (default unchanged: pure-Python h11). Renames / removals:
-  - `start_httptools_server` removed → use
-    `start_http_server(ServerConfig(backend="httptools"), handler)`.
-  - `httptools_server` hosted-service wrapper removed → use
-    `http_server(ServerConfig(backend="httptools"), handler)`.
-  - `HttpApp.service(cfg, *, backend=…)` kwarg removed — set
-    `backend` on the `ServerConfig` instead.
-- Concrete connection classes lose their backend suffix: each backend
-  module exposes its own `HTTPConn` (was `HTTPConnH11` /
-  `HTTPConnHttptools`). The Protocol `HTTPReqCtx` and the ABC
-  `BaseHTTPConn` are unchanged. Internal-only — no external callers
-  referenced the old names.
+Python 3.12+ is now required (was 3.10+).
 
 ### Added
 
-- **Per-request ``settimeout`` calls dropped from the borrow boundary.**
-  The conn stays non-blocking for its lifetime; the worker's send path
-  uses a non-blocking ``send`` with a blocking-with-timeout fallback on
-  ``BlockingIOError``. New ``_send_all`` helper in
-  ``localpost.http._base``. Saves two fcntl per request — see
-  ``benchmarks/http/PERF_FINDINGS.md`` Phase 10 (+21-32% RPS on the
-  bench's hot path).
-- **`HttpApp` framework** (`localpost.http.app`). Decorator-driven HTTP
-  app on top of the lean Router. Decorators (`.get`, `.post`, ...),
-  parameter injection (`HTTPReqCtx` + path args matched by name),
-  response conversion (str / bytes / dict / list / `NativeResponse` /
-  `(NativeResponse, bytes)` / `None`), worker-pool dispatch, and
-  app-level + per-route middleware. New `app.service(config)` factory
-  for hosting integration. See `localpost/http/README.md` for usage.
-- **HTTP middleware support.** New `localpost.http.Middleware` type
-  (`Callable[[RequestHandler], RequestHandler]`) and a `compose(*mws)`
-  helper. Plain Python decorator pattern — wrap pre-body, wrap the
-  returned `BodyHandler` for post-body work. Used by `HttpApp` for
-  app-level / per-route composition.
-- **`HTTPReqCtx.attrs`** — `dict[str, Any]` mutable per-request state
-  on the Protocol. Used by `Router` to attach `RouteMatch`, available
-  for middlewares to thread auth / tracing / rate-limit state.
-- **`RouteMatch` dataclass** + **`route_match(ctx)` accessor** — the
-  matched route info Router writes into `ctx.attrs["route_match"]`.
-- **`streaming_pool_handler`** — async CM that runs a handler in a
-  worker on a borrowed conn (body **not** pre-buffered). Pair with
-  `HttpApp`'s `buffer_body=False` for streaming uploads.
-- **Two-phase HTTP request handler contract.** `RequestHandler` is now
-  `Callable[[HTTPReqCtx], BodyHandler | None]`. The pre-body handler runs
-  on the selector thread when headers are parsed and may either complete
-  inline (returning `None`, e.g. for 404 / 405 / auth fail) or return a
-  `BodyHandler` continuation. The selector buffers the full request body
-  into `ctx.body` before invoking the continuation. Old-style
-  `(ctx) -> None` handlers are forward-compatible. See
-  `benchmarks/http/PERF_FINDINGS.md` Phase 8 for the design rationale and
-  bench numbers (+21% RPS on standard CPython 3.13 httptools).
-- `localpost.http.BodyHandler` — type alias for the post-body continuation.
-- **Free-threaded CPython (3.14t) support** — verified end-to-end with the
-  full http test suite passing and the bench delivering a ~3x RPS jump at
-  `selectors=1` (httptools plaintext: 12,563 → 36,208 RPS) just from
-  switching interpreters. The existing single-selector + worker-pool
-  architecture is already multi-threaded, so removing the GIL lets the
-  selector and workers actually overlap. Tested with `httptools >= 0.8`
-  (declares `Py_mod_gil = Py_MOD_GIL_NOT_USED`); the released 0.7.1 wheel
-  auto-re-enables the GIL on import. See
-  `benchmarks/http/PERF_FINDINGS.md` Phase 7b.
-- **Multi-selector single-process** via the new `selectors: int = 1` knob
-  on `localpost.http.http_server` and `httptools_server`. With
-  `selectors > 1`, each selector thread binds its own listening socket on
-  the same address via `SO_REUSEPORT`; the kernel distributes incoming
-  connections across them. Handlers (and any wrapped
-  `thread_pool_handler`) are shared. **Note: on macOS this knob is a
-  no-op.** Verified empirically (`localpost_httptools_diag.py`): with
-  `selectors=4`, 100% of accepts go to one selector thread. macOS's
-  `SO_REUSEPORT` permits the bind but does not load-balance accepts —
-  unlike Linux 3.9+. An accept-dispatch design (one acceptor thread +
-  N selectors fed via the existing op queue) is the platform-portable
-  fix and is the next planned step. The knob still works on Linux,
-  pending a Linux bench cell to confirm scaling.
-- `localpost.http.thread_pool_handler` — async context manager that wraps
-  a `RequestHandler` so the post-body `BodyHandler` continuation it
-  returns is offloaded to a worker thread. Pre-body decisions (routing,
-  auth, 404 / 405) stay on the selector. Compose explicitly with
-  `http_server` when you want body handlers on a worker pool.
-- `just deadcode` — vulture-based dead-code finder, configured in
-  `pyproject.toml` (`[tool.vulture]`).
-- **Optional `httptools` HTTP server backend** under the `[http-fast]`
-  extra. New entry points `localpost.http.start_httptools_server` and
-  `localpost.http.httptools_server` (hosted-service form) drive a
-  C-based llhttp parser as a peer of the existing h11 server. Same
-  selector / accept loop / connection bookkeeping (lifted into a shared
-  `BaseServer`); each backend uses its parser's natural idioms — no
-  internal `next_event/send_response` Protocol forced over both.
-  h11 stays the default. Initial scope: `Content-Length` responses
-  only (chunked transfer-encoding on the httptools side is a follow-up;
-  matches what `Router` and `wrap_wsgi` produce today).
-- Neutral wire types `Request`, `NativeResponse`, `InformationalResponse`
-  (re-exported from `localpost.http`) — backend-agnostic shapes both
-  servers populate. User code no longer imports `h11` or `httptools`
-  directly.
+- **`localpost.http`** — small h11-based HTTP/1.1 server with a single
+  selector thread and pluggable parser backend (`h11` by default,
+  `httptools` via the `[http-fast]` extra). Driven by
+  `start_http_server(config, handler)`. Includes:
+  - `HttpApp` — decorator-driven framework on top of the lean `Router`
+    (`@app.get`, `@app.post`, …): parameter injection, response
+    conversion (str / bytes / dict / list / `Response` / `None`),
+    worker-pool dispatch, app-level + per-route middleware.
+  - `Router` — minimal RFC 6570 Level-1 URI template dispatcher; attaches
+    `RouteMatch` to `ctx.attrs["route_match"]`, exposed via
+    `route_match(ctx)`.
+  - WSGI bridge (`wrap_wsgi`, `to_wsgi`), ASGI bridge (`to_asgi`), RSGI
+    bridge (`to_rsgi` + `HostRSGIApp` for Granian deployments).
+  - `read_body` / `aread_body` body helpers, `static_handler`,
+    `compress_handler` (gzip stdlib; brotli via the `[http-compress]`
+    extra).
+  - `thread_pool_handler` / `streaming_pool_handler` — opt-in worker-pool
+    offload of handlers and streaming uploads.
+  - `HTTPReqCtx.attrs` — mutable per-request state for cross-cutting
+    concerns (auth, tracing, rate-limit, body cache).
+  - **Free-threaded CPython 3.14t support** — verified end-to-end. ~3x
+    RPS jump at `selectors=1` (httptools plaintext: 12,563 → 36,208 RPS)
+    just from removing the GIL. The pure-Python `[http]` (h11) backend
+    is no-GIL-clean today; `[http-fast]` (httptools) needs 0.8+ to avoid
+    auto-re-enabling the GIL on import.
+  - **Multi-selector single-process** via `ServerConfig.selectors > 1`
+    on Linux (`SO_REUSEPORT`). macOS does not load-balance accepts and
+    is a no-op there pending an accept-dispatch design.
+  - Neutral wire types (`Request`, `Response`, `InformationalResponse`,
+    `BodyTooLarge`) — the public API does not leak `h11` or `httptools`.
+- **Async HTTP context surface** — `AsyncHTTPReqCtx` Protocol +
+  `AsyncRequestHandler` type. `to_asgi` / `to_rsgi` adapters expose the
+  same handler shape over async transports, so the same `HttpApp` can run
+  under Granian or Uvicorn or the in-tree sync server.
+- **`localpost.threadtools`** — sync primitives for thread-bridging code:
+  `TaskGroup` (a portal-backed task group with `start_soon(...)` for
+  fire-and-forget and `create_task(...) -> Future` for awaitable spawn),
+  `Channel` (with separate `SendChannel` / `ReceiveChannel` halves), and
+  `cancellable_semaphore` / `CancellableLock` with per-primitive
+  `check_cancelled`.
+- **`localpost.di`** — `.NET`-style scoped IoC container
+  (`ServiceRegistry`, `ServiceProvider`, `AppContext`) with a Flask
+  integration that scopes services per request.
+- **Hosting middleware** — `shutdown_on_signal()` and `start_timeout(...)`,
+  composable around any `ServiceF`. New `+` and `>>` operators for
+  combining and wrapping services.
+- **`HostRSGIApp`** — host an RSGI app under `localpost.hosting` so it
+  participates in the same lifecycle / signals as everything else.
+- **`localpost.debug`** — context manager to attach AnyIO-aware debug
+  hooks during development.
+- **`hosting.services`** adapters — `uvicorn`, `hypercorn`, `grpc`, and a
+  generic `_asgi`. Each runs the underlying server as a hosted service
+  with proper start / stop semantics.
+- **Scheduler trigger composition** — operator-based combinators
+  (`every("1m") // delay((0, 10))`), `take_first(n)`, `cron(...)` (via
+  the `[cron]` extra). Sync handlers are auto-offloaded to threads via
+  `anyio.to_thread`. Trigger middleware is now async-generator based
+  (`trigger_factory_middleware`).
+- **`localpost.openapi`** (`[openapi]` extra) — type-driven HTTP framework
+  with OpenAPI 3.2 generation, on top of `localpost.http`. FastAPI-style
+  decorator API where the spec and runtime handling are derived from the
+  *same* type annotations, including union return types for response
+  shapes (`Book | NotFound[str]`). msgspec for encoding / decoding /
+  schema generation by default; pydantic and `attrs` recognised
+  automatically when present (`[openapi-attrs]` adds `attrs` + `cattrs`).
+  Sync (`HttpApp`) and async (`HttpAsyncApp`) flavours; OpenAPI-aware
+  middleware can contribute security schemes and extra responses.
+- **Documentation site** — Zensical-based site built from per-module
+  READMEs (`mkdocs.yml`); seed ADRs and design notes under `docs/`.
 
-### Changed
+### Changed (BREAKING)
 
-- **`RequestHandler` return type changed** from `None` to
-  `BodyHandler | None` (see Added). Old-style `(ctx) -> None` handlers
-  still work — returning `None` is the inline-completion path.
-  Handlers that previously read the body via `ctx.receive(size)` need
-  to migrate to the continuation pattern: return a `BodyHandler` and
-  read the body from `ctx.body`. The in-tree adapters
-  (`Router.as_handler`, `wrap_wsgi`, `flask_handler`,
-  `sentry_router_handler`, `sentry_flask_handler`) are updated.
+- **Python 3.12+** required; 3.10 / 3.11 classifiers dropped.
+- **Hosting fully rewritten.** `Host` and `AppHost` are gone. The new
+  surface is the `@service` decorator → `ServiceF`, top-level
+  `serve` / `run` / `run_app` entry points, structured `ServiceState`
+  (`Starting → Running → ShuttingDown → Stopped`), and `+` / `>>`
+  operators for service composition. See `localpost/hosting/README.md`.
+- **`Router` is a lean dispatcher**, not a self-contained framework.
+  The old `RequestCtx` / `Response` / `(RequestCtx) -> Response` shape is
+  gone from `localpost.http.router`; `Router.as_handler()` returns a
+  plain `RequestHandler` that attaches a `RouteMatch` and delegates.
+  Pythonic helpers (decorators, response conversion, param injection)
+  live on the new `HttpApp`. Pair with `wrap_wsgi` if you need WSGI
+  output.
+- **Scheduler internals reworked.** `ScheduledTask` /
+  `ScheduledTaskTemplate` / `Task` / `Scheduler`, declarative triggers
+  (`every`, `after`, `after_all`, `cron`); the sync/async-handler duality
+  is preserved.
+- **`threadtools` namespace** — `ThreadTaskGroup` is now `TaskGroup`; the
+  module is now a package (`localpost/threadtools/`).
+- **HTTP server** does not leak parser types into the public API.
+  `HTTPReqCtx.request` is `localpost.http.Request` (was `h11.Request`);
+  `HTTPReqCtx.start_response` and `complete` accept
+  `localpost.http.Response` / `InformationalResponse`. Field shapes match
+  h11's, so the migration is mechanical (`from localpost.http import
+  Response` and replace).
+- **HTTP backend selection** lives on `ServerConfig.backend: Literal[
+  "h11", "httptools"] = "h11"`. There is one entry point —
+  `start_http_server` — and one hosted-service wrapper — `http_server`.
+- **`http_server` no longer owns a worker pool.** The `max_concurrency`
+  kwarg is gone from `http_server`, `flask_server`, and `wsgi_server`;
+  wrap your handler with `thread_pool_handler` to opt back into a pool
+  (typical for blocking WSGI / Flask handlers).
 - **HTTP/1.1 pipelining is no longer supported.** Pipelined clients are
-  served sequentially — correct, but no parallelism on the same
-  connection. The httptools backend's `_ready` deque was removed for the
-  simplification.
-- **`Router` is now a lean dispatcher**, not a self-contained framework.
-  Removed `RequestCtx`, `Response`, `RequestHandler` (the
-  `(RequestCtx) -> Response` shape) from `localpost.http.router`.
-  `Router.as_handler()` returns a plain `localpost.http.RequestHandler`
-  that attaches a `RouteMatch` to `ctx.attrs["route_match"]` and
-  delegates to the registered http-level handler. **`Router.wsgi` is
-  removed** — pair with `localpost.http.wrap_wsgi` if you need WSGI
-  output. Pythonic helpers (decorators, response conversion, param
-  injection) move to the new `HttpApp`. See `PERF_FINDINGS.md` Phase 9
-  — restructure delivers another +35% RPS on the bench's hot path.
-- **`localpost.http` no longer leaks h11 types into the public API.**
-  `HTTPReqCtx.request` is now `localpost.http.Request` (was
-  `h11.Request`); `HTTPReqCtx.start_response` and `complete` accept
-  `localpost.http.NativeResponse` / `InformationalResponse` (was
-  `h11.Response` / `h11.InformationalResponse`). Field shapes are
-  identical (lowercased header-name bytes, byte values), so the
-  migration is mechanical: replace `import h11` /
-  `h11.Response(status_code=…, headers=…)` with
-  `from localpost.http import NativeResponse` /
-  `NativeResponse(status_code=…, headers=…)`. The `http` module is
-  marked stable, but absorbing this cost once enables the
-  alternative-backend support above.
-- `localpost.http._service.http_server` no longer accepts `max_concurrency`
-  and no longer owns a worker pool. Wrap your handler with
-  `thread_pool_handler` to opt back into worker dispatch.
-- `localpost.http.flask.flask_server` and `localpost.http.wsgi_server`
-  drop their `max_concurrency` kwarg for the same reason — wrap with
-  `thread_pool_handler` if you need a pool (typical for blocking WSGI
-  / Flask apps).
-- Modernised typing throughout `localpost/_utils.py`,
-  `localpost/scheduler/`, and `localpost/hosting/_host.py` to PEP 695
-  (`class Foo[T]`, `type Foo = ...`, inline function type parameters).
-  No public-API change — the existing module-level `TypeVar` declarations
-  in `localpost/scheduler/_scheduler.py` are kept until ty learns to
-  reconcile PEP 695 class type parameters with same-named TypeVars
-  inside nested generic functions.
-- Dropped the `Programming Language :: Python :: 3.11` classifier
-  (the project's `requires-python = ">=3.12"` since 0.6).
-- Cleaner ruff/ty footprint across the package and shared infra
-  (`localpost/__init__.py`, `_utils.py`, `threadtools.py`): 0 errors
-  from either tool.
+  served sequentially.
+- **Internal typing modernised** to PEP 695 across `_utils`, `scheduler`,
+  and `hosting`. No public-API change.
 
 ### Removed
 
-- **`localpost.experimental` is gone.** Both `experimental.consumers`
-  (channel / stream / queue / Pub/Sub) and `experimental.openapi` are
-  removed to keep the focus on the stable surface (`hosting`, `scheduler`,
-  `http`, `di`). The corresponding extras (`[sqs]`, `[kafka]`, `[nats]`,
-  `[http-openapi]`) and `examples/consumers/`, `examples/openapi/`,
-  `tests/experimental/` are removed too. May come back as a separate
-  package once the design settles.
-- Internal helpers that were unused everywhere: `localpost._utils.NO_OP_TS`,
-  `AsyncContextManagerAdapter`, `Switch`, the `send_or_drop_from_thread` /
-  `send_or_drop` methods on the now-trivial `MemorySendStream` (so
-  ``MemoryStream.create()`` simply returns the bare anyio
-  ``MemoryObjectSendStream`` / ``MemoryObjectReceiveStream`` pair), and
-  `localpost.hosting._host._serve_and_observe`.
-
-## [0.6.0] - 2026-02-22
-
-Complete rewrite of the hosting system, to simplify it and make it more robust.
+- **`localpost.flow`** — too complicated; the data-flow surface lives on
+  through the scheduler's trigger composition.
+- **`localpost.experimental`** — both `experimental.consumers` (channel /
+  stream / queue / Pub/Sub) and `experimental.openapi` are removed.
+  Corresponding extras (`[sqs]`, `[kafka]`, `[nats]`, `[http-openapi]`)
+  and `examples/consumers/`, `examples/openapi/`, `tests/experimental/`
+  are gone too. May return as a separate package once the design settles.
+- **`scheduler.serve()` / `scheduler.aserve()`** — use `hosting.run` /
+  `run_app` instead.
+- **`localpost.flow_ops`** (had been merged into `flow` for 0.4) — gone
+  along with `flow`.
+- Internal helpers that were unused everywhere: `_utils.NO_OP_TS`,
+  `AsyncContextManagerAdapter`, `Switch`, `MemorySendStream`'s
+  `send_or_drop_from_thread` / `send_or_drop` (so `MemoryStream.create()`
+  now returns the bare AnyIO stream pair), and
+  `hosting._serve_and_observe`.
 
 ### Fixed
 
-### Added
+- **Scheduler keeps its loop alive across handler exceptions** — a single
+  failing run no longer terminates the schedule.
+- **`Task.subscribe` after the task has finished** raises a clear error
+  instead of silently hanging; graceful mid-iteration shutdown is
+  covered.
+- **`TaskGroup.__exit__`** deduplicates exceptions that propagate via
+  both the body and a child task by identity, so each appears at most
+  once in the resulting `ExceptionGroup`.
+- **HTTP send path** — non-blocking `send` with a blocking-with-timeout
+  fallback on `BlockingIOError`; per-request `settimeout` calls dropped
+  from the borrow boundary (saves two `fcntl` per request, +21–32% RPS
+  on the bench's hot path).
+- **`UvicornService`** no longer crashes the whole app if the embedded
+  server fails to start (carried over from the unreleased 0.5 draft).
 
-- `localpost.http` — selectors-based non-async HTTP server
+### Performance
 
-### Changed
-
-### Removed
-
-- `localpost.flow` — too complicated
-
-## [0.5.0] - 2025-07-18
-
-### Added
-
-- `localpost.consumers.stream` for in-memory queues
-- `localpost.hosting.services.hypercorn` for Hypercorn HTTP server
-- `localpost.debug` context manager, to simplify debugging
-- More tests
-
-### Changed
-
-- `localpost.consumers.kafka` reworked
-- `localpost.consumers.sqs` reworked (now with both `boto3` and `aioboto3` support)
+- HTTP `Router` restructured into a lean dispatcher (+35% RPS on the
+  bench's hot path).
+- See `benchmarks/macro/http/PERF_FINDINGS.md` for per-phase notes and numbers.
 
 ## [0.4.0] - 2025-06-23
 
