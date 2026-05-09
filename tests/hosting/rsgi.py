@@ -1,4 +1,4 @@
-"""Tests for ``localpost.hosting.HostRSGIApp`` — host-as-RSGI for
+"""Tests for ``localpost.hosting.rsgi.HostRSGIApp`` — host-as-RSGI for
 hosted apps under Granian.
 
 Drives the lifecycle hooks (``__rsgi_init__`` / ``__rsgi__`` /
@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from localpost import hosting
+from localpost.hosting.rsgi import HostRSGIApp
 from localpost.http import AsyncHTTPReqCtx, Response
 
 # All tests in this file run under asyncio (HostRSGIApp uses asyncio
@@ -105,7 +106,7 @@ def _tracking_service(name: str, log: list[str]) -> hosting.ServiceF:
 # --- Helpers ------------------------------------------------------------
 
 
-async def _drive_startup(app: hosting.HostRSGIApp) -> None:
+async def _drive_startup(app: HostRSGIApp) -> None:
     """Trigger ``__rsgi_init__`` then yield to the loop until services
     are started — Granian's real flow is async, so we mimic that here."""
     loop = asyncio.get_running_loop()
@@ -114,7 +115,7 @@ async def _drive_startup(app: hosting.HostRSGIApp) -> None:
         await app._ready.wait()
 
 
-async def _drive_shutdown(app: hosting.HostRSGIApp) -> None:
+async def _drive_shutdown(app: HostRSGIApp) -> None:
     """Trigger ``__rsgi_del__`` and let the loop drain the lifecycle task."""
     loop = asyncio.get_running_loop()
     app.__rsgi_del__(loop)
@@ -137,7 +138,7 @@ class TestLifecycle:
             log.append("request")
             await ctx.complete(Response(200), b"ok")
 
-        app = hosting.HostRSGIApp(
+        app = HostRSGIApp(
             services=[_tracking_service("svc", log)],
             rsgi_handler=handler,
         )
@@ -158,7 +159,7 @@ class TestLifecycle:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             await ctx.complete(Response(200), b"hello-from-host")
 
-        app = hosting.HostRSGIApp(services=[], rsgi_handler=handler)
+        app = HostRSGIApp(services=[], rsgi_handler=handler)
         await _drive_startup(app)
         try:
             proto = _FakeProto()
@@ -175,7 +176,7 @@ class TestLifecycle:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             await ctx.complete(Response(200), b"ok")
 
-        app = hosting.HostRSGIApp(services=[], rsgi_handler=handler)
+        app = HostRSGIApp(services=[], rsgi_handler=handler)
         await _drive_startup(app)
         await _drive_shutdown(app)
         # ``_ready`` stays ``None`` when there are no services — dispatch
@@ -188,7 +189,7 @@ class TestLifecycle:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             await ctx.complete(Response(200), b"ok")
 
-        app = hosting.HostRSGIApp(
+        app = HostRSGIApp(
             services=[
                 _tracking_service("a", log),
                 _tracking_service("b", log),
@@ -211,7 +212,7 @@ class TestHandlerResolution:
         async def handler(ctx: AsyncHTTPReqCtx) -> None:
             await ctx.complete(Response(200), b"raw")
 
-        app = hosting.HostRSGIApp(services=[], rsgi_handler=handler)
+        app = HostRSGIApp(services=[], rsgi_handler=handler)
         await _drive_startup(app)
         try:
             proto = _FakeProto()
@@ -230,7 +231,7 @@ class TestHandlerResolution:
             return "world"
 
         _ = hello
-        app = hosting.HostRSGIApp(services=[], rsgi_handler=oapi_app)
+        app = HostRSGIApp(services=[], rsgi_handler=oapi_app)
         await _drive_startup(app)
         try:
             proto = _FakeProto()
@@ -259,7 +260,7 @@ class TestRequestGate:
             log.append("request")
             await ctx.complete(Response(200), b"ok")
 
-        app = hosting.HostRSGIApp(services=[slow_starter()], rsgi_handler=handler)
+        app = HostRSGIApp(services=[slow_starter()], rsgi_handler=handler)
         loop = asyncio.get_running_loop()
         app.__rsgi_init__(loop)
         # Fire the request immediately — must not be served until

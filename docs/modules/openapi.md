@@ -427,18 +427,18 @@ mode. Requires the `[rsgi]` extra (`pip install 'localpost[rsgi]'`).
 
 **Hosted apps under Granian** — when the HTTP app shares its worker
 process with other hosted services (scheduler, gRPC, custom workers),
-deploy through `localpost.hosting.HostRSGIApp` instead, which runs the
+deploy through `localpost.hosting.rsgi.HostRSGIApp` instead, which runs the
 full hosting lifecycle inside each Granian worker:
 
 ```python
-from localpost import hosting
+from localpost.hosting.rsgi import HostRSGIApp
 from localpost.scheduler import every, scheduled_task
 
 @scheduled_task(every(seconds=5))
 async def heartbeat(): ...
 
 
-rsgi_app = hosting.HostRSGIApp(
+rsgi_app = HostRSGIApp(
     services=[heartbeat.service()],
     rsgi_handler=app,
 )

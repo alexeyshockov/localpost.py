@@ -20,7 +20,6 @@ from ._host import (
     service,
 )
 from .middleware import shutdown_on_signal
-from .rsgi import HostRSGIApp
 
 __all__ = [
     "service",
@@ -36,7 +35,6 @@ __all__ = [
     "ServiceLifetime",
     "ServiceLifetimeView",
     "Stopped",
-    "HostRSGIApp",
 ]
 
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 import functools
 from collections.abc import Awaitable, Callable
 
+from localpost.hosting import current_service
+
 
 def run_async[**P, R](
     func: Callable[P, Awaitable[R]],
@@ -30,10 +32,5 @@ def run_async[**P, R](
     :meth:`anyio.from_thread.BlockingPortal.call` raises ``RuntimeError`` if
     invoked from the loop thread.
     """
-    # Local import: ``localpost.hosting`` pulls in ``localpost.http``, which in
-    # turn imports ``localpost.threadtools`` — a top-level import here would
-    # close the cycle.
-    from localpost.hosting import current_service  # noqa: PLC0415
-
     portal = current_service().portal
     return portal.call(functools.partial(func, *args, **kwargs))

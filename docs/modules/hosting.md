@@ -91,13 +91,13 @@ other service.
 
 ## Host as RSGI for Granian
 
-`localpost.hosting.HostRSGIApp` runs the full hosting lifecycle (multiple
+`localpost.hosting.rsgi.HostRSGIApp` runs the full hosting lifecycle (multiple
 services + an HTTP handler) inside each Granian worker. Granian is a process
 supervisor that spawns workers and loads our app via its RSGI interface, so
 the topology flips: the host *itself* implements RSGI.
 
 ```python
-from localpost import hosting
+from localpost.hosting.rsgi import HostRSGIApp
 from localpost.openapi import HttpAsyncApp
 from localpost.scheduler import every, scheduled_task
 
@@ -114,7 +114,7 @@ async def root() -> str:
 async def heartbeat() -> None: ...
 
 
-rsgi_app = hosting.HostRSGIApp(
+rsgi_app = HostRSGIApp(
     services=[heartbeat.service()],
     rsgi_handler=app,
 )

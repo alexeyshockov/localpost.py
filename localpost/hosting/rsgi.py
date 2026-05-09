@@ -57,7 +57,7 @@ class HostRSGIApp:
 
     Example::
 
-        from localpost import hosting
+        from localpost.hosting.rsgi import HostRSGIApp
         from localpost.openapi import HttpAsyncApp
         from localpost.scheduler import every, scheduled_task
 
@@ -74,7 +74,7 @@ class HostRSGIApp:
         async def heartbeat() -> None: ...
 
 
-        rsgi_app = hosting.HostRSGIApp(
+        rsgi_app = HostRSGIApp(
             services=[heartbeat.service()],
             rsgi_handler=app,
         )

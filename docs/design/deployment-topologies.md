@@ -72,7 +72,9 @@ via Granian's RSGI hook.
 API:
 
 ```python
-rsgi_app = hosting.HostRSGIApp(
+from localpost.hosting.rsgi import HostRSGIApp
+
+rsgi_app = HostRSGIApp(
     services=[scheduler.service(), other_service.service()],
     rsgi_handler=app,                  # HttpAsyncApp or AsyncRequestHandler
 )

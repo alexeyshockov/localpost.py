@@ -211,7 +211,7 @@ For framework-flavoured deployment, see
 [`localpost.openapi.HttpAsyncApp.as_rsgi()`](openapi.md#async-flavour-httpasyncapp).
 For deployments where the HTTP app shares a worker process with **other
 hosted services** (scheduler / gRPC / custom workers),
-[`localpost.hosting.HostRSGIApp`](hosting.md#host-as-rsgi-for-granian)
+[`localpost.hosting.rsgi.HostRSGIApp`](hosting.md#host-as-rsgi-for-granian)
 runs the full hosting lifecycle inside each Granian worker. The
 asymmetry between uvicorn-as-a-hosted-service and Granian-as-a-supervisor
 is covered in

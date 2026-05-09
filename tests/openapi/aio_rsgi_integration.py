@@ -26,6 +26,7 @@ from granian.constants import Interfaces
 from granian.server.embed import Server
 
 from localpost import hosting
+from localpost.hosting.rsgi import HostRSGIApp
 from localpost.openapi import (
     BadRequest,
     Created,
@@ -214,7 +215,7 @@ class TestModeBHostedApp:
                     await asyncio.sleep(0.05)
 
         app = _library_app()
-        rsgi_app = hosting.HostRSGIApp(
+        rsgi_app = HostRSGIApp(
             services=[heartbeat()],
             rsgi_handler=app,
         )
