@@ -27,13 +27,18 @@ class Channel[T]:
         """
         with ChannelState[T](capacity) as state:
             state.open_send_channels += 1
-            tx = SendChannel(state)
+            tx = _SendChannel(state)
             state.open_receive_channels += 1
-            rx = ReceiveChannel(state)
+            rx = _ReceiveChannel(state)
             return tx, rx
 
 
-class BaseReceiveChannel[T](Protocol):
+class ReceiveChannel[T](Protocol):
+    """Public receive-side of a :class:`Channel`. Concrete instances are produced
+    by :meth:`Channel.create` and the clone methods; users program against this
+    Protocol.
+    """
+
     def __enter__(self) -> Self:
         return self
 
@@ -66,7 +71,12 @@ class BaseReceiveChannel[T](Protocol):
     def close(self) -> None: ...
 
 
-class BaseSendChannel[T](Protocol):
+class SendChannel[T](Protocol):
+    """Public send-side of a :class:`Channel`. Concrete instances are produced
+    by :meth:`Channel.create` and the clone methods; users program against this
+    Protocol.
+    """
+
     def __enter__(self) -> Self:
         return self
 
@@ -171,8 +181,7 @@ def _remaining(deadline: float | None) -> float | None:
     return deadline - time.monotonic()
 
 
-@final
-class SendChannel[T](BaseSendChannel[T]):
+class _SendChannel[T](SendChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
@@ -181,12 +190,12 @@ class SendChannel[T](BaseSendChannel[T]):
         return f"<SendChannel closed={self._closed}>"
 
     @override
-    def clone(self) -> SendChannel[T]:
+    def clone(self) -> _SendChannel[T]:
         with self._state as state:
             if self._closed:
                 raise ClosedResourceError("send channel is already closed")
             state.open_send_channels += 1
-        return SendChannel(state)
+        return _SendChannel(state)
 
     @override
     def put_nowait(self, item: T, /) -> None:
@@ -256,8 +265,7 @@ class SendChannel[T](BaseSendChannel[T]):
                 state.not_full.notify_all()
 
 
-@final
-class ReceiveChannel[T](BaseReceiveChannel[T]):
+class _ReceiveChannel[T](ReceiveChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
@@ -266,12 +274,12 @@ class ReceiveChannel[T](BaseReceiveChannel[T]):
         return f"<ReceiveChannel closed={self._closed}>"
 
     @override
-    def clone(self) -> ReceiveChannel[T]:
+    def clone(self) -> _ReceiveChannel[T]:
         with self._state as state:
             if self._closed:
                 raise ClosedResourceError("receive channel is already closed")
             state.open_receive_channels += 1
-        return ReceiveChannel(state)
+        return _ReceiveChannel(state)
 
     def _take(self, state: ChannelState[T]) -> T:
         item = state.buffer.popleft()

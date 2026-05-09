@@ -1,10 +1,23 @@
 import threading
 import time
+from typing import cast
 
 import pytest
 from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from localpost.threadtools import Channel, SendChannel
+from localpost.threadtools._channel import ChannelState, _SendChannel
+
+
+def _state_of[T](s: SendChannel[T]) -> ChannelState[T]:
+    """Reach into a sender's :class:`ChannelState` for white-box assertions.
+
+    ``Channel.create`` returns the public ``SendChannel`` Protocol; tests
+    that need to observe internal counters (``waiting_receivers``,
+    ``pending_handoffs``) cast to the concrete impl through this helper so
+    the access is explicit in one place.
+    """
+    return cast("_SendChannel[T]", s)._state
 
 
 def test_basic_send_receive():
@@ -222,11 +235,11 @@ def test_rendezvous_put_nowait_hands_off_to_waiting_receiver():
     receiver_thread.start()
 
     deadline = time.monotonic() + 1.0
-    while sender._state.waiting_receivers == 0 and time.monotonic() < deadline:
+    while _state_of(sender).waiting_receivers == 0 and time.monotonic() < deadline:
         time.sleep(0.001)
 
     try:
-        assert sender._state.waiting_receivers == 1
+        assert _state_of(sender).waiting_receivers == 1
         sender.put_nowait("ready")
         receiver_thread.join(timeout=1.0)
         assert not receiver_thread.is_alive()
@@ -289,8 +302,8 @@ def test_rendezvous_put_nowait_with_multiple_receivers():
         t.start()
 
     try:
-        assert _wait_for(lambda: sender._state.waiting_receivers == n), (
-            f"only {sender._state.waiting_receivers} receivers waiting"
+        assert _wait_for(lambda: _state_of(sender).waiting_receivers == n), (
+            f"only {_state_of(sender).waiting_receivers} receivers waiting"
         )
 
         for i in range(n):
@@ -319,13 +332,13 @@ def test_rendezvous_put_nowait_decrements_after_consume():
             received: list[str] = []
             t = threading.Thread(target=receive_one, args=(receiver, received))
             t.start()
-            assert _wait_for(lambda: sender._state.waiting_receivers == 1)
+            assert _wait_for(lambda: _state_of(sender).waiting_receivers == 1)
 
             sender.put_nowait(f"msg-{round_idx}")
             t.join(timeout=1.0)
             assert not t.is_alive()
             assert received == [f"msg-{round_idx}"]
-            assert sender._state.pending_handoffs == 0
+            assert _state_of(sender).pending_handoffs == 0
     finally:
         sender.close()
         receiver.close()
@@ -368,7 +381,7 @@ def test_rendezvous_concurrent_blocking_puts_pair_with_receivers():
         t.start()
 
     try:
-        assert _wait_for(lambda: sender._state.waiting_receivers == n)
+        assert _wait_for(lambda: _state_of(sender).waiting_receivers == n)
 
         sender_threads = [threading.Thread(target=send, args=(s, i)) for i, s in enumerate(senders)]
         for t in sender_threads:
@@ -405,7 +418,7 @@ def test_rendezvous_put_returns_when_its_own_item_consumed():
     receiver_thread.start()
 
     try:
-        assert _wait_for(lambda: sender._state.waiting_receivers == 1)
+        assert _wait_for(lambda: _state_of(sender).waiting_receivers == 1)
 
         # "a" claims the only waiting receiver.
         sender.put_nowait("a")
@@ -618,7 +631,7 @@ def test_channel_cleanup():
         sender, receiver = Channel.create()
         sender.put(42)
         assert receiver.get() == 42
-        state = sender._state
+        state = _state_of(sender)
         sender.close()
         receiver.close()
 

@@ -33,6 +33,7 @@ from hypothesis.stateful import (
 )
 
 from localpost.threadtools import Channel
+from localpost.threadtools._channel import _SendChannel
 
 
 class _ChannelMachine(RuleBasedStateMachine):
@@ -55,6 +56,10 @@ class _ChannelMachine(RuleBasedStateMachine):
         s, r = Channel.create(capacity=self.capacity)
         self._first_sender = s
         self._first_receiver = r
+        # Property tests check invariants against the channel's internal state
+        # directly. ``Channel.create`` returns the public Protocol type;
+        # narrow to the concrete impl so the type checker accepts ``_state``.
+        assert isinstance(s, _SendChannel)
         self._state = s._state
         self.model_buffer: deque = deque()
         self.model_open_senders = 1
