@@ -10,7 +10,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Future
 from contextlib import AbstractContextManager, asynccontextmanager
-from typing import Any, Self, final, overload
+from typing import Any, Protocol, Self, final, overload
 
 from anyio import CapacityLimiter, to_thread
 from anyio.abc import TaskGroup as AioTaskGroup
@@ -171,7 +171,7 @@ class TaskGroup:
     the pool's host scope. Tasks that don't poll won't be interrupted.
     """
 
-    def __init__(self, pool: WorkerPool, *, name: str | None = None) -> None:
+    def __init__(self, pool: Executor, *, name: str | None = None) -> None:
         self._name = name  # TODO Remove
         self._pool = pool
         self._lock = threading.Lock()
@@ -268,91 +268,43 @@ class TaskGroup:
         self._errors.append(exc)
 
 
-def task_group(*, name: str | None = None) -> AbstractContextManager[TaskGroup]:
-    if pool := _current_pool.get(None):
-        return TaskGroup(pool, name=name)
-    raise RuntimeError(
-        "No active thread_pool() context. Wrap your code in "
-        "`async with thread_pool():` or run inside "
-        "`localpost.hosting.run_app()`."
-    )
+class Executor(Protocol):
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]: ...
 
 
+# Channel based worker pool. Starts from 1 worker (for the channel reader that was just created).
+# A worker:
+#   wait on channel_receiver.get(timeout=60), if the timeout happened (built-in TimeoutError?) — just stop the worker.
+#   if .close() is callaed from the manager (executor shutdown) — stop the worker.
+#       (ChannelReceiver.close() should notify the worker somehow, so we can wake up in .get())
+# Submission:
+# 1. future created
+# 2. new worker started, if needed
+# 3. task submitted to the channel
+class WorkerExecutor:
+    def __init__(self, *, max_concurrency: int | None = None, backlog: int | None = None) -> None:
+        # max_concurrency: maximum number of workers to run concurrently (or infinite if None)
+        # backlog: maximum number of pending tasks to queue before blocking (or infinite if None)
+        pass
+
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
+        pass
+
+    async def warmup(self, n: int, /) -> None:
+        pass
+
+
+# Same as WorkerExecutor, but each worker starts via AnyIO loop thread, so `from_thread.check_cancelled()` is available
 class AnyIOWorkerExecutor:
     def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
         pass
 
-
-class AnyIOExecutor:
-    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
-        pass
-
-
-class WorkerExecutor:
-    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
-        pass
-
-
-@final
-class WorkerPool:
-    def __init__(self, portal: BlockingPortal, host_tg: AioTaskGroup) -> None:
-        self._portal = portal
-        self._host_tg = host_tg
-        self._idle: deque[Worker] = deque()
-        self._limiter = CapacityLimiter(math.inf)
-        self._closed = False
-
-    def get_idle_worker(self) -> Worker:
-        try:
-            return self._idle.pop()
-        except IndexError:
-            return self._spawn_worker_blocking()
-
     async def warmup(self, n: int, /) -> None:
-        """Pre-spawn ``n`` workers and park them in the idle deque.
-
-        Useful at startup to amortise OS thread-creation cost so the
-        first burst of work doesn't pay it.
-
-        Raises:
-            ValueError: ``n`` is negative.
-        """
-        if n < 0:
-            raise ValueError("count must be >= 0")
-        for _ in range(n):
-            w = self._spawn_worker()
-            self._idle.append(w)
-
-    def _spawn_worker(self) -> Worker:
-        """Create a worker (must be called from the event-loop thread)."""
-        w = Worker(self)
-        self._host_tg.start_soon(
-            functools.partial(
-                to_thread.run_sync,
-                w._run,
-                abandon_on_cancel=False,
-                limiter=self._limiter,
-            )
-        )
-        return w
-
-    def _spawn_worker_blocking(self) -> Worker:
-        if self._closed:
-            raise RuntimeError("pool is closed")
-        return self._portal.call(self._spawn_worker)
-
-    def _shutdown_all_workers(self) -> None:
-        self._closed = True
-        while self._idle:
-            self._idle.pop().wakeup()
+        pass
 
 
-@asynccontextmanager
-async def thread_pool(portal: BlockingPortal, host_tg: AioTaskGroup) -> AsyncGenerator[WorkerPool]:
-    with set_cvar(_current_pool, WorkerPool(portal, host_tg)) as pool:
-        try:
-            yield pool
-        finally:
-            # At that point all the workers should be idle. Wake them up so they can exit promptly, otherwise they'd sit
-            # on the IDLE_TIMEOUT before the host task group could drain).
-            pool._shutdown_all_workers()
+# Each task — AnyIO task (from_thread -> to_thread), a roundrtip via AnyIO loop thread
+class AnyIOExecutor:
+    # TODO max_concurrency & backpressure (backlog, max_size) - via Channel
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
+        pass
