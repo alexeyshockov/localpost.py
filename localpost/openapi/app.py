@@ -43,7 +43,7 @@ from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.middleware import OpMiddleware
 from localpost.openapi.operation import Operation
 from localpost.openapi.schemas import SchemaRegistry
-from localpost.threadtools import AnyIOWorkerExecutor, Executor
+from localpost.threadtools import Executor, WorkerExecutor
 
 __all__ = ["HttpApp"]
 
@@ -203,8 +203,8 @@ class HttpApp:
 
         ``executor`` is the thread executor that runs handlers; pass an
         already-open :class:`localpost.threadtools.Executor` to share one
-        across services. When omitted, an :class:`AnyIOWorkerExecutor` is
-        opened for the lifetime of the service.
+        across services. When omitted, a :class:`WorkerExecutor` is opened
+        for the lifetime of the service.
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """
@@ -217,7 +217,7 @@ class HttpApp:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield
                 return
-            with AnyIOWorkerExecutor() as own_executor:
+            with WorkerExecutor() as own_executor:
                 async with thread_pool_handler(router, own_executor) as h:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield

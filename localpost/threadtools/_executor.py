@@ -1,30 +1,41 @@
 """Thread-management primitives for ``localpost.threadtools``.
 
-Three flavors, all sync context managers exposing a ``submit`` method:
+Three flavors of executor, each with the same ``submit`` contract but
+different lifecycle and cancellation properties:
 
-* :class:`WorkerExecutor` — channel-backed pool of plain ``threading.Thread``
-  workers. Lazy spawn (driven by ``put_nowait``/``WouldBlock``), idle-timeout
-  self-exit. Standalone — does not require AnyIO at runtime.
-* :class:`AnyIOWorkerExecutor` — same channel/lazy-spawn shape, but workers
-  run inside ``anyio.to_thread.run_sync(..., abandon_on_cancel=False)`` via
-  a :class:`anyio.from_thread.BlockingPortal`. That populates AnyIO's thread
-  locals so user code can call :func:`anyio.from_thread.check_cancelled`.
-* :class:`AnyIOExecutor` — every :meth:`submit` schedules a fresh AnyIO task
-  on the portal that goes through ``to_thread.run_sync``. No worker reuse.
+* :class:`WorkerExecutor` — sync context manager. Channel-backed pool of
+  plain ``threading.Thread`` workers. Lazy spawn (driven by
+  ``put_nowait`` / ``WouldBlock``), idle-timeout self-exit. Standalone —
+  no AnyIO loop required.
+* :class:`AsyncWorkerExecutor` — async context manager. Same
+  channel / lazy-spawn shape, but workers run inside
+  ``anyio.to_thread.run_sync(..., abandon_on_cancel=False)`` so user code
+  can call :func:`anyio.from_thread.check_cancelled`. The cancel scope of
+  each worker spans its whole lifetime (many tasks reuse the same worker),
+  so cancellation granularity is *per-worker*, not per-task.
+* :class:`AsyncExecutor` — async context manager. Every :meth:`submit`
+  schedules a fresh AnyIO task on the executor's internal task group.
+  Cancel granularity is *per-task*: ``Future.cancel()`` propagates to the
+  underlying task's :func:`anyio.from_thread.check_cancelled`.
 
-All three propagate the caller's :class:`contextvars.Context` to the task,
-matching the semantics of :func:`asyncio.to_thread` / Trio / AnyIO spawn.
+All three propagate :class:`contextvars.Context` to the task, matching
+:func:`asyncio.to_thread` / Trio / AnyIO spawn semantics.
+
+The async variants take a caller-owned :class:`anyio.from_thread.BlockingPortal`
+and run their internal :class:`anyio.abc.TaskGroup` on the portal's loop. They
+expose :meth:`stop` for explicit cooperative cancellation.
 """
 
 from __future__ import annotations
 
 import contextvars
-import dataclasses as dc
 import functools
+import math
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any, Protocol, Self, cast, final, runtime_checkable
 
@@ -33,9 +44,11 @@ from anyio import (
     ClosedResourceError,
     EndOfStream,
     WouldBlock,
+    create_task_group,
     to_thread,
 )
-from anyio.from_thread import BlockingPortal, start_blocking_portal
+from anyio.abc import TaskGroup as AioTaskGroup
+from anyio.from_thread import BlockingPortal
 
 from ._channel import Channel, ReceiveChannel, SendChannel
 
@@ -45,16 +58,11 @@ DEFAULT_IDLE_TIMEOUT: float = 60.0
 
 @runtime_checkable
 class Executor(Protocol):
-    """Minimal executor contract — a sync context manager with ``submit``."""
+    """Minimal executor contract: just :meth:`submit`.
 
-    def __enter__(self) -> Self: ...
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None: ...
+    Lifecycle (sync ``with`` vs ``async with``) is implementation-specific —
+    callers depend only on the submit shape.
+    """
 
     def submit[**P, R](
         self,
@@ -65,13 +73,19 @@ class Executor(Protocol):
     ) -> Future[R]: ...
 
 
-@dc.dataclass(slots=True)
-class _Envelope:
-    future: Future[Any]
+@dataclass(eq=False, slots=True)
+class Task:
+    """A single submission carried through the executor pipeline.
+
+    The caller's :class:`contextvars.Context` is snapshotted at construction;
+    the task runs inside that copy so mutations don't leak back.
+    """
+
     fn: Callable[..., Any]
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
-    context: contextvars.Context
+    context: contextvars.Context = field(default_factory=contextvars.copy_context)
+    future: Future[Any] = field(default_factory=Future)
 
     def run(self) -> None:
         if not self.future.set_running_or_notify_cancel():
@@ -82,16 +96,6 @@ class _Envelope:
             self.future.set_exception(exc)
         else:
             self.future.set_result(result)
-
-
-def _make_envelope(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> _Envelope:
-    return _Envelope(
-        future=Future(),
-        fn=fn,
-        args=args,
-        kwargs=kwargs,
-        context=contextvars.copy_context(),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -115,35 +119,34 @@ class WorkerExecutor:
     def __init__(
         self,
         *,
-        max_concurrency: int | None = None,
+        max_concurrency: float = math.inf,
         backlog: int | None = 0,
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
         thread_name_prefix: str = "lp-worker",
     ) -> None:
-        if max_concurrency is not None and max_concurrency <= 0:
-            raise ValueError("max_concurrency must be > 0 or None")
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be > 0")
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be > 0")
         self._max_concurrency = max_concurrency
         self._idle_timeout = idle_timeout
         self._thread_name_prefix = thread_name_prefix
-        self._tx: SendChannel[_Envelope]
         # ``_rx_template`` is kept open for the lifetime of the executor so
         # ``open_receive_channels`` never drops to zero between worker spawns
         # — that would make the next ``put_nowait`` raise ClosedResourceError.
-        # Workers always run on a clone; when they retire they close the clone,
-        # never the template.
-        self._rx_template: ReceiveChannel[_Envelope]
+        # Workers always run on a clone they own.
+        self._tx: SendChannel[Task]
+        self._rx_template: ReceiveChannel[Task]
         self._tx, self._rx_template = Channel.create(capacity=backlog)
         self._lock = threading.Lock()
-        self._open_receivers: list[ReceiveChannel[_Envelope]] = []
+        self._open_receivers: list[ReceiveChannel[Task]] = []
         self._workers: list[threading.Thread] = []
         self._opened = False
         self._closed = False
         self._next_worker_id = 0
 
     @property
-    def open_receivers(self) -> list[ReceiveChannel[_Envelope]]:
+    def open_receivers(self) -> list[ReceiveChannel[Task]]:
         return self._open_receivers
 
     def __enter__(self) -> Self:
@@ -167,7 +170,6 @@ class WorkerExecutor:
         self._tx.close()
         for t in list(self._workers):
             t.join()
-        # Drop the template once every worker is gone.
         self._rx_template.close()
 
     def submit[**P, R](
@@ -179,21 +181,21 @@ class WorkerExecutor:
     ) -> Future[R]:
         if not self._opened or self._closed:
             raise RuntimeError("WorkerExecutor is not open")
-        env = _make_envelope(fn, args, kwargs)
+        task = Task(fn, args, kwargs)
         try:
-            self._tx.put_nowait(env)
+            self._tx.put_nowait(task)
         except WouldBlock:
             with self._lock:
                 if self._closed:
                     raise RuntimeError("WorkerExecutor is closed") from None
-                if self._max_concurrency is None or len(self._open_receivers) < self._max_concurrency:
+                if len(self._open_receivers) < self._max_concurrency:
                     rx = self._rx_template.clone()
                     self._open_receivers.append(rx)
                     self._spawn_worker(rx)
-            self._tx.put(env)  # blocks once we're at the cap
-        return env.future
+            self._tx.put(task)  # blocks once we're at the cap
+        return task.future
 
-    def _spawn_worker(self, rx: ReceiveChannel[_Envelope]) -> None:
+    def _spawn_worker(self, rx: ReceiveChannel[Task]) -> None:
         wid = self._next_worker_id
         self._next_worker_id += 1
         t = threading.Thread(
@@ -205,27 +207,18 @@ class WorkerExecutor:
         self._workers.append(t)
         t.start()
 
-    def _retire(self, rx: ReceiveChannel[_Envelope]) -> None:
-        try:
-            rx.close()
-        except ClosedResourceError:
-            pass
-        with self._lock:
-            if rx in self._open_receivers:
-                self._open_receivers.remove(rx)
-
-    def _run_worker(self, rx: ReceiveChannel[_Envelope]) -> None:
+    def _run_worker(self, rx: ReceiveChannel[Task]) -> None:
         try:
             while True:
                 try:
-                    env = rx.get(timeout=self._idle_timeout)
+                    task = rx.get(timeout=self._idle_timeout)
                 except TimeoutError:
                     # Idle. Close the timeout-vs-submit race under the lock:
                     # if a submitter slipped a task into the channel between
                     # ``get`` returning and us deciding to die, take it.
                     with self._lock:
                         try:
-                            env = rx.get_nowait()
+                            task = rx.get_nowait()
                         except (WouldBlock, EndOfStream, ClosedResourceError):
                             if rx in self._open_receivers:
                                 self._open_receivers.remove(rx)
@@ -236,7 +229,7 @@ class WorkerExecutor:
                             return
                 except (EndOfStream, ClosedResourceError):
                     return
-                env.run()
+                task.run()
         finally:
             try:
                 rx.close()
@@ -245,75 +238,70 @@ class WorkerExecutor:
 
 
 # --------------------------------------------------------------------------
-# AnyIOWorkerExecutor — channel + AnyIO-backed worker threads
+# AsyncWorkerExecutor — channel + AnyIO-backed worker threads
 # --------------------------------------------------------------------------
 
 
 @final
-class AnyIOWorkerExecutor:
+class AsyncWorkerExecutor:
     """Like :class:`WorkerExecutor`, but workers run via
     ``anyio.to_thread.run_sync`` so user code can call
     :func:`anyio.from_thread.check_cancelled`.
 
-    Construction is sync; if no ``portal`` is passed the executor opens its
-    own via :func:`anyio.from_thread.start_blocking_portal` and tears it
-    down at exit. Pass an existing portal when integrating into an outer
-    AnyIO event loop.
+    Async context manager. The internal :class:`anyio.abc.TaskGroup` runs on
+    the loop the ``portal`` is attached to and hosts every worker's
+    ``host_task``. ``portal`` is required and caller-owned.
+
+    Cancel granularity is per-worker (cancel scope spans the worker's whole
+    lifetime, which serves many tasks). Use :meth:`stop` for fast cooperative
+    shutdown — it cancels the internal task group and closes the channel so
+    idle workers wake immediately and active tasks' next ``check_cancelled``
+    raises.
     """
 
     def __init__(
         self,
         *,
-        max_concurrency: int | None = None,
+        portal: BlockingPortal,
+        max_concurrency: float = math.inf,
         backlog: int | None = 0,
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
-        portal: BlockingPortal | None = None,
-        backend: str = "asyncio",
     ) -> None:
-        if max_concurrency is not None and max_concurrency <= 0:
-            raise ValueError("max_concurrency must be > 0 or None")
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be > 0")
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be > 0")
+        self._portal = portal
         self._max_concurrency = max_concurrency
         self._idle_timeout = idle_timeout
-        self._tx: SendChannel[_Envelope]
-        self._rx_template: ReceiveChannel[_Envelope]
+        self._tx: SendChannel[Task]
+        self._rx_template: ReceiveChannel[Task]
         self._tx, self._rx_template = Channel.create(capacity=backlog)
         self._lock = threading.Lock()
-        # See ``WorkerExecutor`` — the template stays open for the executor's
-        # lifetime so the channel never sees ``open_receive_channels == 0``.
-        self._open_receivers: list[ReceiveChannel[_Envelope]] = []
-        # ``Future``s returned by ``portal.start_task_soon`` — one per host task.
-        self._host_tasks: list[Future[None]] = []
-        self._external_portal = portal
-        self._portal: BlockingPortal | None = None
-        self._backend = backend
-        self._stack: ExitStack | None = None
+        self._open_receivers: list[ReceiveChannel[Task]] = []
+        self._stack: AsyncExitStack | None = None
+        self._tg: AioTaskGroup | None = None
         self._opened = False
         self._closed = False
 
     @property
     def portal(self) -> BlockingPortal:
-        if self._portal is None:
-            raise RuntimeError("AnyIOWorkerExecutor is not open")
         return self._portal
 
     @property
-    def open_receivers(self) -> list[ReceiveChannel[_Envelope]]:
+    def open_receivers(self) -> list[ReceiveChannel[Task]]:
         return self._open_receivers
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         if self._closed:
-            raise RuntimeError("AnyIOWorkerExecutor cannot be reused")
-        self._stack = ExitStack().__enter__()
-        if self._external_portal is not None:
-            self._portal = self._external_portal
-        else:
-            self._portal = self._stack.enter_context(start_blocking_portal(backend=self._backend))
+            raise RuntimeError("AsyncWorkerExecutor cannot be reused")
+        self._stack = AsyncExitStack()
+        await self._stack.__aenter__()
+        self._tg = await self._stack.enter_async_context(create_task_group())
         self._opened = True
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
@@ -323,19 +311,36 @@ class AnyIOWorkerExecutor:
             if self._closed:
                 return
             self._closed = True
+        # Close the channel first — idle workers wake via EndOfStream.
         self._tx.close()
-        # Wait for every worker host task to finish (its ``to_thread.run_sync``
-        # returns once the inner loop exits cleanly).
-        for f in list(self._host_tasks):
-            try:
-                f.result()
-            except BaseException:  # noqa: BLE001, S110
-                pass
-        self._rx_template.close()
+        # Exit the task group: on clean body it waits for host tasks to finish;
+        # on exception AnyIO cancels children automatically.
         if self._stack is not None:
-            self._stack.__exit__(exc_type, exc, tb)
+            await self._stack.__aexit__(exc_type, exc, tb)
             self._stack = None
-        self._portal = None
+        self._rx_template.close()
+        self._tg = None
+
+    def stop(self) -> None:
+        """Cooperatively shut down: close the channel and cancel the internal
+        task group. Idempotent.
+
+        Idle workers wake via the channel close; active tasks see their next
+        :func:`anyio.from_thread.check_cancelled` raise. Tasks that don't poll
+        run to natural completion.
+
+        Like :meth:`submit`, this must be called from a non-loop thread —
+        from inside ``async`` code, wrap with ``await anyio.to_thread.run_sync(ex.stop)``.
+        """
+        if self._tg is None:
+            return
+        # The channel uses thread locks; closing is safe from any thread.
+        try:
+            self._tx.close()
+        except ClosedResourceError:
+            pass
+        tg = self._tg
+        self._portal.call(tg.cancel_scope.cancel)
 
     def submit[**P, R](
         self,
@@ -345,40 +350,40 @@ class AnyIOWorkerExecutor:
         **kwargs: P.kwargs,
     ) -> Future[R]:
         if not self._opened or self._closed:
-            raise RuntimeError("AnyIOWorkerExecutor is not open")
-        env = _make_envelope(fn, args, kwargs)
+            raise RuntimeError("AsyncWorkerExecutor is not open")
+        task = Task(fn, args, kwargs)
         try:
-            self._tx.put_nowait(env)
+            self._tx.put_nowait(task)
         except WouldBlock:
             with self._lock:
                 if self._closed:
-                    raise RuntimeError("AnyIOWorkerExecutor is closed") from None
-                if self._max_concurrency is None or len(self._open_receivers) < self._max_concurrency:
+                    raise RuntimeError("AsyncWorkerExecutor is closed") from None
+                if len(self._open_receivers) < self._max_concurrency:
                     rx = self._rx_template.clone()
                     self._open_receivers.append(rx)
                     self._spawn_worker(rx)
-            self._tx.put(env)
-        return env.future
+            self._tx.put(task)
+        return task.future
 
-    def _spawn_worker(self, rx: ReceiveChannel[_Envelope]) -> None:
-        portal = self._portal
-        assert portal is not None
+    def _spawn_worker(self, rx: ReceiveChannel[Task]) -> None:
+        tg = self._tg
+        assert tg is not None
 
         async def host_task() -> None:
             await to_thread.run_sync(self._run_worker, rx, abandon_on_cancel=False)
 
-        f = portal.start_task_soon(host_task)
-        self._host_tasks.append(f)
+        # Schedule the host task into our internal task group from any thread.
+        self._portal.call(tg.start_soon, host_task)
 
-    def _run_worker(self, rx: ReceiveChannel[_Envelope]) -> None:
+    def _run_worker(self, rx: ReceiveChannel[Task]) -> None:
         try:
             while True:
                 try:
-                    env = rx.get(timeout=self._idle_timeout)
+                    task = rx.get(timeout=self._idle_timeout)
                 except TimeoutError:
                     with self._lock:
                         try:
-                            env = rx.get_nowait()
+                            task = rx.get_nowait()
                         except (WouldBlock, EndOfStream, ClosedResourceError):
                             if rx in self._open_receivers:
                                 self._open_receivers.remove(rx)
@@ -389,7 +394,7 @@ class AnyIOWorkerExecutor:
                             return
                 except (EndOfStream, ClosedResourceError):
                     return
-                env.run()
+                task.run()
         finally:
             try:
                 rx.close()
@@ -398,60 +403,57 @@ class AnyIOWorkerExecutor:
 
 
 # --------------------------------------------------------------------------
-# AnyIOExecutor — fresh AnyIO task per submit
+# AsyncExecutor — fresh AnyIO task per submit
 # --------------------------------------------------------------------------
 
 
 @final
-class AnyIOExecutor:
-    """One AnyIO task per :meth:`submit`, executed via
-    ``anyio.to_thread.run_sync``.
+class AsyncExecutor:
+    """Async context manager. One AnyIO task per :meth:`submit`, executed via
+    ``anyio.to_thread.run_sync`` and gated by an
+    :class:`anyio.CapacityLimiter` (``math.inf`` = no cap).
 
-    Useful when you want every task to be its own AnyIO scope rather than
-    reusing a long-lived worker. ``max_concurrency`` is enforced by an
-    :class:`anyio.CapacityLimiter`.
+    Cancel granularity is *per-task*: calling ``Future.cancel()`` on the
+    returned :class:`~concurrent.futures.Future` cancels just that submit's
+    AnyIO task; the cancel propagates through ``to_thread.run_sync(...,
+    abandon_on_cancel=False)`` into the worker thread's threadlocals so the
+    task's next :func:`anyio.from_thread.check_cancelled` raises.
+
+    :meth:`stop` cancels the internal task group, signalling every in-flight
+    submit at once.
     """
 
     def __init__(
         self,
         *,
-        max_concurrency: int | None = None,
-        portal: BlockingPortal | None = None,
-        backend: str = "asyncio",
+        portal: BlockingPortal,
+        max_concurrency: float = math.inf,
     ) -> None:
-        if max_concurrency is not None and max_concurrency <= 0:
-            raise ValueError("max_concurrency must be > 0 or None")
+        if max_concurrency <= 0:
+            raise ValueError("max_concurrency must be > 0")
+        self._portal = portal
         self._max_concurrency = max_concurrency
-        self._external_portal = portal
-        self._portal: BlockingPortal | None = None
-        self._backend = backend
-        self._stack: ExitStack | None = None
+        self._stack: AsyncExitStack | None = None
+        self._tg: AioTaskGroup | None = None
         self._limiter: CapacityLimiter | None = None
         self._opened = False
         self._closed = False
-        self._inflight: list[Future[Any]] = []
-        self._inflight_lock = threading.Lock()
 
     @property
     def portal(self) -> BlockingPortal:
-        if self._portal is None:
-            raise RuntimeError("AnyIOExecutor is not open")
         return self._portal
 
-    def __enter__(self) -> Self:
+    async def __aenter__(self) -> Self:
         if self._closed:
-            raise RuntimeError("AnyIOExecutor cannot be reused")
-        self._stack = ExitStack().__enter__()
-        if self._external_portal is not None:
-            self._portal = self._external_portal
-        else:
-            self._portal = self._stack.enter_context(start_blocking_portal(backend=self._backend))
-        if self._max_concurrency is not None:
-            self._limiter = self._portal.call(CapacityLimiter, self._max_concurrency)
+            raise RuntimeError("AsyncExecutor cannot be reused")
+        self._stack = AsyncExitStack()
+        await self._stack.__aenter__()
+        self._tg = await self._stack.enter_async_context(create_task_group())
+        self._limiter = CapacityLimiter(self._max_concurrency)
         self._opened = True
         return self
 
-    def __exit__(
+    async def __aexit__(
         self,
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
@@ -460,18 +462,22 @@ class AnyIOExecutor:
         if self._closed:
             return
         self._closed = True
-        # Drain in-flight submissions before closing the portal — otherwise the
-        # portal's task group will cancel them on shutdown.
-        for f in list(self._inflight):
-            try:
-                f.result()
-            except BaseException:  # noqa: BLE001, S110
-                pass
+        # Exit the internal task group: clean body waits for in-flight submits;
+        # exception body cancels them. No manual tracking needed.
         if self._stack is not None:
-            self._stack.__exit__(exc_type, exc, tb)
+            await self._stack.__aexit__(exc_type, exc, tb)
             self._stack = None
-        self._portal = None
+        self._tg = None
         self._limiter = None
+
+    def stop(self) -> None:
+        """Cancel every in-flight submit by cancelling the internal task group.
+        Safe from any thread. Idempotent.
+        """
+        if self._tg is None:
+            return
+        tg = self._tg
+        self._portal.call(tg.cancel_scope.cancel)
 
     def submit[**P, R](
         self,
@@ -481,27 +487,23 @@ class AnyIOExecutor:
         **kwargs: P.kwargs,
     ) -> Future[R]:
         if not self._opened or self._closed:
-            raise RuntimeError("AnyIOExecutor is not open")
-        portal = self._portal
-        assert portal is not None
-        ctx = contextvars.copy_context()
-        bound = functools.partial(ctx.run, fn, *args, **kwargs)
+            raise RuntimeError("AsyncExecutor is not open")
+        tg = self._tg
         limiter = self._limiter
+        assert tg is not None
+        assert limiter is not None
+        task = Task(fn, args, kwargs)
 
-        async def task() -> R:
-            if limiter is not None:
-                return cast("R", await to_thread.run_sync(bound, limiter=limiter, abandon_on_cancel=False))
-            return cast("R", await to_thread.run_sync(bound, abandon_on_cancel=False))
-
-        fut = portal.start_task_soon(task)
-        with self._inflight_lock:
-            self._inflight.append(fut)
-        fut.add_done_callback(self._on_done)
-        return fut
-
-    def _on_done(self, fut: Future[Any]) -> None:
-        with self._inflight_lock:
+        async def runner() -> None:
+            if not task.future.set_running_or_notify_cancel():
+                return
+            bound = functools.partial(task.context.run, task.fn, *task.args, **task.kwargs)
             try:
-                self._inflight.remove(fut)
-            except ValueError:
-                pass
+                result = await to_thread.run_sync(bound, limiter=limiter, abandon_on_cancel=False)
+            except BaseException as exc:  # noqa: BLE001
+                task.future.set_exception(exc)
+            else:
+                task.future.set_result(cast("Any", result))
+
+        self._portal.call(tg.start_soon, runner)
+        return task.future

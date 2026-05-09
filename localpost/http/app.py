@@ -63,7 +63,7 @@ from localpost.http._service import http_server
 from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
-from localpost.threadtools import AnyIOWorkerExecutor, Executor
+from localpost.threadtools import Executor, WorkerExecutor
 
 __all__ = ["HttpApp"]
 
@@ -307,7 +307,7 @@ class HttpApp:
         ``pooled=True``; pass an already-open
         :class:`localpost.threadtools.Executor` to share one across
         services. When omitted (and ``pooled=True``), an
-        :class:`AnyIOWorkerExecutor` is opened for the lifetime of the
+        :class:`WorkerExecutor` is opened for the lifetime of the
         service.
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
@@ -326,7 +326,7 @@ class HttpApp:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield
                 return
-            with AnyIOWorkerExecutor() as own_executor:
+            with WorkerExecutor() as own_executor:
                 async with thread_pool_handler(inner, own_executor) as h:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield
