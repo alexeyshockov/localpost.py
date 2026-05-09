@@ -508,6 +508,110 @@ def test_concurrent_stress():
     assert sorted(received) == sorted(expected)
 
 
+def test_get_with_timeout_raises_timeout_error():
+    sender, receiver = Channel.create()
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        receiver.get(timeout=0.05)
+    elapsed = time.monotonic() - started
+    assert 0.04 <= elapsed < 0.5
+    sender.close()
+    receiver.close()
+
+
+def test_get_with_timeout_zero_is_nonblocking():
+    sender, receiver = Channel.create()
+    with pytest.raises(TimeoutError):
+        receiver.get(timeout=0)
+    sender.put(1)
+    assert receiver.get(timeout=0) == 1
+    sender.close()
+    receiver.close()
+
+
+def test_put_with_timeout_raises_when_buffer_full():
+    sender, receiver = Channel.create(capacity=1)
+    sender.put(1)  # fills the buffer
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        sender.put(2, timeout=0.05)
+    elapsed = time.monotonic() - started
+    assert 0.04 <= elapsed < 0.5
+    sender.close()
+    receiver.close()
+
+
+def test_get_nowait_empty_raises_would_block():
+    sender, receiver = Channel.create()
+    with pytest.raises(WouldBlock):
+        receiver.get_nowait()
+    sender.put(1)
+    assert receiver.get_nowait() == 1
+    sender.close()
+    receiver.close()
+
+
+def test_get_nowait_after_senders_closed_raises_eos():
+    sender, receiver = Channel.create()
+    sender.close()
+    with pytest.raises(EndOfStream):
+        receiver.get_nowait()
+    receiver.close()
+
+
+def test_get_unblocks_when_receiver_closed_from_other_thread():
+    sender, receiver = Channel.create()
+    raised: list[BaseException] = []
+
+    def receive():
+        try:
+            receiver.get()
+        except BaseException as exc:  # noqa: BLE001
+            raised.append(exc)
+
+    t = threading.Thread(target=receive)
+    t.start()
+    time.sleep(0.05)
+    receiver.close()
+    t.join(timeout=1.0)
+    assert not t.is_alive()
+    assert len(raised) == 1
+    assert isinstance(raised[0], ClosedResourceError)
+    sender.close()
+
+
+def test_close_broadcasts_to_cloned_receivers():
+    """When senders close, every cloned receiver waiting in get() must wake
+    up and observe EndOfStream — not just one of them."""
+    sender, receiver = Channel.create()
+    receivers = [receiver] + [receiver.clone() for _ in range(3)]
+    seen_eos = threading.Event()
+    eos_count = 0
+    eos_lock = threading.Lock()
+
+    def receive(r):
+        nonlocal eos_count
+        try:
+            r.get()
+        except EndOfStream:
+            with eos_lock:
+                eos_count += 1
+                if eos_count == len(receivers):
+                    seen_eos.set()
+        finally:
+            r.close()
+
+    threads = [threading.Thread(target=receive, args=(r,)) for r in receivers]
+    for t in threads:
+        t.start()
+    time.sleep(0.05)
+    sender.close()
+    for t in threads:
+        t.join(timeout=1.0)
+        assert not t.is_alive()
+    assert seen_eos.is_set()
+
+
 def test_channel_cleanup():
     """Test that channels clean up properly when references are dropped."""
     for _ in range(10):
