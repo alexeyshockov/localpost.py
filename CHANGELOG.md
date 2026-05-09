@@ -41,8 +41,15 @@ Python 3.12+ is now required (was 3.10+).
   - `read_body` / `aread_body` body helpers, `static_handler`,
     `compress_handler` (gzip stdlib; brotli via the `[http-compress]`
     extra).
-  - `thread_pool_handler` / `streaming_pool_handler` — opt-in worker-pool
-    offload of handlers and streaming uploads.
+  - `thread_pool_handler(handler, executor)` /
+    `streaming_pool_handler(handler, executor)` — opt-in worker-pool
+    offload of handlers and streaming uploads. The executor is
+    caller-owned; the wrapper holds an internal `TaskGroup` for drain
+    semantics but does not own the executor lifecycle.
+  - `HttpApp.service(executor=...)` and `openapi.HttpApp.service(executor=...)`
+    accept an open `Executor`. When omitted, the service opens an
+    `AsyncWorkerExecutor` on the hosting portal so handlers get
+    `from_thread.check_cancelled` support automatically.
   - `HTTPReqCtx.attrs` — mutable per-request state for cross-cutting
     concerns (auth, tracing, rate-limit, body cache).
   - **Free-threaded CPython 3.14t support** — verified end-to-end. ~3x
@@ -59,18 +66,45 @@ Python 3.12+ is now required (was 3.10+).
   `AsyncRequestHandler` type. `to_asgi` / `to_rsgi` adapters expose the
   same handler shape over async transports, so the same `HttpApp` can run
   under Granian or Uvicorn or the in-tree sync server.
-- **`localpost.threadtools`** — sync primitives for thread-bridging code:
-  `TaskGroup` (a portal-backed task group with `start_soon(...)` for
-  fire-and-forget and `create_task(...) -> Future` for awaitable spawn),
-  `Channel` (with separate `SendChannel` / `ReceiveChannel` halves), and
-  `cancellable_semaphore` / `CancellableLock` with per-primitive
-  `check_cancelled`.
+- **`localpost.threadtools`** — primitives for thread-bridging code, built
+  on plain locks (no AnyIO loop required for the sync pieces):
+  - `Channel` — typed, thread-safe queue with separate `SendChannel` /
+    `ReceiveChannel` halves, `timeout=` on `put` / `get`, `get_nowait`,
+    and broadcast-on-close so cloned receivers all observe `EndOfStream`
+    / `ClosedResourceError`. Capacity modes: unbounded (`None`),
+    rendezvous (`0`), bounded (`N>0`).
+  - `Executor` protocol — single `submit(fn, *args, **kwargs) -> Future`
+    contract. Three implementations:
+    - `WorkerExecutor` — sync `with`, channel-backed pool of plain
+      `threading.Thread` workers, lazy spawn with idle-timeout
+      self-exit, no event loop needed.
+    - `AsyncWorkerExecutor` — `async with`, same channel/lazy-spawn
+      shape but workers run via `anyio.to_thread.run_sync(...,
+      abandon_on_cancel=False)` so user code can call
+      `anyio.from_thread.check_cancelled`. Cancel granularity is
+      *per-worker* (one worker handles many tasks).
+    - `AsyncExecutor` — `async with`, fresh AnyIO task per submit gated
+      by an always-on `CapacityLimiter` (`math.inf` = no cap). Cancel
+      granularity is *per-task* (`Future.cancel()` propagates).
+    The async variants take a caller-owned `BlockingPortal` and hold an
+    internal `anyio.TaskGroup`; `stop()` cancels every in-flight task.
+  - `TaskGroup` — Trio-style structured concurrency over an `Executor`.
+    Tracks `Future`s, drains in `__exit__`, surfaces failures as a
+    `BaseExceptionGroup` (body + task exceptions merged, deduplicated
+    by identity).
+  - All three executors snapshot `contextvars.Context` per submit,
+    matching `asyncio.to_thread` / Trio / AnyIO spawn semantics.
 - **`localpost.di`** — `.NET`-style scoped IoC container
   (`ServiceRegistry`, `ServiceProvider`, `AppContext`) with a Flask
   integration that scopes services per request.
 - **Hosting middleware** — `shutdown_on_signal()` and `start_timeout(...)`,
   composable around any `ServiceF`. New `+` and `>>` operators for
   combining and wrapping services.
+- **`ServiceLifetimeView.portal`** exposes the hosting layer's per-app
+  `BlockingPortal`. Lets services compose `AsyncWorkerExecutor` /
+  `AsyncExecutor` against the same loop without opening a redundant
+  portal — the pattern HTTP / openapi `HttpApp.service(...)` use to
+  default their internal pool.
 - **`HostRSGIApp`** — host an RSGI app under `localpost.hosting` so it
   participates in the same lifecycle / signals as everything else.
 - **`localpost.debug`** — context manager to attach AnyIO-aware debug
@@ -114,8 +148,28 @@ Python 3.12+ is now required (was 3.10+).
   `ScheduledTaskTemplate` / `Task` / `Scheduler`, declarative triggers
   (`every`, `after`, `after_all`, `cron`); the sync/async-handler duality
   is preserved.
-- **`threadtools` namespace** — `ThreadTaskGroup` is now `TaskGroup`; the
-  module is now a package (`localpost/threadtools/`).
+- **`localpost.threadtools` reshaped.** The module is now a package
+  (`localpost/threadtools/`); `ThreadTaskGroup` was renamed to
+  `TaskGroup`. The rest of the surface diverges from any previous
+  drafts:
+  - `Channel.create(...)` no longer takes `check_cancelled`; instead
+    `put` / `get` take an explicit `timeout=`. `close()` broadcasts to
+    every cloned waiter.
+  - `CancellableLock`, `cancellable_condition`, `cancellable_semaphore`
+    are removed — cancellation moves up a layer (executor / task group
+    / caller polls timeouts).
+  - `TaskGroup` no longer relies on an ambient `thread_pool()`
+    contextvar. It takes an `Executor` explicitly:
+    `TaskGroup(executor)`. Spawning runs through `executor.submit`;
+    drain and error-folding semantics are unchanged.
+  - The old `ThreadPool` / `thread_pool()` async context manager is
+    gone, replaced by the three explicit `Executor` implementations
+    (see the Added section).
+- **`localpost.http.thread_pool_handler` / `streaming_pool_handler`
+  signature.** Both now require an `executor` argument:
+  `thread_pool_handler(handler, executor)`. Caller owns the executor
+  lifetime. The previous version auto-opened an ambient pool via the
+  removed `thread_pool()` contextvar.
 - **HTTP server** does not leak parser types into the public API.
   `HTTPReqCtx.request` is `localpost.http.Request` (was `h11.Request`);
   `HTTPReqCtx.start_response` and `complete` accept
