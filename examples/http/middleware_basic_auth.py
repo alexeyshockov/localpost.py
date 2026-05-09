@@ -20,7 +20,6 @@ import sys
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     RequestHandler,
     Response,
@@ -60,15 +59,15 @@ _UNAUTHORIZED = Response(
 def basic_auth(inner: RequestHandler) -> RequestHandler:
     """Reject requests without valid Basic credentials before dispatching."""
 
-    def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+    def wrapped(ctx: HTTPReqCtx) -> None:
         auth_header = next(
             (v for k, v in ctx.request.headers if k == b"authorization"),
             None,
         )
         if not _check_basic_auth(auth_header):
             ctx.complete(_UNAUTHORIZED, b"")
-            return None
-        return inner(ctx)
+            return
+        inner(ctx)
 
     return wrapped
 
@@ -76,7 +75,7 @@ def basic_auth(inner: RequestHandler) -> RequestHandler:
 # ----------- routes -------------------------------------------------------
 
 
-def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _hello(ctx: HTTPReqCtx) -> None:
     name = route_match(ctx).path_args.get("name", "world")
     body = f"Hello, {name}!\n".encode()
     ctx.complete(
@@ -86,7 +85,6 @@ def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
         ),
         body,
     )
-    return None
 
 
 def build_router() -> RequestHandler:

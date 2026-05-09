@@ -24,7 +24,6 @@ import time
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     Router,
@@ -47,21 +46,18 @@ def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
     )
 
 
-def _root(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _root(ctx: HTTPReqCtx) -> None:
     _emit(ctx, b"hello from localpost\n")
-    return None
 
 
-def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _hello(ctx: HTTPReqCtx) -> None:
     name = route_match(ctx).path_args["name"]
     _emit(ctx, f"Hello, {name}! (thread={threading.current_thread().name})\n".encode())
-    return None
 
 
-def _slow(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _slow(ctx: HTTPReqCtx) -> None:
     time.sleep(1.0)  # exercises concurrency: several of these run in parallel
     _emit(ctx, f"done on thread={threading.current_thread().name}\n".encode())
-    return None
 
 
 def build_router() -> Router:

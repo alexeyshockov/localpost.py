@@ -2,7 +2,7 @@ import json
 import sys
 
 from localpost import hosting
-from localpost.http import HTTPReqCtx, ServerConfig
+from localpost.http import HTTPReqCtx, ServerConfig, read_body
 from localpost.http.app import HttpApp
 
 app = HttpApp()
@@ -15,7 +15,7 @@ def hello(name: str):
 
 @app.post("/{name}/profile")
 def update_user_profile(ctx: HTTPReqCtx, name: str):
-    profile = json.loads(ctx.body)
+    profile = json.loads(read_body(ctx))
     return {"updated_for": name, "profile": profile}
 
 

@@ -23,7 +23,6 @@ import sentry_sdk
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     Routes,
@@ -46,18 +45,16 @@ def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
     )
 
 
-def _root(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _root(ctx: HTTPReqCtx) -> None:
     _emit(ctx, b"hello\n")
-    return None
 
 
-def _get_book(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _get_book(ctx: HTTPReqCtx) -> None:
     book_id = route_match(ctx).path_args["id"]
     # Spans inside the handler land on the request transaction.
     with sentry_sdk.start_span(op="db.query", name="select book"):
         time.sleep(0.01)
     _emit(ctx, f"book={book_id}\n".encode())
-    return None
 
 
 def build_router():

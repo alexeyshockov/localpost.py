@@ -26,7 +26,6 @@ import sys
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Response,
     Routes,
@@ -38,7 +37,7 @@ from localpost.http import (
 from localpost.threadtools import WorkerExecutor
 
 
-def _items(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _items(ctx: HTTPReqCtx) -> None:
     # Big-ish JSON so the response crosses the default ``min_size=1024``.
     payload = {"items": [{"id": i, "name": f"item-{i}", "tag": "x" * 32} for i in range(64)]}
     body = json.dumps(payload).encode("utf-8")
@@ -52,7 +51,6 @@ def _items(ctx: HTTPReqCtx) -> BodyHandler | None:
         ),
         body if ctx.request.method != b"HEAD" else None,
     )
-    return None
 
 
 def build_router():

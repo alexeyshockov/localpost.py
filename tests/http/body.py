@@ -24,20 +24,20 @@ class _SyncStubCtx:
 class TestReadBody:
     def test_drains_to_eof(self):
         ctx = _SyncStubCtx([b"hello ", b"world"])
-        assert read_body(ctx) == b"hello world"  # type: ignore[arg-type]
+        assert read_body(ctx) == b"hello world"  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
     def test_empty_body(self):
         ctx = _SyncStubCtx([])
-        assert read_body(ctx) == b""  # type: ignore[arg-type]
+        assert read_body(ctx) == b""  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
     def test_max_size_exceeded(self):
         ctx = _SyncStubCtx([b"a" * 5, b"b" * 5])
         with pytest.raises(BodyTooLarge):
-            read_body(ctx, max_size=8)  # type: ignore[arg-type]
+            read_body(ctx, max_size=8)  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
     def test_max_size_exact_fit(self):
         ctx = _SyncStubCtx([b"a" * 4, b"b" * 4])
-        assert read_body(ctx, max_size=8) == b"aaaabbbb"  # type: ignore[arg-type]
+        assert read_body(ctx, max_size=8) == b"aaaabbbb"  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
 
 # --- Async ---------------------------------------------------------------
@@ -56,13 +56,13 @@ class _AsyncStubCtx:
 class TestAreadBody:
     async def test_drains_to_eof(self):
         ctx = _AsyncStubCtx([b"hello ", b"world"])
-        assert await aread_body(ctx) == b"hello world"  # type: ignore[arg-type]
+        assert await aread_body(ctx) == b"hello world"  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
     async def test_empty_body(self):
         ctx = _AsyncStubCtx([])
-        assert await aread_body(ctx) == b""  # type: ignore[arg-type]
+        assert await aread_body(ctx) == b""  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
 
     async def test_max_size_exceeded(self):
         ctx = _AsyncStubCtx([b"a" * 5, b"b" * 5])
         with pytest.raises(BodyTooLarge):
-            await aread_body(ctx, max_size=8)  # type: ignore[arg-type]
+            await aread_body(ctx, max_size=8)  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]

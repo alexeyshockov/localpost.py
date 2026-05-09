@@ -23,7 +23,6 @@ from collections import defaultdict, deque
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     Middleware,
     RequestHandler,
@@ -74,12 +73,12 @@ def rate_limit(max_requests: int = 10, window_seconds: float = 1.0) -> Middlewar
     counter = _SlidingWindowCounter(max_requests, window_seconds)
 
     def middleware(inner: RequestHandler) -> RequestHandler:
-        def wrapped(ctx: HTTPReqCtx) -> BodyHandler | None:
+        def wrapped(ctx: HTTPReqCtx) -> None:
             client_ip = (ctx.remote_addr or "").rpartition(":")[0] or "unknown"
             if not counter.is_allowed(client_ip):
                 ctx.complete(_TOO_MANY, b"")
-                return None
-            return inner(ctx)
+                return
+            inner(ctx)
 
         return wrapped
 
@@ -89,7 +88,7 @@ def rate_limit(max_requests: int = 10, window_seconds: float = 1.0) -> Middlewar
 # ----------- routes -------------------------------------------------------
 
 
-def _root(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _root(ctx: HTTPReqCtx) -> None:
     body = b"ok\n"
     ctx.complete(
         Response(
@@ -98,7 +97,6 @@ def _root(ctx: HTTPReqCtx) -> BodyHandler | None:
         ),
         body,
     )
-    return None
 
 
 def build_handler() -> RequestHandler:

@@ -17,6 +17,7 @@ from concurrent.futures import Future
 
 import anyio
 import anyio.from_thread
+import anyio.to_thread
 import pytest
 from anyio.from_thread import BlockingPortal
 

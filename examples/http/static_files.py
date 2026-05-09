@@ -23,7 +23,6 @@ from pathlib import Path
 
 from localpost.hosting import run_app, service
 from localpost.http import (
-    BodyHandler,
     HTTPReqCtx,
     RequestHandler,
     Response,
@@ -36,7 +35,7 @@ from localpost.http import (
 from localpost.threadtools import WorkerExecutor
 
 
-def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
+def _hello(ctx: HTTPReqCtx) -> None:
     body = b"hello from the API\n"
     ctx.complete(
         Response(
@@ -48,7 +47,6 @@ def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
         ),
         body,
     )
-    return None
 
 
 def build_api() -> RequestHandler:
@@ -69,8 +67,8 @@ async def app():
     )
     api = build_api()
 
-    def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
-        return (static if ctx.request.path.startswith(b"/static/") else api)(ctx)
+    def dispatch(ctx: HTTPReqCtx) -> None:
+        (static if ctx.request.path.startswith(b"/static/") else api)(ctx)
 
     with WorkerExecutor() as ex:
         async with thread_pool_handler(dispatch, ex) as wrapped:

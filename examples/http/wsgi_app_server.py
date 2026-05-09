@@ -53,6 +53,7 @@ async def wsgi_app_service():
             async with http_server(config, wrapped):
                 yield
 
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
     return run_app(wsgi_app_service())
