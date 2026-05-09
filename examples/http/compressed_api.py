@@ -35,6 +35,7 @@ from localpost.http import (
     http_server,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 
 def _items(ctx: HTTPReqCtx) -> BodyHandler | None:
@@ -69,9 +70,10 @@ async def app():
         h = compress_handler(build_router().as_handler(), algorithms=("gzip",))
 
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(h) as wrapped:
-        async with http_server(config, wrapped):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(h, ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

@@ -33,6 +33,7 @@ from localpost.http import (
     thread_pool_handler,
 )
 from localpost.http.router_sentry import sentry_router_handler
+from localpost.threadtools import WorkerExecutor
 
 
 def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
@@ -70,9 +71,10 @@ def build_router():
 async def app():
     handler = sentry_router_handler(build_router())
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(handler) as wrapped:
-        async with http_server(config, wrapped):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(handler, ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

@@ -34,6 +34,7 @@ from localpost.http import (
     http_server,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 # ----------- rate-limit state (selector-thread-safe via lock) -------------
 
@@ -112,9 +113,10 @@ def build_handler() -> RequestHandler:
 @service
 async def app():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(build_handler()) as h:
-        async with http_server(config, h):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(build_handler(), ex) as h:
+            async with http_server(config, h):
+                yield
 
 
 def main() -> int:

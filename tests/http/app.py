@@ -708,6 +708,5 @@ class TestStreamingRoutes:
         assert captured == ["upload:1024", "ping"]
 
 
-
 # Avoid "imported but unused" lints — the helper is part of the public smoke API.
 _keep = (contextlib,)

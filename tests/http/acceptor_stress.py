@@ -43,7 +43,6 @@ def _capturing_handler(seen: Counter, lock: threading.Lock):
             Response(status_code=200, headers=[(b"content-length", b"2")]),
             b"ok",
         )
-        return None
 
     return handler
 

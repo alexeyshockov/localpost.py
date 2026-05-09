@@ -33,6 +33,7 @@ from localpost.http import (
     static_handler,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 
 def _hello(ctx: HTTPReqCtx) -> BodyHandler | None:
@@ -71,9 +72,10 @@ async def app():
     def dispatch(ctx: HTTPReqCtx) -> BodyHandler | None:
         return (static if ctx.request.path.startswith(b"/static/") else api)(ctx)
 
-    async with thread_pool_handler(dispatch) as wrapped:
-        async with http_server(config, wrapped):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(dispatch, ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

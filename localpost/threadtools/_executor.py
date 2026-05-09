@@ -128,10 +128,15 @@ class WorkerExecutor:
         self._idle_timeout = idle_timeout
         self._thread_name_prefix = thread_name_prefix
         self._tx: SendChannel[_Envelope]
+        # ``_rx_template`` is kept open for the lifetime of the executor so
+        # ``open_receive_channels`` never drops to zero between worker spawns
+        # — that would make the next ``put_nowait`` raise ClosedResourceError.
+        # Workers always run on a clone; when they retire they close the clone,
+        # never the template.
         self._rx_template: ReceiveChannel[_Envelope]
         self._tx, self._rx_template = Channel.create(capacity=backlog)
         self._lock = threading.Lock()
-        self._open_receivers: list[ReceiveChannel[_Envelope]] = [self._rx_template]
+        self._open_receivers: list[ReceiveChannel[_Envelope]] = []
         self._workers: list[threading.Thread] = []
         self._opened = False
         self._closed = False
@@ -145,10 +150,6 @@ class WorkerExecutor:
         if self._closed:
             raise RuntimeError("WorkerExecutor cannot be reused")
         self._opened = True
-        # Spawn the initial worker tied to the seed receiver so the first
-        # ``put_nowait`` lands on a live waiter (no cold-start latency in
-        # rendezvous / small-backlog configs).
-        self._spawn_worker(self._rx_template)
         return self
 
     def __exit__(
@@ -164,9 +165,10 @@ class WorkerExecutor:
         # Closing the sender lets in-flight workers drain whatever is buffered
         # and then observe EndOfStream on their next ``get``.
         self._tx.close()
-        # Wait for every worker thread to terminate.
         for t in list(self._workers):
             t.join()
+        # Drop the template once every worker is gone.
+        self._rx_template.close()
 
     def submit[**P, R](
         self,
@@ -278,7 +280,9 @@ class AnyIOWorkerExecutor:
         self._rx_template: ReceiveChannel[_Envelope]
         self._tx, self._rx_template = Channel.create(capacity=backlog)
         self._lock = threading.Lock()
-        self._open_receivers: list[ReceiveChannel[_Envelope]] = [self._rx_template]
+        # See ``WorkerExecutor`` — the template stays open for the executor's
+        # lifetime so the channel never sees ``open_receive_channels == 0``.
+        self._open_receivers: list[ReceiveChannel[_Envelope]] = []
         # ``Future``s returned by ``portal.start_task_soon`` — one per host task.
         self._host_tasks: list[Future[None]] = []
         self._external_portal = portal
@@ -307,7 +311,6 @@ class AnyIOWorkerExecutor:
         else:
             self._portal = self._stack.enter_context(start_blocking_portal(backend=self._backend))
         self._opened = True
-        self._spawn_worker(self._rx_template)
         return self
 
     def __exit__(
@@ -328,6 +331,7 @@ class AnyIOWorkerExecutor:
                 f.result()
             except BaseException:  # noqa: BLE001, S110
                 pass
+        self._rx_template.close()
         if self._stack is not None:
             self._stack.__exit__(exc_type, exc, tb)
             self._stack = None

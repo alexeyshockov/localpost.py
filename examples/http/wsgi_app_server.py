@@ -19,6 +19,7 @@ from flask.helpers import stream_with_context  # type: ignore[import-untyped]
 
 from localpost.hosting import run_app, service
 from localpost.http import ServerConfig, http_server, thread_pool_handler, wrap_wsgi
+from localpost.threadtools import WorkerExecutor
 
 
 def build_app() -> Flask:
@@ -47,10 +48,10 @@ async def wsgi_app_service():
     config = ServerConfig(host="127.0.0.1", port=8000)
     # WSGI views block on response-body iteration, so wrap with a thread pool
     # to serve more than one request at a time.
-    async with thread_pool_handler(wrap_wsgi(build_app())) as wrapped:
-        async with http_server(config, wrapped):
-            yield
-
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(wrap_wsgi(build_app()), ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)

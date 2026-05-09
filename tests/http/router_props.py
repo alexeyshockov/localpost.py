@@ -111,7 +111,6 @@ class _Outcome:
 
 def _route_handler(ctx: HTTPReqCtx) -> None:
     ctx.complete(Response(200, [(b"content-length", b"0")]), b"")
-    return None
 
 
 def _build_router(routes_list: list[tuple[str, frozenset[HTTPMethod], str]]) -> Router:

@@ -38,7 +38,6 @@ def _ok_handler(body: bytes = b"ok"):
             ),
             body,
         )
-        return None
 
     return handler
 
@@ -121,7 +120,6 @@ class TestRouteMatchAttached:
                 ),
                 b"ok",
             )
-            return None
 
         routes = Routes()
         routes.get("/books/{book_id}")(handler)
@@ -271,7 +269,6 @@ class TestPathVariableEncoding:
             m = route_match(ctx)
             captured["name"] = m.path_args["name"]
             ctx.complete(Response(200, [(b"content-length", b"2")]), b"ok")
-            return None
 
         routes = Routes()
         routes.get("/u/{name}")(handler)

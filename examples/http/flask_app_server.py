@@ -25,6 +25,7 @@ from flask import request as flask_request
 from localpost.hosting import run_app, service
 from localpost.http import ServerConfig, http_server, thread_pool_handler
 from localpost.http.flask import flask_handler
+from localpost.threadtools import WorkerExecutor
 
 
 def build_app() -> Flask:
@@ -55,9 +56,10 @@ def build_app() -> Flask:
 @service
 async def app_svc():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(flask_handler(build_app())) as wrapped:
-        async with http_server(config, wrapped):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(flask_handler(build_app()), ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

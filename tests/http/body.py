@@ -6,7 +6,6 @@ import pytest
 
 from localpost.http import BodyTooLarge, aread_body, read_body
 
-
 # --- Sync ----------------------------------------------------------------
 
 

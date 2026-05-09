@@ -11,8 +11,6 @@ import io
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-import pytest
-
 from localpost.http import (
     HTTPReqCtx,
     Response,

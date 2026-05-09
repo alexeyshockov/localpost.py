@@ -42,6 +42,7 @@ from localpost.http import (
     http_server,
     streaming_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 
 def _events(ctx: HTTPReqCtx) -> None:
@@ -69,16 +70,17 @@ def _events(ctx: HTTPReqCtx) -> None:
 async def app():
     # Streaming SSE handlers run on a streaming pool — body is not
     # pre-buffered, the worker holds the borrowed conn for the duration.
-    async with streaming_pool_handler(_events) as inner:
-        # Same compress_handler call as for JSON APIs; the middleware
-        # picks the streaming path automatically when the response has no
-        # Content-Length and the content type is in the allowlist (which
-        # text/event-stream is, by default).
-        wrapped = compress_handler(inner, algorithms=("br", "gzip"))
+    with WorkerExecutor() as ex:
+        async with streaming_pool_handler(_events, ex) as inner:
+            # Same compress_handler call as for JSON APIs; the middleware
+            # picks the streaming path automatically when the response has no
+            # Content-Length and the content type is in the allowlist (which
+            # text/event-stream is, by default).
+            wrapped = compress_handler(inner, algorithms=("br", "gzip"))
 
-        config = ServerConfig(host="127.0.0.1", port=8000)
-        async with http_server(config, wrapped):
-            yield
+            config = ServerConfig(host="127.0.0.1", port=8000)
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

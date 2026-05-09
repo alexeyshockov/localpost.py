@@ -236,7 +236,6 @@ class TestHttpServerService:
                 ),
                 body,
             )
-            return None
 
         assert get_book is not None
         router = routes.build()
@@ -361,7 +360,6 @@ class TestAcceptorTopology:
                 Response(status_code=200, headers=[(b"content-length", b"2")]),
                 b"hi",
             )
-            return None
 
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
         async with serve(http_server(cfg, handler, selectors=4, acceptor=True)) as lt:
@@ -491,7 +489,6 @@ class TestSelectorThreadFastPath:
                 ),
                 b"ok",
             )
-            return None
 
         assert hit is not None
         router = routes.build()

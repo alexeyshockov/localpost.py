@@ -34,6 +34,7 @@ from localpost.http import (
     route_match,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 
 def _emit(ctx: HTTPReqCtx, body: bytes) -> None:
@@ -74,9 +75,10 @@ def build_router() -> Router:
 @service
 async def app():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(build_router().as_handler()) as wrapped:
-        async with http_server(config, wrapped):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(build_router().as_handler(), ex) as wrapped:
+            async with http_server(config, wrapped):
+                yield
 
 
 def main() -> int:

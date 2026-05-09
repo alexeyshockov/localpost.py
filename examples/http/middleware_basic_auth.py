@@ -31,6 +31,7 @@ from localpost.http import (
     route_match,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 # ----------- credentials store (replace with a real check) ----------------
 
@@ -102,9 +103,10 @@ def build_router() -> RequestHandler:
 @service
 async def app():
     config = ServerConfig(host="127.0.0.1", port=8000)
-    async with thread_pool_handler(build_router()) as h:
-        async with http_server(config, h):
-            yield
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(build_router(), ex) as h:
+            async with http_server(config, h):
+                yield
 
 
 def main() -> int:

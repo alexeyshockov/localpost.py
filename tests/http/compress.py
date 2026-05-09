@@ -265,7 +265,6 @@ def _emit(ctx: HTTPReqCtx, content_type: bytes, body: bytes, **headers: bytes) -
 def _make_handler(content_type: bytes, body: bytes):
     def handler(ctx: HTTPReqCtx) -> None:
         _emit(ctx, content_type, body)
-        return None
 
     return handler
 
@@ -512,7 +511,6 @@ def _sse_handler(events: list[bytes]):
             Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]),
             chunks(),
         )
-        return None
 
     return handler
 
@@ -557,7 +555,6 @@ class TestStreamingRoundTripGzip:
                 ),
                 chunks(),
             )
-            return None
 
         h = compress_handler(handler, algorithms=("gzip",))
         with serve_backend_in_thread(h) as port:
@@ -588,7 +585,6 @@ class TestStreamingRoundTripGzip:
                 ),
                 chunks(),
             )
-            return None
 
         h = compress_handler(handler, algorithms=("gzip",))
         with serve_backend_in_thread(h) as port:
@@ -646,7 +642,6 @@ class TestStreamingFlush:
                 Response(status_code=200, headers=[(b"content-type", b"text/event-stream")]),
                 chunks(),
             )
-            return None
 
         h = compress_handler(handler, algorithms=("gzip",))
         with serve_backend_in_thread(h) as port, socket.create_connection(("127.0.0.1", port), timeout=5) as s:

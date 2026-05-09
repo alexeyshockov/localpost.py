@@ -464,8 +464,6 @@ class TestHeadAndPipelining:
         assert b"resp-for-/b" in data
 
 
-
-
 # --- Stale-connection cleanup ------------------------------------------------
 
 
