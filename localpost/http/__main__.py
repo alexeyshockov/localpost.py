@@ -10,6 +10,7 @@ import click
 
 from localpost import hosting
 from localpost.http import RequestHandler, ServerConfig, http_server, thread_pool_handler
+from localpost.threadtools import AnyIOWorkerExecutor
 
 
 def _load_handler(app_str: str) -> RequestHandler:
@@ -47,9 +48,10 @@ def main(app: str, host: str, port: int, pool: bool, selectors: int, acceptor: b
     @hosting.service
     async def _serve():
         if pool:
-            async with thread_pool_handler(handler) as h:
-                async with http_server(config, h, selectors=selectors, acceptor=acceptor):
-                    yield
+            with AnyIOWorkerExecutor() as executor:
+                async with thread_pool_handler(handler, executor) as h:
+                    async with http_server(config, h, selectors=selectors, acceptor=acceptor):
+                        yield
         else:
             async with http_server(config, handler, selectors=selectors, acceptor=acceptor):
                 yield

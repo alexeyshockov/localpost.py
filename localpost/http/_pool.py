@@ -1,15 +1,15 @@
 """Worker-pool wrapper for HTTP request handlers.
 
 :func:`thread_pool_handler` wraps a :data:`RequestHandler` so each
-request runs on a worker thread with a *borrowed* connection. Body
-reads (``ctx.receive(size)`` / :func:`localpost.http.read_body`) and
-syscalls like ``ctx.sendfile`` block the worker, not the selector.
+request runs on a worker thread (borrowed from a caller-owned
+:class:`localpost.threadtools.Executor`) with a borrowed connection.
+Body reads (``ctx.receive(size)`` / :func:`localpost.http.read_body`)
+and syscalls like ``ctx.sendfile`` block the worker, not the selector.
 
-Workers come from a process-wide
-:class:`localpost.threadtools.TaskGroup` and are reused across
-all pool wrappers / HTTP servers in the process. There is no
-concurrency cap — admission control is the deployment's job
-(front-LB / OS limits).
+The executor is *not* owned by this wrapper — pass an open executor in.
+The wrapper opens an internal :class:`localpost.threadtools.TaskGroup`
+on the caller's executor for the duration of the ``async with`` so it
+can drain only the requests it dispatched at handler shutdown.
 """
 
 from __future__ import annotations
@@ -17,12 +17,11 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import AsyncGenerator
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from typing import cast
 
 from anyio import to_thread
 
-from localpost import threadtools
 from localpost.http._base import (
     PAYLOAD_TOO_LARGE_BODY,
     PAYLOAD_TOO_LARGE_RESPONSE,
@@ -33,20 +32,15 @@ from localpost.http._base import (
 from localpost.http._cancel import RequestCancel, RequestCancelled, _enter_request
 from localpost.http._types import BodyTooLarge
 from localpost.http.config import LOGGER_NAME
-
-# --------------------------------------------------------------------------
-# Internal pool primitive
-# --------------------------------------------------------------------------
+from localpost.threadtools import Executor, TaskGroup
 
 
 class _Pool:
-    """Dispatcher that runs request handlers on a shared
-    :class:`TaskGroup`.
-    """
+    """Dispatcher that runs request handlers on a shared :class:`TaskGroup`."""
 
     __slots__ = ("_shutdown_event", "_tg")
 
-    def __init__(self, tg: threadtools.TaskGroup, shutdown_event: threading.Event) -> None:
+    def __init__(self, tg: TaskGroup, shutdown_event: threading.Event) -> None:
         self._tg = tg
         self._shutdown_event = shutdown_event
 
@@ -79,8 +73,7 @@ class _Pool:
 def _run_request(ctx: _NativeReqCtx, cancel: RequestCancel, fn: RequestHandler) -> None:
     """Run a single request on the worker thread.
 
-    Mirrors the failure handling the previous worker loop performed:
-    body-too-large maps to 413; other exceptions are logged and turned
+    Body-too-large maps to 413; other exceptions are logged and turned
     into a generic 500 (or close on the spot if the response already
     started). On per-request cancellation the conn is closed because
     its protocol state is uncertain.
@@ -91,15 +84,11 @@ def _run_request(ctx: _NativeReqCtx, cancel: RequestCancel, fn: RequestHandler) 
             try:
                 fn(ctx)
             except RequestCancelled:
-                # Handler bailed cleanly. Connection state is uncertain — close.
                 with suppress(Exception):
                     ctx.conn.close()
             except BodyTooLarge:
                 _emit_body_too_large(ctx)
             except Exception:
-                # The future captures the exception, but nothing reads it on
-                # the HTTP path; log here so failures are visible immediately
-                # rather than only at pool shutdown.
                 logger.exception(
                     "Pool handler raised for %s %r",
                     ctx.request.method,
@@ -107,57 +96,13 @@ def _run_request(ctx: _NativeReqCtx, cancel: RequestCancel, fn: RequestHandler) 
                 )
                 emit_handler_error(ctx)
     finally:
-        # Conn-release policy:
-        #
-        # On the success path the handler's response-write code already
-        # re-tracked the conn via ``_maybe_give_back`` — we MUST NOT touch
-        # it here. We can't read ``ctx.conn.tracked`` either: that field
-        # is shared with the next request's dispatcher, which clears it
-        # via ``stop_tracking`` before this finally runs.
-        #
-        # The only case left to handle here is per-request cancellation:
-        # the handler caught the signal and returned, but the conn is in
-        # an uncertain state. ``cancel.fired`` is the cheap (no-syscall)
-        # check.
+        # On the success path the handler's response-write code already re-tracked the conn
+        # via ``_maybe_give_back``; we MUST NOT touch it here. The only case left is per-request
+        # cancellation: the handler caught the signal and returned, but the conn is in an
+        # uncertain state. ``cancel.fired`` is the cheap (no-syscall) check.
         if cancel.fired:
             with suppress(Exception):
                 ctx.conn.close()
-
-
-@asynccontextmanager
-async def _pool_context() -> AsyncGenerator[_Pool]:
-    """Open a worker pool backed by a :class:`TaskGroup`.
-
-    The task group is process-wide in spirit (workers are shared across
-    all pools), but each ``_pool_context`` owns its own group so its
-    teardown drains exactly the requests it dispatched.
-
-    Reuses the ambient :class:`localpost.threadtools.ThreadPool` when
-    one is set (the normal case under :func:`localpost.hosting.run_app`
-    / :func:`localpost.hosting.serve`); otherwise opens a private one
-    for the duration of this context so :func:`thread_pool_handler` can
-    be used standalone.
-
-    On exit, signals in-flight handlers via the cancel event and waits
-    for the group to drain. Drain is offloaded to a thread so the
-    surrounding event loop stays responsive.
-    """
-    # Imported lazily to avoid importing threadtools internals at
-    # module load time.
-    from localpost.threadtools import thread_pool
-    from localpost.threadtools._task_group import _current_pool
-
-    async with AsyncExitStack() as stack:
-        if _current_pool.get(None) is None:
-            await stack.enter_async_context(thread_pool())
-        shutdown_event = threading.Event()
-        tg = threadtools.TaskGroup(name="http-pool")
-        tg.__enter__()
-        try:
-            yield _Pool(tg, shutdown_event)
-        finally:
-            shutdown_event.set()
-            await to_thread.run_sync(tg.__exit__, None, None, None)
 
 
 def _emit_body_too_large(ctx: _NativeReqCtx) -> None:
@@ -169,3 +114,47 @@ def _emit_body_too_large(ctx: _NativeReqCtx) -> None:
     with suppress(Exception):
         ctx.conn.close()
 
+
+@asynccontextmanager
+async def thread_pool_handler(
+    inner: RequestHandler,
+    executor: Executor,
+    /,
+) -> AsyncGenerator[RequestHandler]:
+    """Yields a :data:`RequestHandler` that runs each request on a worker
+    thread borrowed from ``executor``.
+
+    ``inner`` runs on a worker on a blocking-with-timeout socket — body
+    reads (``ctx.receive(...)`` / :func:`localpost.http.read_body`) and
+    other blocking syscalls don't stall the selector. The executor is
+    caller-owned; this wrapper does not enter / close it.
+
+    Per-request cancellation surfaces through
+    :func:`localpost.http.check_cancelled` (client disconnect via
+    non-blocking ``MSG_PEEK``; handler shutdown via a single
+    :class:`threading.Event` shared by every in-flight token).
+
+    On exit, signals in-flight handlers via the cancel event and waits
+    for the internal task group to drain. The drain is offloaded to a
+    thread so the surrounding event loop stays responsive.
+
+    Example::
+
+        with WorkerExecutor() as ex:
+            async with thread_pool_handler(router.as_handler(), ex) as h:
+                async with http_server(config, h):
+                    ...
+    """
+    shutdown_event = threading.Event()
+    tg = TaskGroup(executor, name="http-pool")
+    tg.__enter__()
+    try:
+        yield _Pool(tg, shutdown_event).dispatch(inner)
+    finally:
+        shutdown_event.set()
+        await to_thread.run_sync(tg.__exit__, None, None, None)
+
+
+# Streaming wrapping shape ended up identical to ``thread_pool_handler`` after the dispatch
+# unification — keep the alias so callers that prefer the streaming-shaped name still resolve.
+streaming_pool_handler = thread_pool_handler

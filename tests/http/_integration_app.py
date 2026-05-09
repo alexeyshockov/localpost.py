@@ -97,6 +97,7 @@ def _main() -> int:
     from localpost.hosting import run, service  # noqa: PLC0415
     from localpost.hosting.middleware import shutdown_on_signal  # noqa: PLC0415
     from localpost.http import ServerConfig, http_server, thread_pool_handler  # noqa: PLC0415
+    from localpost.threadtools import WorkerExecutor  # noqa: PLC0415
 
     # Honor LP_TEST_BACKEND so tests can pin asyncio vs trio.
     backend = os.environ.get("LP_TEST_BACKEND", "asyncio")
@@ -106,9 +107,10 @@ def _main() -> int:
 
     @service
     async def app():
-        async with thread_pool_handler(handler) as wrapped:
-            async with http_server(cfg, wrapped):
-                yield
+        with WorkerExecutor() as executor:
+            async with thread_pool_handler(handler, executor) as wrapped:
+                async with http_server(cfg, wrapped):
+                    yield
 
     svc = shutdown_on_signal()(app())
     return anyio.run(run, svc, None, backend=backend)

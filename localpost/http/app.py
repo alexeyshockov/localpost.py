@@ -58,11 +58,12 @@ from typing import Any, get_type_hints
 
 from localpost import hosting
 from localpost.http._base import HTTPReqCtx, Middleware, RequestHandler, compose
-from localpost.http._pool import _Pool, _pool_context
+from localpost.http._pool import thread_pool_handler
 from localpost.http._service import http_server
 from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
+from localpost.threadtools import AnyIOWorkerExecutor, Executor
 
 __all__ = ["HttpApp"]
 
@@ -260,7 +261,7 @@ class HttpApp:
 
     # ----- Building -----
 
-    def _build_route_handler(self, route: _Route, pool: _Pool | None) -> RequestHandler:
+    def _build_route_handler(self, route: _Route) -> RequestHandler:
         resolvers = _build_resolvers(route.fn, route.path)
         fn = route.fn
 
@@ -270,19 +271,17 @@ class HttpApp:
             response, body = _wrap_response(result)
             ctx.complete(response, body)
 
-        handler: RequestHandler = pool.dispatch(inner) if pool is not None else inner  # type: ignore[arg-type]
-        return self._with_route_middleware(handler, route.middleware)
+        return self._with_route_middleware(inner, route.middleware)
 
     def _with_route_middleware(self, handler: RequestHandler, middleware: tuple[Middleware, ...]) -> RequestHandler:
         if not middleware:
             return handler
         return compose(*middleware)(handler)
 
-    def _build_router_handler(self, pool: _Pool | None) -> RequestHandler:
+    def _build_router_handler(self) -> RequestHandler:
         routes = Routes()
         for route in self._routes:
-            handler = self._build_route_handler(route, pool)
-            routes.add(route.method, route.path, handler)
+            routes.add(route.method, route.path, self._build_route_handler(route))
         router = routes.build().as_handler()
         if self._middleware:
             router = compose(*self._middleware)(router)
@@ -294,6 +293,7 @@ class HttpApp:
         self,
         config: ServerConfig,
         *,
+        executor: Executor | None = None,
         selectors: int = 1,
         acceptor: bool = False,
     ):
@@ -303,21 +303,32 @@ class HttpApp:
         :attr:`ServerConfig.backend`). Use with
         :func:`localpost.hosting.run_app` or :func:`localpost.hosting.serve`.
 
-        ``selectors`` and ``acceptor`` forward to :func:`http_server` — see
-        its docstring for the full topology rules.
+        ``executor`` is the thread executor that runs handlers when
+        ``pooled=True``; pass an already-open
+        :class:`localpost.threadtools.Executor` to share one across
+        services. When omitted (and ``pooled=True``), an
+        :class:`AnyIOWorkerExecutor` is opened for the lifetime of the
+        service.
+
+        ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """
         pooled = self.pooled
+        inner = self._build_router_handler()
 
         @hosting.service
         async def _app_service():
             if not pooled:
-                inner = self._build_router_handler(None)
                 async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
                     yield
                 return
-            async with _pool_context() as pool:
-                inner = self._build_router_handler(pool)
-                async with http_server(config, inner, selectors=selectors, acceptor=acceptor):
-                    yield
+            if executor is not None:
+                async with thread_pool_handler(inner, executor) as h:
+                    async with http_server(config, h, selectors=selectors, acceptor=acceptor):
+                        yield
+                return
+            with AnyIOWorkerExecutor() as own_executor:
+                async with thread_pool_handler(inner, own_executor) as h:
+                    async with http_server(config, h, selectors=selectors, acceptor=acceptor):
+                        yield
 
         return _app_service()

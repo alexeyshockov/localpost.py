@@ -66,10 +66,17 @@ def static_handler(
 
         from localpost.http import http_server, thread_pool_handler
         from localpost.http.static import static_handler
+        from localpost.threadtools import WorkerExecutor
 
-        h = thread_pool_handler(
-            static_handler("/var/www", prefix=b"/static/", cache_control="public, max-age=31536000, immutable"),
-        )
+        with WorkerExecutor() as ex:
+            h = thread_pool_handler(
+                static_handler(
+                    "/var/www",
+                    prefix=b"/static/",
+                    cache_control="public, max-age=31536000, immutable",
+                ),
+                ex,
+            )
     """
     root_path = Path(os.fspath(root)).resolve(strict=True)
     if not root_path.is_dir():

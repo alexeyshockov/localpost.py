@@ -33,6 +33,7 @@ from localpost.http import (
     streaming_pool_handler,
     thread_pool_handler,
 )
+from localpost.threadtools import WorkerExecutor
 
 pytestmark = pytest.mark.anyio
 
@@ -49,9 +50,10 @@ async def _serve_pooled(
 
     Tests own shutdown via the yielded lifetime; the pool drains on exit.
     """
-    async with thread_pool_handler(handler) as wrapped:
-        async with serve(http_server(cfg, wrapped, selectors=selectors, acceptor=acceptor)) as lt:
-            yield lt
+    with WorkerExecutor() as executor:
+        async with thread_pool_handler(handler, executor) as wrapped:
+            async with serve(http_server(cfg, wrapped, selectors=selectors, acceptor=acceptor)) as lt:
+                yield lt
 
 
 def _handler_200(body: bytes = b"ok"):
@@ -287,27 +289,28 @@ class TestMultiSelector:
         """selectors=4 + thread pool. Multiple selectors push onto the
         single shared channel; the pool drains across all producers."""
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
-        async with thread_pool_handler(_handler_200(b"hi")) as wrapped:
-            async with serve(http_server(cfg, wrapped, selectors=4)) as lt:
-                await lt.started
-                await _wait_server_ready(free_port)
+        with WorkerExecutor() as executor:
+            async with thread_pool_handler(_handler_200(b"hi"), executor) as wrapped:
+                async with serve(http_server(cfg, wrapped, selectors=4)) as lt:
+                    await lt.started
+                    await _wait_server_ready(free_port)
 
-                results: list[httpx.Response | None] = [None] * 10
+                    results: list[httpx.Response | None] = [None] * 10
 
-                async def fire(i: int) -> None:
-                    results[i] = await _get(f"http://127.0.0.1:{free_port}/")
+                    async def fire(i: int) -> None:
+                        results[i] = await _get(f"http://127.0.0.1:{free_port}/")
 
-                async with anyio.create_task_group() as tg:
-                    for i in range(10):
-                        tg.start_soon(fire, i)
+                    async with anyio.create_task_group() as tg:
+                        for i in range(10):
+                            tg.start_soon(fire, i)
 
-                for r in results:
-                    assert r is not None
-                    assert r.status_code == 200
-                    assert r.text == "hi"
+                    for r in results:
+                        assert r is not None
+                        assert r.status_code == 200
+                        assert r.text == "hi"
 
-                lt.shutdown()
-                await lt.stopped
+                    lt.shutdown()
+                    await lt.stopped
         assert lt.exit_code == 0
 
     async def test_shutdown_stops_all_selectors(self, free_port):
@@ -556,16 +559,17 @@ class TestServiceRobustness:
             ran.set()
 
         try:
-            async with streaming_pool_handler(work) as wrapped:
-                assert wrapped(cast(HTTPReqCtx, ctx)) is None
-                assert ctx.deferred is not None
-                assert selector.stopped is False
-                assert ran.wait(0.05) is False
+            with WorkerExecutor() as executor:
+                async with streaming_pool_handler(work, executor) as wrapped:
+                    assert wrapped(cast(HTTPReqCtx, ctx)) is None
+                    assert ctx.deferred is not None
+                    assert selector.stopped is False
+                    assert ran.wait(0.05) is False
 
-                ctx.deferred()
-                assert await to_thread.run_sync(lambda: ran.wait(2.0))
-                assert selector.stopped is True
-                assert ctx.conn.tracked is False
+                    ctx.deferred()
+                    assert await to_thread.run_sync(lambda: ran.wait(2.0))
+                    assert selector.stopped is True
+                    assert ctx.conn.tracked is False
         finally:
             sock.close()
             peer.close()

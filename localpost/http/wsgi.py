@@ -299,11 +299,7 @@ class _WSGIReqCtx:
         raise RuntimeError("Handler returned without producing a response")
 
     def _check_not_started(self) -> None:
-        if (
-            self._completed is not None
-            or self._streaming is not None
-            or self._sendfile is not None
-        ):
+        if self._completed is not None or self._streaming is not None or self._sendfile is not None:
             raise RuntimeError("Response already started")
 
 

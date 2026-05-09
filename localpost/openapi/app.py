@@ -43,6 +43,7 @@ from localpost.openapi.adapters import AdapterRegistry, default_registry
 from localpost.openapi.middleware import OpMiddleware
 from localpost.openapi.operation import Operation
 from localpost.openapi.schemas import SchemaRegistry
+from localpost.threadtools import AnyIOWorkerExecutor, Executor
 
 __all__ = ["HttpApp"]
 
@@ -189,6 +190,7 @@ class HttpApp:
         self,
         config: ServerConfig,
         *,
+        executor: Executor | None = None,
         selectors: int = 1,
         acceptor: bool = False,
     ) -> hosting.ServiceF:
@@ -199,15 +201,26 @@ class HttpApp:
         registered operation runs on a worker after the request body is
         buffered by the selector.
 
+        ``executor`` is the thread executor that runs handlers; pass an
+        already-open :class:`localpost.threadtools.Executor` to share one
+        across services. When omitted, an :class:`AnyIOWorkerExecutor` is
+        opened for the lifetime of the service.
+
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """
         router = self._build_router_handler()
 
         @hosting.service
         async def _app_service():
-            async with thread_pool_handler(router) as h:
-                async with http_server(config, h, selectors=selectors, acceptor=acceptor):
-                    yield
+            if executor is not None:
+                async with thread_pool_handler(router, executor) as h:
+                    async with http_server(config, h, selectors=selectors, acceptor=acceptor):
+                        yield
+                return
+            with AnyIOWorkerExecutor() as own_executor:
+                async with thread_pool_handler(router, own_executor) as h:
+                    async with http_server(config, h, selectors=selectors, acceptor=acceptor):
+                        yield
 
         return _app_service()
 

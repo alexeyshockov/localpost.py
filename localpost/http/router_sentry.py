@@ -23,9 +23,10 @@ Usage::
     sentry_sdk.init(dsn=..., traces_sample_rate=1.0)
     handler = sentry_router_handler(router)
 
-    async with thread_pool_handler(handler) as wrapped:
-        async with http_server(config, wrapped):
-            ...
+    with WorkerExecutor() as ex:
+        async with thread_pool_handler(handler, ex) as wrapped:
+            async with http_server(config, wrapped):
+                ...
 
 Pure Router instrumentation — no Flask import. Use
 :mod:`localpost.http.flask_sentry` for Flask apps.

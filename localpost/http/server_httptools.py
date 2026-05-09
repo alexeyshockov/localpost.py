@@ -246,12 +246,7 @@ class HTTPConn(BaseHTTPConn):
         # never observe EOM. Mark the message complete and force the
         # conn closed after the response — matches nginx-style "send
         # final response + Connection: close" behaviour.
-        if (
-            not ctx.borrowed
-            and self._response_started
-            and self._cur_expect_100
-            and not ctx._continue_sent
-        ):
+        if not ctx.borrowed and self._response_started and self._cur_expect_100 and not ctx._continue_sent:
             self._close_after_response = True
             self._message_complete = True
 

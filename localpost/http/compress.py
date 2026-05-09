@@ -483,9 +483,7 @@ class _CompressedCtx:
             return
         encoder = _STREAM_ENCODER_FACTORIES[self._encoding]()
         new_headers = _streaming_rewrite_headers(response.headers, encoding=self._encoding)
-        new_response = Response(
-            status_code=response.status_code, headers=new_headers, reason=response.reason
-        )
+        new_response = Response(status_code=response.status_code, headers=new_headers, reason=response.reason)
         self._inner.stream(new_response, _compress_stream(chunks, encoder))
 
     # ----- intercepted one-shot path -----
