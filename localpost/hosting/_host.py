@@ -112,6 +112,16 @@ class ServiceLifetimeView:
     def state(self) -> ServiceState:
         return self._state.state
 
+    @property
+    def portal(self) -> BlockingPortal:
+        """The hosting layer's :class:`BlockingPortal` (one per app, shared
+        with every nested service). Use it to compose
+        :class:`localpost.threadtools.AsyncWorkerExecutor` /
+        :class:`localpost.threadtools.AsyncExecutor` against the same loop
+        that hosts the service.
+        """
+        return self._state.portal
+
     def wait_started(self) -> None:
         """Helper for sync code, to wait in a thread."""
         if self._state.same_thread:

@@ -63,7 +63,7 @@ from localpost.http._service import http_server
 from localpost.http._types import Response
 from localpost.http.config import ServerConfig
 from localpost.http.router import Routes, URITemplate, route_match
-from localpost.threadtools import Executor, WorkerExecutor
+from localpost.threadtools import AsyncWorkerExecutor, Executor
 
 __all__ = ["HttpApp"]
 
@@ -307,8 +307,10 @@ class HttpApp:
         ``pooled=True``; pass an already-open
         :class:`localpost.threadtools.Executor` to share one across
         services. When omitted (and ``pooled=True``), an
-        :class:`WorkerExecutor` is opened for the lifetime of the
-        service.
+        :class:`AsyncWorkerExecutor` is opened on the hosting layer's
+        :class:`anyio.from_thread.BlockingPortal` for the lifetime of the
+        service — handlers can call
+        :func:`anyio.from_thread.check_cancelled` for free.
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """
@@ -326,7 +328,8 @@ class HttpApp:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield
                 return
-            with WorkerExecutor() as own_executor:
+            portal = hosting.current_service().portal
+            async with AsyncWorkerExecutor(portal=portal) as own_executor:
                 async with thread_pool_handler(inner, own_executor) as h:
                     async with http_server(config, h, selectors=selectors, acceptor=acceptor):
                         yield
