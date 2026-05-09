@@ -12,7 +12,6 @@ pip install 'localpost[http,openapi]'
 ```
 
 ```python
-import sys
 from dataclasses import dataclass
 from localpost import hosting
 from localpost.http import ServerConfig
@@ -35,7 +34,7 @@ def get_book(book_id: str) -> Book | NotFound[str]:
 
 
 if __name__ == "__main__":
-    sys.exit(hosting.run_app(app.service(ServerConfig(port=8000))))
+    hosting.run_app(app.service(ServerConfig(port=8000)))
 ```
 
 `/openapi.json` plus `/docs` (Swagger UI), `/docs/redoc`, `/docs/scalar` are

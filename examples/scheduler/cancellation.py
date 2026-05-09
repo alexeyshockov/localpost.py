@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import logging
-import sys
 from asyncio import CancelledError
 from datetime import timedelta
 
@@ -31,4 +30,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run_app(long_async_task))
+    run_app(long_async_task)

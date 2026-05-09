@@ -7,6 +7,7 @@ from ._executor import (
     Task,
     WorkerExecutor,
 )
+from ._run_async import run_async
 from ._task_group import TaskGroup
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "Task",
     "TaskGroup",
     "WorkerExecutor",
+    "run_async",
 ]

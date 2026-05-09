@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from pathlib import Path
 
 from localpost.hosting import run_app, service
@@ -76,10 +75,10 @@ async def app():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    return run_app(app())
+    run_app(app())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

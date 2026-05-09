@@ -28,7 +28,6 @@ before the ``EventSource`` parser sees the stream.
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from collections.abc import Iterator
 
@@ -83,10 +82,10 @@ async def app():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    return run_app(app())
+    run_app(app())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 import logging
-import sys
 
 from localpost.hosting import run_app
 from localpost.scheduler import delay, scheduled_task
@@ -19,4 +18,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run_app(cron_job))
+    run_app(cron_job)

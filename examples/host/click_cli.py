@@ -6,8 +6,6 @@ hosted service earns its keep when the command is composed with sibling
 services (a background worker, a metrics endpoint, ...) under one host.
 """
 
-import sys
-
 import click
 
 from localpost.hosting import run_app
@@ -21,4 +19,4 @@ def hello(name: str) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(click_cmd(hello)))
+    run_app(click_cmd(hello))

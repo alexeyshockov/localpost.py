@@ -12,7 +12,7 @@ pip install localpost[scheduler,cron]     # also the cron() trigger
 ```
 
 ```python
-import sys, random
+import random
 from localpost.hosting import run_app
 from localpost.scheduler import every, scheduled_task
 
@@ -23,7 +23,7 @@ async def task1():
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(task1))
+    run_app(task1)
 ```
 
 **Full reference:** <https://alexeyshockov.github.io/localpost.py/modules/scheduler/>

@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import sys
-
 import anyio
 
 from localpost.hosting import ServiceLifetime, run_app, service
@@ -38,4 +36,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run_app(channel_example()))
+    run_app(channel_example())

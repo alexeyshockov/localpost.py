@@ -29,7 +29,7 @@ including return-type unions for response shapes::
         return Book(id=book_id, title="The Hitchhiker's Guide")
 
 
-    sys.exit(hosting.run_app(app.service(ServerConfig(port=8000))))
+    hosting.run_app(app.service(ServerConfig(port=8000)))
 
 Pydantic models are recognised automatically when pydantic is installed.
 To plug in another schema library, supply a custom

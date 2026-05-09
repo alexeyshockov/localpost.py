@@ -42,7 +42,6 @@ pip install attrs cattrs
 ## Quick start
 
 ```python
-import sys
 from dataclasses import dataclass
 
 from localpost import hosting
@@ -80,7 +79,7 @@ def create_book(book: Book) -> Created[Book]:
 
 
 if __name__ == "__main__":
-    sys.exit(hosting.run_app(app.service(ServerConfig(port=8000))))
+    hosting.run_app(app.service(ServerConfig(port=8000)))
 ```
 
 ```bash

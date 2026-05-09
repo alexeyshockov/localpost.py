@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import sys
 
 import click
 
@@ -56,7 +55,7 @@ def main(app: str, host: str, port: int, pool: bool, selectors: int, acceptor: b
             async with http_server(config, handler, selectors=selectors, acceptor=acceptor):
                 yield
 
-    sys.exit(hosting.run_app(_serve()))
+    hosting.run_app(_serve())
 
 
 if __name__ == "__main__":

@@ -43,7 +43,6 @@ pip install localpost[http-server,http-fast]  # also adds the httptools backend
 The recommended path is `HttpApp`:
 
 ```python
-import sys
 from localpost.hosting import run_app
 from localpost.http import HTTPReqCtx, ServerConfig
 from localpost.http.app import HttpApp
@@ -65,7 +64,7 @@ def update_profile(ctx: HTTPReqCtx, name: str):
     return {"updated": name, "profile": profile}
 
 
-sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+run_app(app.service(ServerConfig(host="127.0.0.1", port=8000)))
 ```
 
 Or stay close to the wire — `start_http_server` directly:
@@ -90,13 +89,11 @@ with start_http_server(ServerConfig(), simple_app) as server:
 Running under hosting:
 
 ```python
-import sys
-
 from localpost.hosting import run_app
 from localpost.http import http_server, ServerConfig
 
 # `simple_app` from the Quick start above
-sys.exit(run_app(http_server(ServerConfig(), simple_app)))
+run_app(http_server(ServerConfig(), simple_app))
 ```
 
 See [`examples/http/`](https://github.com/alexeyshockov/localpost.py/tree/main/examples/http/).

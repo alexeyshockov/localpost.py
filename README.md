@@ -39,7 +39,6 @@ Optional extras:
 
 ```python
 import random
-import sys
 
 from localpost.hosting import run_app
 from localpost.scheduler import after, delay, every, scheduled_task, take_first
@@ -56,11 +55,12 @@ async def task2(task1_result: int):
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(task1, task2))
+    run_app(task1, task2)
 ```
 
 `run_app` wires signal handling (SIGINT / SIGTERM), starts every service in
-parallel, and exits cleanly when they all stop.
+parallel, exits cleanly when they all stop, and raises ``SystemExit`` with
+the resulting status code — no ``sys.exit(...)`` wrapper needed.
 
 ## Modules
 

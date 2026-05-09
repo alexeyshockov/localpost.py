@@ -16,7 +16,6 @@ Run::
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 import time
 from collections import defaultdict, deque
@@ -117,10 +116,10 @@ async def app():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    return run_app(app())
+    run_app(app())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

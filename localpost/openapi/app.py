@@ -19,7 +19,7 @@ from the function signature.
         return f"Hello, {name}!"
 
 
-    sys.exit(hosting.run_app(app.service(ServerConfig(port=8000))))
+    hosting.run_app(app.service(ServerConfig(port=8000)))
 """
 
 from __future__ import annotations

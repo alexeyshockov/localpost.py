@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import logging
 import random
-import sys
 from datetime import timedelta
 
 from localpost.hosting import run_app
@@ -22,4 +21,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run_app(task1))
+    run_app(task1)

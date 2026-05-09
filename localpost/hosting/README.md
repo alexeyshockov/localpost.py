@@ -6,7 +6,7 @@ Running → ShuttingDown → Stopped`, reacts to signals, and can spawn child
 services in the same task group.
 
 ```python
-import sys, time
+import time
 from localpost.hosting import ServiceLifetime, run_app, service
 
 
@@ -19,11 +19,12 @@ def my_service():
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(my_service()))
+    run_app(my_service())
 ```
 
 `run_app()` wires `shutdown_on_signal()` (SIGINT / SIGTERM), runs services
-under AnyIO (asyncio or Trio), and returns an exit code.
+under AnyIO (asyncio or Trio), and raises `SystemExit` with the resulting
+status code.
 
 **Full reference:** <https://alexeyshockov.github.io/localpost.py/modules/hosting/>
 

@@ -19,7 +19,6 @@ Docs UIs:
     http://localhost:8000/docs/scalar (Scalar)
 """
 
-import sys
 import time
 from collections.abc import Generator
 from dataclasses import dataclass
@@ -142,4 +141,4 @@ def stream_pages(book_id: str) -> Generator[Event[BookPage]]:
 
 
 if __name__ == "__main__":
-    sys.exit(hosting.run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+    hosting.run_app(app.service(ServerConfig(host="127.0.0.1", port=8000)))

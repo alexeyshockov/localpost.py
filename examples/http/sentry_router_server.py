@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 
 import sentry_sdk
@@ -74,14 +73,14 @@ async def app():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
     sentry_sdk.init(
         dsn=os.environ.get("SENTRY_DSN"),  # None → Sentry runs in disabled mode
         traces_sample_rate=1.0,
     )
-    return run_app(app())
+    run_app(app())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

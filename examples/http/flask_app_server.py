@@ -17,7 +17,6 @@ request context active through response-body iteration.
 from __future__ import annotations
 
 import logging
-import sys
 
 from flask import Flask, Response
 from flask import request as flask_request
@@ -62,10 +61,10 @@ async def app_svc():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    return run_app(app_svc())
+    run_app(app_svc())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -11,7 +11,6 @@ Run::
 from __future__ import annotations
 
 import logging
-import sys
 
 from flask import Flask
 from flask import request as flask_request
@@ -54,10 +53,10 @@ async def wsgi_app_service():
                 yield
 
 
-def main() -> int:
+def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    return run_app(wsgi_app_service())
+    run_app(wsgi_app_service())
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

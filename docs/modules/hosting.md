@@ -8,7 +8,6 @@ services in the same task group.
 ## Quick start
 
 ```python
-import sys
 import time
 from localpost.hosting import ServiceLifetime, run_app, service
 
@@ -25,12 +24,12 @@ def a_sync_service():
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(a_sync_service()))
+    run_app(a_sync_service())
 ```
 
 `run_app()` wires `shutdown_on_signal()` for you (SIGINT / SIGTERM), runs the
 service with AnyIO (picking asyncio or Trio via `choose_anyio_backend`), and
-returns an exit code.
+raises `SystemExit` with the resulting status code.
 
 See [`examples/host/finite_service.py`](https://github.com/alexeyshockov/localpost.py/blob/main/examples/host/finite_service.py),
 [`examples/host/channel.py`](https://github.com/alexeyshockov/localpost.py/blob/main/examples/host/channel.py).

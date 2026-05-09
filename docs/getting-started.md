@@ -22,7 +22,6 @@ module wires up signal handling and runs everything until SIGINT / SIGTERM.
 
 ```python
 import random
-import sys
 
 from localpost.hosting import run_app
 from localpost.scheduler import after, delay, every, scheduled_task, take_first
@@ -39,7 +38,7 @@ async def task2(task1_result: int):
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(task1, task2))
+    run_app(task1, task2)
 ```
 
 What's happening:
@@ -48,7 +47,7 @@ What's happening:
 - `after(task1) // take_first(3)` — fire when `task1` completes, take only its
   first 3 emissions.
 - `run_app(...)` — start every service in parallel, exit cleanly when they all
-  stop.
+  stop, then raise `SystemExit` with the resulting status code.
 
 ## A sync function works too
 

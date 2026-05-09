@@ -5,6 +5,7 @@ Thread-friendly building blocks for moving work off the event loop:
 - [`Channel`](#channel) — a typed, thread-safe queue with `timeout` on `put` / `get` and broadcast-on-close.
 - [`Executor`](#executors) — three implementations, one `submit` contract.
 - [`TaskGroup`](#taskgroup) — Trio-style structured concurrency over an `Executor`.
+- [`run_async`](#run_async) — sync→async bridge: dispatch a coroutine onto the current service's loop from a worker thread.
 
 `localpost.threadtools` is built on plain locks; the AnyIO loop is needed only for the `Async…Executor` variants.
 
@@ -90,6 +91,25 @@ with WorkerExecutor() as ex:
 ```
 
 `TaskGroup` is **collect-and-raise only** — running tasks are not interrupted on the first failure. If you want cooperative cancel, give it an `AsyncWorkerExecutor` / `AsyncExecutor` so tasks can poll `check_cancelled`.
+
+## `run_async`
+
+The reverse of `anyio.to_thread.run_sync` — call from a worker thread to dispatch an async function back onto the loop and wait for its result.
+
+```python
+from localpost.threadtools import run_async
+
+
+async def fetch_user(user_id: int) -> User:
+    ...
+
+
+def worker(user_id: int) -> str:
+    user = run_async(fetch_user, user_id)  # blocks the worker thread
+    return user.name
+```
+
+Resolves the portal via `localpost.hosting.current_service`, so the calling thread must inherit the hosting context (true for any thread spawned through AnyIO or the executors above). Must be called from a non-loop thread; on the loop thread the underlying `BlockingPortal.call` raises `RuntimeError`.
 
 ## Composing with `localpost.hosting`
 

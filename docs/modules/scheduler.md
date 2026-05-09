@@ -21,7 +21,6 @@ pip install localpost[scheduler,cron]     # also the cron() trigger (croniter)
 
 ```python
 import random
-import sys
 from localpost.hosting import run_app
 from localpost.scheduler import after, delay, every, scheduled_task, take_first
 
@@ -37,7 +36,7 @@ async def task2(task1_result: int):
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(task1, task2))
+    run_app(task1, task2)
 ```
 
 Cron:

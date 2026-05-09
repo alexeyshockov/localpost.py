@@ -2,7 +2,6 @@
 
 import logging
 import random
-import sys
 from datetime import timedelta
 
 from fast_depends import Depends, inject
@@ -30,4 +29,4 @@ if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    sys.exit(run_app(print_task))
+    run_app(print_task)

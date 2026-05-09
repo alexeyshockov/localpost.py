@@ -1,3 +1,5 @@
+from typing import NoReturn
+
 import anyio
 
 from .._utils import choose_anyio_backend
@@ -38,9 +40,16 @@ __all__ = [
 ]
 
 
-def run_app(*svcs: ServiceF) -> int:
-    """Run the target app until it stops or is interrupted by a signal."""
+def run_app(*svcs: ServiceF) -> NoReturn:
+    """Run the target app until it stops or is interrupted by a signal, then
+    exit the process via :class:`SystemExit` with the resulting status code
+    (``0`` on clean shutdown, ``1`` on failure).
+
+    Intended as the program's ``__main__`` entrypoint — call directly,
+    no ``sys.exit(...)`` wrapper needed.
+    """
 
     root_svc = svcs[0] if len(svcs) == 1 else _run_many(*svcs)
     app = shutdown_on_signal()(root_svc)
-    return anyio.run(run, app, None, **choose_anyio_backend())
+    exit_code = anyio.run(run, app, None, **choose_anyio_backend())
+    raise SystemExit(exit_code)

@@ -44,7 +44,7 @@ Example::
         return Response(status_code=204, headers=[(b"content-length", b"0")])
 
 
-    sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+    run_app(app.service(ServerConfig(host="127.0.0.1", port=8000)))
 """
 
 from __future__ import annotations

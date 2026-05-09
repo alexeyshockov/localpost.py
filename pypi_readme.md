@@ -23,7 +23,6 @@ Python 3.12+ required.
 
 ```python
 import random
-import sys
 from localpost.hosting import run_app
 from localpost.scheduler import after, every, scheduled_task
 
@@ -39,7 +38,7 @@ async def task2(x: int):
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(task1, task2))
+    run_app(task1, task2)
 ```
 
 ## Docs

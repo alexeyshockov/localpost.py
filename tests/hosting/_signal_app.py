@@ -7,8 +7,6 @@ can verify it observed the signal cleanly.
 
 from __future__ import annotations
 
-import sys
-
 from localpost.hosting import ServiceLifetime, run_app
 
 
@@ -20,4 +18,4 @@ async def long_running(lt: ServiceLifetime) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(run_app(long_running))
+    run_app(long_running)

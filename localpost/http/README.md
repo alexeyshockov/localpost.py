@@ -17,7 +17,6 @@ pip install localpost[http-server,http-fast]  # also adds the httptools backend
 ```
 
 ```python
-import sys
 from localpost.hosting import run_app
 from localpost.http import ServerConfig
 from localpost.http.app import HttpApp
@@ -31,7 +30,7 @@ def hello(name: str):
     return f"Hello, {name}!"
 
 
-sys.exit(run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+run_app(app.service(ServerConfig(host="127.0.0.1", port=8000)))
 ```
 
 **Full reference:** <https://alexeyshockov.github.io/localpost.py/modules/http/>

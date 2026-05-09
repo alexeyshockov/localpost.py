@@ -1,5 +1,4 @@
 import json
-import sys
 
 from localpost import hosting
 from localpost.http import HTTPReqCtx, ServerConfig, read_body
@@ -20,4 +19,4 @@ def update_user_profile(ctx: HTTPReqCtx, name: str):
 
 
 if __name__ == "__main__":
-    sys.exit(hosting.run_app(app.service(ServerConfig(host="127.0.0.1", port=8000))))
+    hosting.run_app(app.service(ServerConfig(host="127.0.0.1", port=8000)))
