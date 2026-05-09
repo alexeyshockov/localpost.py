@@ -2,22 +2,27 @@ from __future__ import annotations
 
 import contextvars
 import dataclasses as dc
+import functools
 import inspect
+import math
 import threading
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Self, final, overload
+from contextlib import AbstractContextManager, asynccontextmanager
+from typing import Any, Self, final, overload
 
-if TYPE_CHECKING:
-    from ._pool import ThreadPool
+from anyio import CapacityLimiter, to_thread
+from anyio.abc import TaskGroup as AioTaskGroup
+from anyio.from_thread import BlockingPortal
+from coverage.debug import pp
+
+from localpost._utils import set_cvar
 
 IDLE_TIMEOUT: float = 60.0
 """Seconds an idle worker waits for new work before self-exiting."""
 
-_current_pool: contextvars.ContextVar[ThreadPool] = contextvars.ContextVar(
-    "localpost.threadtools.current_pool"
-)
+_current_pool: contextvars.ContextVar[WorkerPool] = contextvars.ContextVar("localpost.threadtools.current_pool")
 """Ambient :class:`ThreadPool` for the current async context. Set by
 :func:`thread_pool`; read by :class:`TaskGroup` on construction."""
 
@@ -71,9 +76,7 @@ class Worker:
     :func:`anyio.from_thread.check_cancelled` to work inside user tasks.
     """
 
-    __slots__ = ("_alive", "_cv", "_inbox", "_pool_idle", "_shutdown")
-
-    def __init__(self, pool_idle: deque[Worker]) -> None:
+    def __init__(self, pool: WorkerPool) -> None:
         self._inbox: deque[Task] = deque()
         self._cv = threading.Condition(threading.Lock())
         # Set under ``_cv`` before lock release in ``_run``; that ordering is
@@ -81,49 +84,36 @@ class Worker:
         # call returning, which can otherwise still report the worker alive
         # after ``_run`` has released the lock.
         self._alive = True
-        self._shutdown = False
-        # Deque the worker re-enters after each completed task. Per-pool, so
-        # workers spawned by pool A are not picked up by tasks under pool B.
-        self._pool_idle = pool_idle
+        self._pool = pool
+
+    def wakeup(self) -> None:
+        with self._cv:
+            self._cv.notify()
 
     def submit(self, task: Task) -> bool:
-        """Hand off a task. Returns ``False`` if the worker has self-exited
-        or has been asked to shut down."""
+        """Hand off a task. Returns ``False`` if the worker has self-exited."""
         with self._cv:
-            if not self._alive or self._shutdown:
+            if not self._alive:
                 return False
             self._inbox.append(task)
             self._cv.notify()
             return True
 
-    def shutdown(self) -> None:
-        """Signal the worker to exit at its next opportunity. Wakes a
-        worker parked in ``_cv.wait``; in-flight tasks finish first."""
-        with self._cv:
-            self._shutdown = True
-            self._cv.notify()
-
     def _run(self) -> None:
-        while True:
+        while not self._pool._closed:
             with self._cv:
                 while not self._inbox:
-                    if self._shutdown:
-                        self._alive = False
-                        return
+                    # TODO Can we use wait_for here?
                     if not self._cv.wait(timeout=IDLE_TIMEOUT):
-                        # Timed out. One more inbox check under the lock to
-                        # close the timeout-vs-notify race.
+                        # Idle timeout or pool closed.
+                        # One more inbox check under the lock to close the timeout-vs-notify race.
                         if not self._inbox:
                             self._alive = False
                             return
                         break
                 task = self._inbox.popleft()
             task.run()
-            if self._shutdown:
-                with self._cv:
-                    self._alive = False
-                return
-            self._pool_idle.append(self)
+            self._pool._idle.append(self)
 
 
 @final
@@ -152,8 +142,8 @@ class TaskGroup:
 
         async with thread_pool():
             with TaskGroup() as tg:
-                tg.start_soon(do_work, arg)        # fire-and-forget
-                fut = tg.create_task(other_work)   # observe via Future
+                tg.start_soon(do_work, arg)  # fire-and-forget
+                fut = tg.create_task(other_work)  # observe via Future
             # On exit: drains in-flight tasks; raises ExceptionGroup if any failed.
 
     Both :meth:`start_soon` and :meth:`create_task` are callable from
@@ -181,17 +171,8 @@ class TaskGroup:
     the pool's host scope. Tasks that don't poll won't be interrupted.
     """
 
-    __slots__ = ("_closed", "_cv", "_errors", "_lock", "_name", "_pending", "_pool")
-
-    def __init__(self, *, name: str | None = None) -> None:
-        pool = _current_pool.get(None)
-        if pool is None:
-            raise RuntimeError(
-                "No active thread_pool() context. Wrap your code in "
-                "`async with thread_pool():` or run inside "
-                "`localpost.hosting.run_app()`."
-            )
-        self._name = name
+    def __init__(self, pool: WorkerPool, *, name: str | None = None) -> None:
+        self._name = name  # TODO Remove
         self._pool = pool
         self._lock = threading.Lock()
         self._cv = threading.Condition(self._lock)
@@ -232,13 +213,9 @@ class TaskGroup:
             raise BaseExceptionGroup(label, all_errors)
 
     @overload
-    def start_soon[**P](
-        self, fn: Callable[P, Awaitable[Any]], /, *args: P.args, **kwargs: P.kwargs
-    ) -> None: ...
+    def start_soon[**P](self, fn: Callable[P, Awaitable[Any]], /, *args: P.args, **kwargs: P.kwargs) -> None: ...
     @overload
-    def start_soon[**P](
-        self, fn: Callable[P, Any], /, *args: P.args, **kwargs: P.kwargs
-    ) -> None: ...
+    def start_soon[**P](self, fn: Callable[P, Any], /, *args: P.args, **kwargs: P.kwargs) -> None: ...
     def start_soon(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> None:
         """Submit ``fn(*args, **kwargs)`` to a worker thread. Fire-and-forget.
 
@@ -249,16 +226,10 @@ class TaskGroup:
         self.create_task(fn, *args, **kwargs)
 
     @overload
-    def create_task[**P, R](
-        self, fn: Callable[P, Awaitable[R]], /, *args: P.args, **kwargs: P.kwargs
-    ) -> Future[R]: ...
+    def create_task[**P, R](self, fn: Callable[P, Awaitable[R]], /, *args: P.args, **kwargs: P.kwargs) -> Future[R]: ...
     @overload
-    def create_task[**P, R](
-        self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
-    ) -> Future[R]: ...
-    def create_task(
-        self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any
-    ) -> Future[Any]:
+    def create_task[**P, R](self, fn: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> Future[R]: ...
+    def create_task(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future[Any]:
         """Submit ``fn(*args, **kwargs)`` to a worker thread. Returns a future.
 
         ``fn`` may be sync or async. Async callables are dispatched to
@@ -272,25 +243,15 @@ class TaskGroup:
         """
         with self._lock:
             if self._closed:
-                raise RuntimeError("TaskGroup is closed")
+                raise RuntimeError("TaskGroup is closed")  # TODO AnyIO ClosedResourceError ?
             self._pending += 1
         fut: Future[Any] = Future()
-        # Snapshot the caller's context now (matches Trio / AnyIO / asyncio
-        # ``to_thread`` semantics); each spawn captures independently.
+        # Snapshot the caller's context (matches Trio / AnyIO / asyncio semantics)
         task = Task(fut, fn, args, kwargs, self, contextvars.copy_context())
-        pool_idle = self._pool._idle
         while True:
-            try:
-                w = pool_idle.pop()
-            except IndexError:
-                # No idle worker — spawn a fresh one. ``submit`` on a fresh
-                # worker is guaranteed to succeed (``_alive=True``).
-                w = self._pool._spawn_worker_blocking()
-                w.submit(task)
+            if self._pool.get_idle_worker().submit(task):
                 return fut
-            if w.submit(task):
-                return fut
-            # Tombstone (self-died on idle timeout); pop the next one.
+            # Tombstone (worker self-died on idle timeout), pop the next one
 
     def _task_done(self) -> None:
         with self._cv:
@@ -305,3 +266,93 @@ class TaskGroup:
         # ``_task_done``'s acquire of ``_cv``, which always runs after
         # ``_record_error`` in the same task.
         self._errors.append(exc)
+
+
+def task_group(*, name: str | None = None) -> AbstractContextManager[TaskGroup]:
+    if pool := _current_pool.get(None):
+        return TaskGroup(pool, name=name)
+    raise RuntimeError(
+        "No active thread_pool() context. Wrap your code in "
+        "`async with thread_pool():` or run inside "
+        "`localpost.hosting.run_app()`."
+    )
+
+
+class AnyIOWorkerExecutor:
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
+        pass
+
+
+class AnyIOExecutor:
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
+        pass
+
+
+class WorkerExecutor:
+    def submit[R](fn: Callable[..., R], /, *args, **kwargs) -> Future[R]:
+        pass
+
+
+@final
+class WorkerPool:
+    def __init__(self, portal: BlockingPortal, host_tg: AioTaskGroup) -> None:
+        self._portal = portal
+        self._host_tg = host_tg
+        self._idle: deque[Worker] = deque()
+        self._limiter = CapacityLimiter(math.inf)
+        self._closed = False
+
+    def get_idle_worker(self) -> Worker:
+        try:
+            return self._idle.pop()
+        except IndexError:
+            return self._spawn_worker_blocking()
+
+    async def warmup(self, n: int, /) -> None:
+        """Pre-spawn ``n`` workers and park them in the idle deque.
+
+        Useful at startup to amortise OS thread-creation cost so the
+        first burst of work doesn't pay it.
+
+        Raises:
+            ValueError: ``n`` is negative.
+        """
+        if n < 0:
+            raise ValueError("count must be >= 0")
+        for _ in range(n):
+            w = self._spawn_worker()
+            self._idle.append(w)
+
+    def _spawn_worker(self) -> Worker:
+        """Create a worker (must be called from the event-loop thread)."""
+        w = Worker(self)
+        self._host_tg.start_soon(
+            functools.partial(
+                to_thread.run_sync,
+                w._run,
+                abandon_on_cancel=False,
+                limiter=self._limiter,
+            )
+        )
+        return w
+
+    def _spawn_worker_blocking(self) -> Worker:
+        if self._closed:
+            raise RuntimeError("pool is closed")
+        return self._portal.call(self._spawn_worker)
+
+    def _shutdown_all_workers(self) -> None:
+        self._closed = True
+        while self._idle:
+            self._idle.pop().wakeup()
+
+
+@asynccontextmanager
+async def thread_pool(portal: BlockingPortal, host_tg: AioTaskGroup) -> AsyncGenerator[WorkerPool]:
+    with set_cvar(_current_pool, WorkerPool(portal, host_tg)) as pool:
+        try:
+            yield pool
+        finally:
+            # At that point all the workers should be idle. Wake them up so they can exit promptly, otherwise they'd sit
+            # on the IDLE_TIMEOUT before the host task group could drain).
+            pool._shutdown_all_workers()
