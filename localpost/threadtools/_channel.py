@@ -4,7 +4,7 @@ import dataclasses as dc
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
-from typing import Self, final
+from typing import Protocol, Self, final, override
 
 from anyio import (
     ClosedResourceError,
@@ -40,6 +40,63 @@ class Channel[T]:
             state.open_receive_channels += 1
             rx = ReceiveChannel(state)
             return tx, rx
+
+
+class BaseReceiveChannel[T](Protocol):
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def __iter__(self) -> Iterator[T]:
+        while True:
+            try:
+                yield self.get()
+            except EndOfStream:
+                break
+
+    def clone(self) -> ReceiveChannel[T]: ...
+
+    # Raises:
+    #   EndOfStream - if the sender has been closed cleanly, and no more objects are coming. This is not an error
+    #       condition.
+    #   ClosedResourceError - if you previously closed this ReceiveChannel object.
+    #   BrokenResourceError - if something has gone wrong, and the channel is broken.
+    def get(self) -> T: ...
+
+    def close(self): ...
+
+
+class BaseSendChannel[T](Protocol):
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def clone(self) -> SendChannel[T]: ...
+
+    # Raises:
+    #   BrokenResourceError - if something has gone wrong, and the channel is broken. For example, you may get this if
+    #       the receiver has already been closed.
+    #   ClosedResourceError - if you previously closed this SendChannel object, or if another task closes it while
+    #       put() is running.
+    def put(self, item: T, /) -> None: ...
+
+    def close(self) -> None: ...
 
 
 @final
@@ -109,28 +166,14 @@ class ChannelState[T]:
 
 
 @final
-class SendChannel[T]:
+# TODO dataclass + repr
+class SendChannel[T](BaseSendChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
 
-    def __repr__(self) -> str:
-        state = self._state
-        return f"SendChannel(closed={self._closed}, capacity={state.capacity}, qsize={len(state.buffer)})"
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.close()
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        self.close()
-
-    def clone(self) -> SendChannel[T]:
+    @override
+    def clone(self):
         with self._state as state:
             if self._closed:
                 raise ClosedResourceError("send channel is already closed")
@@ -150,16 +193,8 @@ class SendChannel[T]:
                 state.pending_handoffs += 1
             state.not_empty.notify()
 
+    @override
     def put(self, item: T, /) -> None:
-        """Put ``item`` into the channel, blocking until there is space (or, for a rendezvous
-        channel, until a receiver consumes it).
-
-        Raises:
-            BrokenResourceError: Something has gone wrong and the channel is broken — for
-                example, the receiver has already been closed.
-            ClosedResourceError: This send channel was previously closed, or another task
-                closed it while ``put`` was running.
-        """
         state = self._state
         my_target = 0
         # Phase 1: wait for space in the buffer.
@@ -205,50 +240,22 @@ class SendChannel[T]:
 
 
 @final
-class ReceiveChannel[T]:
+# TODO dataclass + repr
+class ReceiveChannel[T](BaseReceiveChannel[T]):
     def __init__(self, state: ChannelState[T]) -> None:
         self._state = state
         self._closed = False
 
-    def __repr__(self) -> str:
-        state = self._state
-        return f"ReceiveChannel(closed={self._closed}, capacity={state.capacity}, qsize={len(state.buffer)})"
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.close()
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        self.close()
-
-    def __iter__(self) -> Iterator[T]:
-        while True:
-            try:
-                yield self.get()
-            except EndOfStream:
-                break
-
-    def clone(self) -> ReceiveChannel[T]:
+    @override
+    def clone(self):
         with self._state as state:
             if self._closed:
                 raise ClosedResourceError("receive channel is already closed")
             state.open_receive_channels += 1
         return ReceiveChannel(state)
 
+    @override
     def get(self) -> T:
-        """Get the next item from the channel, blocking until one is available.
-
-        Raises:
-            EndOfStream: The sender has been closed cleanly and no more items are
-                coming. This is not an error condition.
-            ClosedResourceError: This receive channel was previously closed.
-            BrokenResourceError: Something has gone wrong and the channel is broken.
-        """
         # Cancellation is observed inside ``state.__enter__`` (cancellable lock
         # acquire) and ``state.not_empty.wait`` (cancellable condition).
         state = self._state
@@ -271,6 +278,7 @@ class ReceiveChannel[T]:
                     state.waiting_receivers -= 1
         raise ClosedResourceError("receive channel has been closed")
 
+    @override
     def close(self) -> None:
         with self._state as state:
             if not self._closed:
