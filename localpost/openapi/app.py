@@ -204,9 +204,8 @@ class HttpApp:
         ``executor`` is the thread executor that runs handlers; pass an
         already-open :class:`localpost.threadtools.Executor` to share one
         across services. When omitted, an :class:`AsyncWorkerExecutor` is
-        opened on the hosting layer's
-        :class:`anyio.from_thread.BlockingPortal` for the lifetime of the
-        service — handlers can call
+        opened on the hosting layer's :class:`localpost.Portal` for the
+        lifetime of the service — handlers can call
         :func:`anyio.from_thread.check_cancelled` for free.
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.

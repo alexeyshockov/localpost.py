@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import threading
 from _contextvars import ContextVar
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import (
@@ -20,6 +19,7 @@ from anyio import CancelScope, CapacityLimiter, create_task_group, get_cancelled
 from anyio.abc import TaskGroup
 from anyio.from_thread import BlockingPortal
 
+from localpost._portal import Portal
 from localpost._utils import (
     Event,
     EventView,
@@ -113,9 +113,9 @@ class ServiceLifetimeView:
         return self._state.state
 
     @property
-    def portal(self) -> BlockingPortal:
-        """The hosting layer's :class:`BlockingPortal` (one per app, shared
-        with every nested service). Use it to compose
+    def portal(self) -> Portal:
+        """The hosting layer's :class:`Portal` (one per app, shared with
+        every nested service). Use it to compose
         :class:`localpost.threadtools.AsyncWorkerExecutor` /
         :class:`localpost.threadtools.AsyncExecutor` against the same loop
         that hosts the service.
@@ -124,17 +124,11 @@ class ServiceLifetimeView:
 
     def wait_started(self) -> None:
         """Helper for sync code, to wait in a thread."""
-        if self._state.same_thread:
-            raise RuntimeError("Deadlock: synchronous wait in the async thread")
-        # noinspection PyTypeChecker
-        return self._state.portal.start_task_soon(self.started.wait).result()
+        self._state.portal.run_async(self.started.wait)
 
     def wait_shutting_down(self) -> None:
         """Helper for sync code, to wait in a thread."""
-        if self._state.same_thread:
-            raise RuntimeError("Deadlock: synchronous wait in the async thread")
-        # noinspection PyTypeChecker
-        return self._state.portal.start_task_soon(self.shutting_down.wait).result()
+        self._state.portal.run_async(self.shutting_down.wait)
 
     @overload
     def cancel_on_shutdown[F: Callable[..., Any]](self) -> Callable[[F], F]: ...
@@ -163,19 +157,17 @@ class ServiceLifetimeView:
             self._state.shutdown_reason = reason
             self._state.shutting_down.set()
 
-        in_host_thread(self._state, do_shutdown)
+        self._state.portal.run_sync(do_shutdown)
 
     def stop(self) -> None:
-        in_host_thread(self._state, self._state.run_scope.cancel)
+        self._state.portal.run_sync(self._state.run_scope.cancel)
 
 
 @define(eq=False, unsafe_hash=True)
 class ServiceLifetime:
-    portal: BlockingPortal
+    portal: Portal
     tg: TaskGroup = field(default_factory=create_task_group)
     scope: AsyncExitStack = field(default_factory=AsyncExitStack)
-
-    thread_id: int = field(default_factory=threading.get_ident)
 
     started: Event = field(default_factory=Event)
     shutting_down: Event = field(default_factory=Event)
@@ -240,16 +232,12 @@ class ServiceLifetime:
             return Running()
         return Starting()
 
-    @property
-    def same_thread(self) -> bool:
-        return threading.get_ident() == self.thread_id
-
     def set_started(self) -> None:
         def do_set():
             assert not self.stopped, "Cannot mark already stopped service as started"
             self.started.set()
 
-        in_host_thread(self, do_set)
+        self.portal.run_sync(do_set)
 
     def set_shutting_down(self, reason: BaseException | str | None = None) -> None:
         def do_set():
@@ -258,7 +246,7 @@ class ServiceLifetime:
                 self.shutdown_reason = reason
                 self.shutting_down.set()
 
-        in_host_thread(self, do_set)
+        self.portal.run_sync(do_set)
 
     def start(self, svc_f: ServiceF, /) -> ServiceLifetimeView:
         """Start a child service from the given function."""
@@ -268,14 +256,7 @@ class ServiceLifetime:
             self.tg.start_soon(_run, svc_f, child_lt)
             return child_lt.view
 
-        return in_host_thread(self, do_start)
-
-
-def in_host_thread[R](h: ServiceLifetime, func: Callable[..., R], *args) -> R:
-    if h.same_thread:
-        return func(*args)
-    # noinspection PyTypeChecker
-    return h.portal.start_task_soon(func).result()
+        return self.portal.run_sync(do_start)
 
 
 ServiceF = Callable[[ServiceLifetime], Awaitable[None]]
@@ -445,11 +426,12 @@ async def _serve_root(svc: ServiceF) -> AsyncIterator[ServiceLifetimeView]:
         await child_lt.stopped
         wait_tg.cancel_scope.cancel()
 
-    async with BlockingPortal() as portal:
+    async with BlockingPortal() as raw_portal:
+        portal = Portal(raw_portal)
         child_lt = ServiceLifetime(portal)
         app_token = _app_lt.set(child_lt)
         try:
-            tg = portal._task_group
+            tg = raw_portal._task_group
             tg.start_soon(_run, svc, child_lt)
             # Wait for either started or stopped (service may fail before starting)
             async with create_task_group() as wait_tg:
@@ -500,7 +482,8 @@ async def run(svc_f: ServiceF, /, parent: ServiceLifetime | None = None) -> int:
         lt = ServiceLifetime(parent.portal)
         await _run(svc_f, lt)
         return lt.exit_code
-    async with BlockingPortal() as portal:
+    async with BlockingPortal() as raw_portal:
+        portal = Portal(raw_portal)
         lt = ServiceLifetime(portal)
         app_token = _app_lt.set(lt)
         try:

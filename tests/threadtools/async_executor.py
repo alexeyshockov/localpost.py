@@ -1,8 +1,8 @@
 """Tests for the AnyIO-backed executors.
 
 Both :class:`AsyncWorkerExecutor` and :class:`AsyncExecutor` are async
-context managers and require a caller-owned
-:class:`anyio.from_thread.BlockingPortal` running on the test's loop.
+context managers and require a caller-owned :class:`localpost.Portal`
+running on the test's loop.
 
 We pin both backends (``asyncio`` and ``trio``) for the cross-backend
 ``check_cancelled`` story; ``stop()`` must work the same on each.
@@ -19,8 +19,8 @@ import anyio
 import anyio.from_thread
 import anyio.to_thread
 import pytest
-from anyio.from_thread import BlockingPortal
 
+from localpost import Portal
 from localpost.threadtools import AsyncExecutor, AsyncWorkerExecutor
 
 # Both backends, on every test in this module.
@@ -28,15 +28,16 @@ pytestmark = pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
 
 
 @pytest.fixture
-async def portal() -> AsyncIterator[BlockingPortal]:
-    """A :class:`BlockingPortal` bound to the test's running event loop.
+async def portal() -> AsyncIterator[Portal]:
+    """A :class:`Portal` bound to the test's running event loop.
 
     Submits to async executors are sync calls that schedule onto the
-    portal's loop; they must be invoked from a non-loop thread (the test
-    body uses ``to_thread.run_sync`` to do that).
+    portal's loop. With :class:`Portal`, calls are safe from any thread —
+    on-loop they're direct, off-loop they hop through the underlying
+    :class:`BlockingPortal`.
     """
-    async with anyio.from_thread.BlockingPortal() as p:
-        yield p
+    async with anyio.from_thread.BlockingPortal() as raw:
+        yield Portal(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ async def portal() -> AsyncIterator[BlockingPortal]:
 # ---------------------------------------------------------------------------
 
 
-async def test_async_worker_executor_basic_submit(anyio_backend, portal: BlockingPortal):
+async def test_async_worker_executor_basic_submit(anyio_backend, portal: Portal):
     async with AsyncWorkerExecutor(portal=portal) as ex:
         # ``submit`` and ``Future.result`` must both run off the loop thread.
         fut: Future[int] = await anyio.to_thread.run_sync(ex.submit, lambda: 42)
@@ -52,7 +53,7 @@ async def test_async_worker_executor_basic_submit(anyio_backend, portal: Blockin
         assert result == 42
 
 
-async def test_async_worker_executor_check_cancelled_callable_in_task(anyio_backend, portal: BlockingPortal):
+async def test_async_worker_executor_check_cancelled_callable_in_task(anyio_backend, portal: Portal):
     """``from_thread.check_cancelled`` is callable inside a task running on an
     :class:`AsyncWorkerExecutor` worker — i.e. AnyIO's threadlocals are wired up.
     """
@@ -70,7 +71,7 @@ async def test_async_worker_executor_check_cancelled_callable_in_task(anyio_back
     assert polled.is_set()
 
 
-async def test_async_worker_executor_stop_propagates_to_running_task(anyio_backend, portal: BlockingPortal):
+async def test_async_worker_executor_stop_propagates_to_running_task(anyio_backend, portal: Portal):
     """:meth:`stop` cancels the internal task group; running tasks polling
     ``check_cancelled`` raise on their next checkpoint."""
     saw_cancel = threading.Event()
@@ -103,14 +104,14 @@ async def test_async_worker_executor_stop_propagates_to_running_task(anyio_backe
 # ---------------------------------------------------------------------------
 
 
-async def test_async_executor_basic_submit(anyio_backend, portal: BlockingPortal):
+async def test_async_executor_basic_submit(anyio_backend, portal: Portal):
     async with AsyncExecutor(portal=portal) as ex:
         fut: Future[int] = await anyio.to_thread.run_sync(ex.submit, lambda: 7 * 6)
         result = await anyio.to_thread.run_sync(fut.result, 5)
         assert result == 42
 
 
-async def test_async_executor_propagates_exception(anyio_backend, portal: BlockingPortal):
+async def test_async_executor_propagates_exception(anyio_backend, portal: Portal):
     class Boom(Exception):
         pass
 
@@ -127,7 +128,7 @@ async def test_async_executor_propagates_exception(anyio_backend, portal: Blocki
             await anyio.to_thread.run_sync(get_result)
 
 
-async def test_async_executor_capacity_limiter(anyio_backend, portal: BlockingPortal):
+async def test_async_executor_capacity_limiter(anyio_backend, portal: Portal):
     """``max_concurrency`` is enforced via :class:`anyio.CapacityLimiter`."""
     n_concurrent = 0
     max_seen = 0
@@ -149,7 +150,7 @@ async def test_async_executor_capacity_limiter(anyio_backend, portal: BlockingPo
     assert max_seen <= 2
 
 
-async def test_async_executor_stop_cancels_all_inflight(anyio_backend, portal: BlockingPortal):
+async def test_async_executor_stop_cancels_all_inflight(anyio_backend, portal: Portal):
     cancelled_count = 0
     cancelled_lock = threading.Lock()
     started = threading.Event()

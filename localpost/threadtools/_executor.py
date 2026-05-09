@@ -21,9 +21,9 @@ different lifecycle and cancellation properties:
 All three propagate :class:`contextvars.Context` to the task, matching
 :func:`asyncio.to_thread` / Trio / AnyIO spawn semantics.
 
-The async variants take a caller-owned :class:`anyio.from_thread.BlockingPortal`
-and run their internal :class:`anyio.abc.TaskGroup` on the portal's loop. They
-expose :meth:`stop` for explicit cooperative cancellation.
+The async variants take a caller-owned :class:`localpost.Portal` and run
+their internal :class:`anyio.abc.TaskGroup` on its loop. They expose
+:meth:`stop` (safe from any thread) for cooperative cancellation.
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ from anyio import (
     to_thread,
 )
 from anyio.abc import TaskGroup as AioTaskGroup
-from anyio.from_thread import BlockingPortal
+
+from localpost._portal import Portal
 
 from ._channel import Channel, ReceiveChannel, SendChannel
 
@@ -262,7 +263,7 @@ class AsyncWorkerExecutor:
     def __init__(
         self,
         *,
-        portal: BlockingPortal,
+        portal: Portal,
         max_concurrency: float = math.inf,
         backlog: int | None = 0,
         idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
@@ -285,7 +286,7 @@ class AsyncWorkerExecutor:
         self._closed = False
 
     @property
-    def portal(self) -> BlockingPortal:
+    def portal(self) -> Portal:
         return self._portal
 
     @property
@@ -323,24 +324,20 @@ class AsyncWorkerExecutor:
 
     def stop(self) -> None:
         """Cooperatively shut down: close the channel and cancel the internal
-        task group. Idempotent.
+        task group. Safe from any thread. Idempotent.
 
         Idle workers wake via the channel close; active tasks see their next
         :func:`anyio.from_thread.check_cancelled` raise. Tasks that don't poll
         run to natural completion.
-
-        Like :meth:`submit`, this must be called from a non-loop thread —
-        from inside ``async`` code, wrap with ``await anyio.to_thread.run_sync(ex.stop)``.
         """
-        if self._tg is None:
+        if (tg := self._tg) is None:
             return
         # The channel uses thread locks; closing is safe from any thread.
         try:
             self._tx.close()
         except ClosedResourceError:
             pass
-        tg = self._tg
-        self._portal.call(tg.cancel_scope.cancel)
+        self._portal.run_sync(tg.cancel_scope.cancel)
 
     def submit[**P, R](
         self,
@@ -373,7 +370,7 @@ class AsyncWorkerExecutor:
             await to_thread.run_sync(self._run_worker, rx, abandon_on_cancel=False)
 
         # Schedule the host task into our internal task group from any thread.
-        self._portal.call(tg.start_soon, host_task)
+        self._portal.run_sync(tg.start_soon, host_task)
 
     def _run_worker(self, rx: ReceiveChannel[Task]) -> None:
         try:
@@ -426,7 +423,7 @@ class AsyncExecutor:
     def __init__(
         self,
         *,
-        portal: BlockingPortal,
+        portal: Portal,
         max_concurrency: float = math.inf,
     ) -> None:
         if max_concurrency <= 0:
@@ -440,7 +437,7 @@ class AsyncExecutor:
         self._closed = False
 
     @property
-    def portal(self) -> BlockingPortal:
+    def portal(self) -> Portal:
         return self._portal
 
     async def __aenter__(self) -> Self:
@@ -474,10 +471,8 @@ class AsyncExecutor:
         """Cancel every in-flight submit by cancelling the internal task group.
         Safe from any thread. Idempotent.
         """
-        if self._tg is None:
-            return
-        tg = self._tg
-        self._portal.call(tg.cancel_scope.cancel)
+        if (tg := self._tg) is not None:
+            self._portal.run_sync(tg.cancel_scope.cancel)
 
     def submit[**P, R](
         self,
@@ -505,5 +500,5 @@ class AsyncExecutor:
             else:
                 task.future.set_result(cast("Any", result))
 
-        self._portal.call(tg.start_soon, runner)
+        self._portal.run_sync(tg.start_soon, runner)
         return task.future

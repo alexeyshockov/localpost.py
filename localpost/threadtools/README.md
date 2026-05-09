@@ -4,6 +4,7 @@ Thread-friendly building blocks for moving work off the event loop:
 
 - [`Channel`](#channel) — a typed, thread-safe queue with `timeout` on `put` / `get` and broadcast-on-close.
 - [`Executor`](#executors) — three implementations, one `submit` contract.
+- [`Portal`](#portal) — thread-aware view over `anyio.from_thread.BlockingPortal`.
 - [`TaskGroup`](#taskgroup) — Trio-style structured concurrency over an `Executor`.
 - [`run_async`](#run_async) — sync→async bridge: dispatch a coroutine onto the current service's loop from a worker thread.
 
@@ -55,21 +56,27 @@ Same channel / lazy-spawn shape as `WorkerExecutor`, but workers run inside `any
 The worker's cancel scope spans its whole lifetime (one worker handles many tasks), so cancellation granularity is **per-worker**, not per-task. Use `stop()` for fast cooperative shutdown.
 
 ```python
-async with anyio.from_thread.BlockingPortal() as portal:
+from localpost import Portal
+
+async with anyio.from_thread.BlockingPortal() as raw_portal:
+    portal = Portal(raw_portal)
     async with AsyncWorkerExecutor(portal=portal) as ex:
         fut = await anyio.to_thread.run_sync(ex.submit, work, x)
         # …
-        await anyio.to_thread.run_sync(ex.stop)   # cancel everything
+        ex.stop()                                  # safe from any thread
 ```
 
-`submit` and `stop` must be invoked from a non-loop thread (use `await anyio.to_thread.run_sync(…)` from inside async code).
+`submit` and `stop` are safe to call from any thread — the wrapping `Portal` does the on-loop / off-loop dispatch internally.
 
 ### `AsyncExecutor` — fresh AnyIO task per submit
 
 Every `submit` schedules a fresh AnyIO task on the executor's internal task group; concurrency is gated by an `anyio.CapacityLimiter` (`math.inf` = no cap). Cancellation is **per-task**: `Future.cancel()` propagates to the underlying task's `check_cancelled`.
 
 ```python
-async with anyio.from_thread.BlockingPortal() as portal:
+from localpost import Portal
+
+async with anyio.from_thread.BlockingPortal() as raw_portal:
+    portal = Portal(raw_portal)
     async with AsyncExecutor(portal=portal, max_concurrency=4) as ex:
         fut = await anyio.to_thread.run_sync(ex.submit, work, x)
         # cancel just this task:
@@ -109,11 +116,26 @@ def worker(user_id: int) -> str:
     return user.name
 ```
 
-Resolves the portal via `localpost.hosting.current_service`, so the calling thread must inherit the hosting context (true for any thread spawned through AnyIO or the executors above). Must be called from a non-loop thread; on the loop thread the underlying `BlockingPortal.call` raises `RuntimeError`.
+Resolves the portal via `localpost.hosting.current_service`, so the calling thread must inherit the hosting context (true for any thread spawned through AnyIO or the executors above). Must be called from a non-loop thread; raises `RuntimeError` otherwise (would deadlock the loop).
+
+## Portal
+
+`Portal` wraps `anyio.from_thread.BlockingPortal` with loop-thread awareness. Construct it on the loop thread (it snapshots `threading.get_ident()` at creation), then pass it to `AsyncWorkerExecutor` / `AsyncExecutor` or any code that needs to schedule onto the loop without caring about the calling thread.
+
+```python
+from localpost import Portal
+
+portal.same_thread             # is the current thread the loop thread?
+portal.run_sync(fn, *args)     # call sync fn on the loop, return its result
+portal.run_async(coro, *args)  # await coro on the loop, off-loop only
+portal.raw                     # underlying BlockingPortal (escape hatch)
+```
+
+`run_sync` does the right thing in either direction: direct call on-loop, `BlockingPortal.call` off-loop. `run_async` raises `RuntimeError` on the loop thread instead of deadlocking.
 
 ## Composing with `localpost.hosting`
 
-`localpost.hosting._serve_root` already runs a single `BlockingPortal` for the whole app. It's exposed on the service lifetime view so you can layer an executor on top of it without opening a second portal:
+`localpost.hosting._serve_root` already runs a single `Portal` for the whole app. It's exposed on the service lifetime view so you can layer an executor on top of it without opening a second portal:
 
 ```python
 from localpost import hosting

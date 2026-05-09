@@ -2,6 +2,7 @@ import logging
 from importlib.metadata import PackageNotFoundError, version
 
 from ._debug import debug
+from ._portal import Portal
 from ._utils import Result
 
 try:
@@ -10,7 +11,7 @@ except PackageNotFoundError:
     __version__ = "dev"
 
 
-__all__ = ["Result", "__version__", "debug"]
+__all__ = ["Portal", "Result", "__version__", "debug"]
 
 
 # Set up logging according to the best practices:

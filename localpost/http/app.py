@@ -308,9 +308,9 @@ class HttpApp:
         :class:`localpost.threadtools.Executor` to share one across
         services. When omitted (and ``pooled=True``), an
         :class:`AsyncWorkerExecutor` is opened on the hosting layer's
-        :class:`anyio.from_thread.BlockingPortal` for the lifetime of the
-        service — handlers can call
-        :func:`anyio.from_thread.check_cancelled` for free.
+        :class:`localpost.Portal` for the lifetime of the service —
+        handlers can call :func:`anyio.from_thread.check_cancelled` for
+        free.
 
         ``selectors`` and ``acceptor`` forward to :func:`http_server`.
         """

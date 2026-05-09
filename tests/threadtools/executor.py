@@ -2,7 +2,7 @@
 
 The Async variants (``AsyncWorkerExecutor`` / ``AsyncExecutor``) live in
 ``async_executor.py`` since they're async context managers and need a
-:class:`anyio.from_thread.BlockingPortal`.
+:class:`localpost.Portal`.
 """
 
 from __future__ import annotations

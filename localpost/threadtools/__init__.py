@@ -1,6 +1,6 @@
-import functools
 from collections.abc import Awaitable, Callable
 
+from localpost._portal import Portal
 from localpost.hosting import current_service
 
 from ._channel import Channel, ReceiveChannel, SendChannel
@@ -19,6 +19,7 @@ __all__ = [
     "AsyncWorkerExecutor",
     "Channel",
     "Executor",
+    "Portal",
     "ReceiveChannel",
     "SendChannel",
     "TaskGroup",
@@ -41,9 +42,7 @@ def run_async[**P, R](
     :class:`contextvars.Context` must carry the hosting context (true for any
     thread spawned through AnyIO / the threadtools executors).
 
-    Must be called from a non-loop thread; the underlying
-    :meth:`anyio.from_thread.BlockingPortal.call` raises ``RuntimeError`` if
-    invoked from the loop thread.
+    Must be called from a non-loop thread; raises :class:`RuntimeError`
+    otherwise (would deadlock the loop).
     """
-    portal = current_service().portal
-    return portal.start_task_soon(functools.partial(func, **kwargs), *args).result()
+    return current_service().portal.run_async(func, *args, **kwargs)
