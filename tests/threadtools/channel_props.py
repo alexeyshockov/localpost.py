@@ -5,9 +5,11 @@ These complement the example-based / threaded tests in ``channels.py``.
 Scope:
     Single-threaded ``RuleBasedStateMachine`` driving sequences of
     ``put_nowait`` / ``get`` / ``close`` / ``clone`` against a small reference
-    model (deque + counters). Catches state-tracking regressions —
-    ``open_send_channels``, ``open_receive_channels``, buffer length, capacity
-    bound — under arbitrary op orderings.
+    model (deque + counters). Every assertion goes through the public
+    ``SendChannel`` / ``ReceiveChannel`` Protocol — no white-box access. The
+    machine catches state-tracking regressions only via observable behavior:
+    EOS after senders close, ``WouldBlock`` at capacity, ``ClosedResourceError``
+    on closed handles, FIFO order under a single producer.
 
 Out of scope:
     Rendezvous (``capacity=0``) and any property that depends on thread
@@ -33,7 +35,6 @@ from hypothesis.stateful import (
 )
 
 from localpost.threadtools import Channel
-from localpost.threadtools._channel import _SendChannel
 
 
 class _ChannelMachine(RuleBasedStateMachine):
@@ -56,11 +57,6 @@ class _ChannelMachine(RuleBasedStateMachine):
         s, r = Channel.create(capacity=self.capacity)
         self._first_sender = s
         self._first_receiver = r
-        # Property tests check invariants against the channel's internal state
-        # directly. ``Channel.create`` returns the public Protocol type;
-        # narrow to the concrete impl so the type checker accepts ``_state``.
-        assert isinstance(s, _SendChannel)
-        self._state = s._state
         self.model_buffer: deque = deque()
         self.model_open_senders = 1
         self.model_open_receivers = 1
@@ -175,25 +171,6 @@ class _ChannelMachine(RuleBasedStateMachine):
             r.clone()
 
     # --- invariants ---------------------------------------------------------
-
-    @invariant()
-    def open_handle_counters_match_model(self):
-        assert self._state.open_send_channels == self.model_open_senders
-        assert self._state.open_receive_channels == self.model_open_receivers
-
-    @invariant()
-    def buffer_length_matches_model(self):
-        assert len(self._state.buffer) == len(self.model_buffer)
-
-    @invariant()
-    def buffer_within_capacity(self):
-        if self.capacity is not None:
-            assert len(self._state.buffer) <= self.capacity
-
-    @invariant()
-    def waiting_receivers_zero_in_single_thread(self):
-        # No thread ever blocks in get() here, so this should never grow.
-        assert self._state.waiting_receivers == 0
 
     @invariant()
     def fifo_under_single_producer(self):
