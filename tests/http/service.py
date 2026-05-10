@@ -413,6 +413,7 @@ class TestAcceptorTopology:
         ``RoundRobinAcceptor.__call__``) and *driven* on the worker thread.
         Smoke-tests that the parser instance survives the move.
         """
+        pytest.importorskip("httptools")
         cfg = ServerConfig(host="127.0.0.1", port=free_port, backend="httptools")
         async with serve(http_server(cfg, _handler_200(b"hi"), selectors=4, acceptor=True)) as lt:
             await lt.started

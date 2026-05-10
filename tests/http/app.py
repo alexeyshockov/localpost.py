@@ -405,11 +405,19 @@ class TestWorkerPool:
         not the selector thread."""
         seen: list[int] = []
         lock = threading.Lock()
+        # Hold each in-flight handler until a second one arrives, forcing
+        # the pool to spawn a second worker. Otherwise a single fast worker
+        # may serve all 8 requests sequentially (race seen on 3.12).
+        barrier = threading.Barrier(2, timeout=2.0)
 
         app = HttpApp()
 
         @app.get("/tid")
         def tid():
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
             with lock:
                 seen.append(threading.get_ident())
             return "x"
