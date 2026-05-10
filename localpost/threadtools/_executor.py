@@ -360,7 +360,8 @@ class AsyncExecutor:
         # portal's loop (the only loop ``tg.start_soon`` can target via ``portal``), so
         # ``get_async_backend()`` is satisfied. Loop-affinity is set by ``__aenter__``.
         self._tg = create_task_group()
-        self._limiter = CapacityLimiter(max_concurrency)
+        self._limiter = limiter = CapacityLimiter(max_concurrency)
+        self._to_thread = functools.partial(to_thread.run_sync, limiter=limiter)
         self._opened = False
         self._closed = False
 
@@ -406,18 +407,5 @@ class AsyncExecutor:
         if not self._opened or self._closed:
             raise RuntimeError("AsyncExecutor is not open")
         task = Task(fn, args, kwargs)
-        limiter = self._limiter
-
-        async def runner() -> None:
-            if not task.future.set_running_or_notify_cancel():
-                return
-            bound = functools.partial(task.context.run, task.fn, *task.args, **task.kwargs)
-            try:
-                result = await to_thread.run_sync(bound, limiter=limiter, abandon_on_cancel=False)
-            except BaseException as exc:  # noqa: BLE001
-                task.future.set_exception(exc)
-            else:
-                task.future.set_result(cast("Any", result))
-
-        self._portal.run_sync(self._tg.start_soon, runner)
+        self._portal.run_sync(self._tg.start_soon, self._to_thread, task.run)
         return task.future
