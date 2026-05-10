@@ -240,7 +240,7 @@ class HttpApp:
         :func:`localpost.http.check_cancelled` is a no-op (no socket
         handle inside the WSGI app).
         """
-        from localpost.http.wsgi import to_wsgi
+        from localpost.http.wsgi import to_wsgi  # noqa: PLC0415
 
         return to_wsgi(self._build_router_handler())
 

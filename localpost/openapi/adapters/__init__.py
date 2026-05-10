@@ -162,17 +162,17 @@ def default_registry() -> AdapterRegistry:
     Order: pydantic (if importable), attrs (if both ``attrs`` and ``cattrs`` are importable),
     then msgspec as the catch-all. Cached.
     """
-    from localpost.openapi.adapters._msgspec import MsgspecAdapter
+    from localpost.openapi.adapters._msgspec import MsgspecAdapter  # noqa: PLC0415
 
     adapters: list[TypeAdapter] = []
     try:
-        from localpost.openapi.adapters._pydantic import PydanticAdapter
+        from localpost.openapi.adapters._pydantic import PydanticAdapter  # noqa: PLC0415
 
         adapters.append(PydanticAdapter())
     except ImportError:
         pass
     try:
-        from localpost.openapi.adapters._attrs import AttrsAdapter
+        from localpost.openapi.adapters._attrs import AttrsAdapter  # noqa: PLC0415
 
         adapters.append(AttrsAdapter())
     except ImportError:

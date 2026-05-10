@@ -309,7 +309,7 @@ def extract_response_shapes(return_annotation: Any) -> tuple[list[ResponseShape]
     # with at least one non-None success type (a bare ``-> None`` annotation
     # still means "204 / empty success", not 404), and only when the user
     # didn't already declare 404 explicitly via ``NotFound[X]``.
-    from localpost.openapi.results import NotFound as _NotFound
+    from localpost.openapi.results import NotFound as _NotFound  # noqa: PLC0415
 
     null_is_not_found = has_none and has_success and 404 not in seen_codes
     if null_is_not_found:

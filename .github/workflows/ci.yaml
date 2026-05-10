@@ -101,6 +101,9 @@ jobs:
         timeout-minutes: 5
         env:
           PYTHON_GIL: "0"  # fail loudly if any imported C ext re-enables the GIL
-        # Skip ``tests/openapi`` — those tests require the ``openapi`` extra
-        # (msgspec C extension) which isn't covered by the FT-clean subset.
-        run: uv run --python 3.14t pytest -v -m "not integration" --ignore=tests/openapi
+        # Skip ``tests/openapi`` (msgspec C ext) and ``tests/hosting/rsgi.py``
+        # (exercises Granian hooks; granian C ext not in the FT subset).
+        run: >
+          uv run --python 3.14t pytest -v -m "not integration"
+          --ignore=tests/openapi
+          --ignore=tests/hosting/rsgi.py

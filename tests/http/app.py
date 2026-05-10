@@ -552,6 +552,7 @@ class TestStreamingRoutes:
         writes (so the parser only sees headers in the selector's first
         feed). The worker must pull the rest through the parser via
         ``ctx.receive`` → ``sock.recv`` → ``feed_data`` → ``on_body``."""
+        pytest.importorskip("httptools")
         captured: dict = {}
 
         app = HttpApp()
@@ -601,6 +602,7 @@ class TestStreamingRoutes:
 
     async def test_httptools_deferred_streaming_dispatch_sees_current_feed_body(self, free_port):
         """httptools starts streaming work after callbacks from the current feed finish."""
+        pytest.importorskip("httptools")
         captured: dict = {}
 
         def handler(ctx: HTTPReqCtx):
@@ -653,6 +655,7 @@ class TestStreamingRoutes:
         """After a streaming POST, the same connection serves a regular
         GET. Verifies parser state is consistent after streaming — the
         next request parses cleanly without any reset / replace."""
+        pytest.importorskip("httptools")
         captured: list[str] = []
 
         app = HttpApp()

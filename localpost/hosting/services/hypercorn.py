@@ -15,9 +15,9 @@ def hypercorn_server(app, config: hypercorn.Config, /) -> ServiceF:
         # ``asyncio`` ``serve`` modules and we pick one based on the running
         # event loop. A top-level import would force one backend at import time.
         if current_async_library() == "trio":
-            from hypercorn.trio import serve
+            from hypercorn.trio import serve  # noqa: PLC0415
         else:
-            from hypercorn.asyncio import serve  # type: ignore[assignment]
+            from hypercorn.asyncio import serve  # type: ignore[assignment]  # noqa: PLC0415
         observed_app = report_started(sl.started, app)
         return serve(observed_app, config, shutdown_trigger=sl.shutting_down.wait)
 

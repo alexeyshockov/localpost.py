@@ -366,9 +366,7 @@ class _HTTPReqCtx:
         # the real bytes go on the wire via ``socket.sendfile`` below.
         # h11 supports placeholders in ``Data`` events for sendfile — see
         # ``h11.Data.data`` docstring. Type-checkers see ``data: bytes``.
-        placeholder_event = h11.Data(
-            data=_SendfilePlaceholder(count)
-        )  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
+        placeholder_event = h11.Data(data=_SendfilePlaceholder(count))  # ty: ignore[invalid-argument-type]  # type: ignore[arg-type]
         self.conn.parser.send_with_data_passthrough(placeholder_event)
         if self._pending_header_bytes is not None:
             self._sock_sendall(self._pending_header_bytes)

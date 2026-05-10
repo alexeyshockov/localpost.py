@@ -479,7 +479,7 @@ def _native_stream(ctx: _NativeReqCtx, response: Response, chunks: Iterator[byte
     available" and silently skipped.
     """
     # Local import to avoid the import cycle (cancel imports HTTPReqCtx).
-    from localpost.http._cancel import RequestCancelled, check_cancelled
+    from localpost.http._cancel import RequestCancelled, check_cancelled  # noqa: PLC0415
 
     ctx.start_response(response)
     try:
@@ -1230,10 +1230,10 @@ def start_http_server(config: ServerConfig, handler: RequestHandler, /) -> Abstr
     """
     backend = config.backend
     if backend == "h11":
-        from localpost.http.server_h11 import HTTPConn
+        from localpost.http.server_h11 import HTTPConn  # noqa: PLC0415
     elif backend == "httptools":
         try:
-            from localpost.http.server_httptools import HTTPConn
+            from localpost.http.server_httptools import HTTPConn  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "httptools backend requires the [http-fast] extra (pip install localpost[http-fast])"

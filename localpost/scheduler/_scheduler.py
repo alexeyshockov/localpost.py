@@ -43,7 +43,7 @@ logger = logging.getLogger("localpost.scheduler")
 @final
 @dc.dataclass()
 class Task(
-    Generic[T, R],
+    Generic[T, R],  # noqa: UP046
     AbstractAsyncContextManager[Callable[[T], Awaitable[None]]],
 ):
     name: str
@@ -130,7 +130,7 @@ class ScheduledTaskTemplate[T]:
         return self.tf(*args, **kwargs)
 
     def __truediv__(self, middleware: TriggerFactoryMiddleware[T, T2]) -> ScheduledTaskTemplate[T2]:
-        from ._trigger import trigger_factory_middleware
+        from ._trigger import trigger_factory_middleware  # noqa: PLC0415
 
         return self // trigger_factory_middleware(middleware)
 
@@ -198,7 +198,7 @@ type TriggerFactoryMiddleware[T, T2] = Callable[[Trigger[T], ScheduledTask], Asy
 type TriggerFactoryDecorator[T, T2] = Callable[[TriggerFactory[T]], TriggerFactory[T2]]
 
 
-def scheduled_task(
+def scheduled_task(  # noqa: UP047
     tf: TriggerFactory[T], /, *, name: str | None = None
 ) -> Callable[[TaskHandler[T, R] | Task[T, R]], _ScheduledTask[T, R]]:
     """

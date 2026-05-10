@@ -202,7 +202,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
         return value
     if isinstance(value, str):
         try:
-            import pytimeparse2
+            import pytimeparse2  # noqa: PLC0415
 
             use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
             try:
@@ -223,7 +223,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
 
 def td_str(td: timedelta, /) -> str:
     try:
-        from humanize import precisedelta
+        from humanize import precisedelta  # noqa: PLC0415
 
         # 23 seconds or 0.24 seconds
         return precisedelta(td)

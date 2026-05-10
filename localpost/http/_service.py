@@ -62,12 +62,12 @@ def _pick_conn_factory(backend: str):
     acceptor topology, where we wire :class:`RoundRobinAcceptor` directly
     instead of going through ``start_http_server``."""
     if backend == "h11":
-        from localpost.http.server_h11 import HTTPConn
+        from localpost.http.server_h11 import HTTPConn  # noqa: PLC0415
 
         return HTTPConn
     if backend == "httptools":
         try:
-            from localpost.http.server_httptools import HTTPConn
+            from localpost.http.server_httptools import HTTPConn  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "httptools backend requires the [http-fast] extra (pip install localpost[http-fast])"
