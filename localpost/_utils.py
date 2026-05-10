@@ -30,13 +30,11 @@ import anyio
 from anyio import (
     CancelScope,
     CapacityLimiter,
-    create_memory_object_stream,
     create_task_group,
     from_thread,
     to_thread,
 )
 from anyio.abc import TaskGroup
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 # Sentinel object, to indicate that a value is not set (see https://python-patterns.guide/python/sentinel-object)
 NOT_SET: Final = object()
@@ -289,14 +287,6 @@ def ensure_delay_factory(delay: DelayFactory, /) -> Callable[[], timedelta]:
 def sleep(i: timedelta | int | float | None, /) -> Coroutine[Any, Any, None]:
     interval_sec: float = i.total_seconds() if isinstance(i, timedelta) else 0 if i is None else i
     return anyio.sleep(interval_sec)
-
-
-# Thin generic-over-T wrapper around ``create_memory_object_stream`` so callers
-# get parameterised stream pairs without touching ``cast`` themselves.
-class MemoryStream[T]:
-    @staticmethod
-    def create(max_buffer_size: float = 0) -> tuple[MemoryObjectSendStream[T], MemoryObjectReceiveStream[T]]:
-        return create_memory_object_stream(max_buffer_size)
 
 
 class AsyncBackendConfig(TypedDict):

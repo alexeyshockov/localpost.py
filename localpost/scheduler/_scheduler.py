@@ -8,13 +8,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, cast, final
 
-from anyio import BrokenResourceError, WouldBlock, to_thread
+from anyio import BrokenResourceError, WouldBlock, create_memory_object_stream, to_thread
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from localpost._utils import (
     Event,
     EventView,
-    MemoryStream,
     Result,
     def_full_name,
     is_async_callable,
@@ -77,7 +76,7 @@ class Task(
             # Task is one-shot: once the last user has exited, the underlying ExitStack is closed and
             # cannot be re-entered. A fresh subscriber would silently never receive anything.
             raise RuntimeError(f"Cannot subscribe to {self!r}: task has already finished")
-        send_stream, receive_stream = MemoryStream[Result[R]].create(buffer_max_size)
+        send_stream, receive_stream = create_memory_object_stream[Result[R]](buffer_max_size)
         self._subscribers.append(self._cm.enter_context(send_stream))
         return receive_stream
 

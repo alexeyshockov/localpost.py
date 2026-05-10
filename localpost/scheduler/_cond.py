@@ -12,6 +12,7 @@ from anyio import (
     BrokenResourceError,
     EndOfStream,
     WouldBlock,
+    create_memory_object_stream,
     create_task_group,
     get_cancelled_exc_class,
 )
@@ -19,7 +20,6 @@ from anyio import (
 from localpost._utils import (
     TD_ZERO,
     EventView,
-    MemoryStream,
     Result,
     cancellable_from,
     ensure_td,
@@ -36,7 +36,7 @@ logger = logging.getLogger("localpost.scheduler.cond")
 
 @asynccontextmanager
 async def wait_trigger(time_spans: Iterable[timedelta], shutting_down: EventView):
-    events, events_reader = MemoryStream[None].create(0)
+    events, events_reader = create_memory_object_stream[None](0)
 
     @cancellable_from(shutting_down)  # DO NOT cancel the main task group
     async def generate():
