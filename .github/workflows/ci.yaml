@@ -89,13 +89,18 @@ jobs:
         # --no-default-groups + narrow opt-in: avoid C extensions that
         # re-enable the GIL on 3.14t (httptools 0.7.x, grpcio, granian,
         # setproctitle). Covers the pure-Python core that the FT marking
-        # actually claims.
+        # actually claims. ``dev-http`` (httpx, flask), ``dev-sentry``
+        # (sentry-sdk), and the ``click`` extra are pure Python — pulled in so
+        # tests/http and tests/hosting/services collect cleanly.
         run: >
           uv sync --python 3.14t --no-default-groups
           --group tests --group tests-unit
-          --extra http --extra scheduler --extra cron
+          --group dev-http --group dev-sentry
+          --extra http --extra scheduler --extra cron --extra click
       - name: pytest
         timeout-minutes: 5
         env:
           PYTHON_GIL: "0"  # fail loudly if any imported C ext re-enables the GIL
-        run: uv run --python 3.14t pytest -v -m "not integration"
+        # Skip ``tests/openapi`` — those tests require the ``openapi`` extra
+        # (msgspec C extension) which isn't covered by the FT-clean subset.
+        run: uv run --python 3.14t pytest -v -m "not integration" --ignore=tests/openapi

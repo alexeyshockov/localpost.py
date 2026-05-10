@@ -619,7 +619,16 @@ class TestDispatchLoad:
     async def test_many_requests_served_from_worker_threads(self, free_port):
         cfg = ServerConfig(host="127.0.0.1", port=free_port)
 
+        # Hold each handler in flight until the second one arrives so the pool
+        # is forced to spawn a second worker. Without this, the single worker
+        # can finish each request fast enough to handle all 10 sequentially.
+        barrier = threading.Barrier(2, timeout=2.0)
+
         def handler(ctx: HTTPReqCtx):
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                pass
             tid = str(threading.get_ident()).encode()
             ctx.complete(
                 Response(status_code=200, headers=[(b"content-length", str(len(tid)).encode())]),

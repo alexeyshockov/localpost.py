@@ -96,6 +96,12 @@ dev = [
 
     "vulture ~=2.14",
 ]
+dev-tools = [
+    # Linters / type checkers used by ``just check``, ``just format``, and CI.
+    "ruff ~=0.15",
+    "ty ~=0.0.34",
+    "basedpyright ~=1.39",
+]
 dev-hosting-services = [
     "uvicorn ~=0.30",
     "hypercorn ~=0.17",
