@@ -160,7 +160,7 @@ class _FunctionMiddleware:
         return self.root_contribution(doc, registry)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
-        from localpost.openapi._operation_core import build_responses  # noqa: PLC0415
+        from localpost.openapi._operation_core import build_responses
 
         # Parameters / requestBody come from the resolver factories.
         for _name, param, factory in self.arg_factories:
@@ -210,8 +210,8 @@ def op_middleware(fn: Callable[..., Any]) -> _FunctionMiddleware:
     the operation already declared). A bare ``OpResult`` member of the
     return union is the passthrough sentinel and contributes nothing.
     """
-    from localpost.http import HTTPReqCtx  # noqa: PLC0415
-    from localpost.openapi._operation_core import build_arg_resolvers, extract_response_shapes  # noqa: PLC0415
+    from localpost.http import HTTPReqCtx
+    from localpost.openapi._operation_core import build_arg_resolvers, extract_response_shapes
 
     call_next_param = _identify_call_next_param(fn)
     sig, runtime, factories = build_arg_resolvers(

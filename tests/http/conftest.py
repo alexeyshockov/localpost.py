@@ -25,7 +25,7 @@ def http_backend(request) -> Backend:
     name: Backend = request.param
     if name == "httptools":
         try:
-            import httptools  # noqa: F401, PLC0415
+            import httptools  # noqa: F401
         except ImportError as e:
             pytest.skip(str(e))
     return name

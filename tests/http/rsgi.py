@@ -144,7 +144,7 @@ def _build_ctx(*, body: bytes = b"", proto: _FakeProto | None = None) -> _RSGIRe
     behaves as if the bridge had read exactly those bytes from upstream
     and observed EOM.
     """
-    from localpost.http._types import Request  # noqa: PLC0415
+    from localpost.http._types import Request
 
     request = Request(b"GET", b"/", b"/", b"", [])
 
@@ -274,7 +274,7 @@ class TestCtxSendfile:
 
     @pytest.mark.anyio
     async def test_sendfile_falls_back_to_stream_when_no_path(self) -> None:
-        import io  # noqa: PLC0415
+        import io
 
         proto = _FakeProto()
         ctx = _build_ctx(proto=proto)

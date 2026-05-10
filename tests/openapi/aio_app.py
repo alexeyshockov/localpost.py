@@ -159,8 +159,8 @@ class TestRegistration:
                 return "ok"
 
     def test_sync_middleware_rejected_at_construction(self):
-        from localpost.openapi import OpMiddleware  # noqa: PLC0415
-        from localpost.openapi.middleware import _FunctionMiddleware, op_middleware  # noqa: PLC0415
+        from localpost.openapi import OpMiddleware
+        from localpost.openapi.middleware import _FunctionMiddleware, op_middleware
 
         @op_middleware
         def sync_mw(ctx, call_next) -> OpResult:  # type: ignore[no-untyped-def]

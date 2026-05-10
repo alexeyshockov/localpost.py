@@ -39,7 +39,7 @@ def test_buffered_post_body_handler(serve_backend_in_thread, http_backend):
         # ``parser.feed_data`` callback chain — only safe via a worker
         # pool. The pooled equivalent lives in ``tests/http/service.py``;
         # here we just exercise the h11 path.
-        import pytest as _pytest  # noqa: PLC0415
+        import pytest as _pytest
 
         _pytest.skip("httptools requires worker-pool composition for body reads")
 
@@ -113,7 +113,7 @@ def test_malformed_request_returns_400(serve_backend_in_thread):
 
 def test_expect_100_continue(serve_backend_in_thread, http_backend):
     if http_backend == "httptools":
-        import pytest as _pytest  # noqa: PLC0415
+        import pytest as _pytest
 
         _pytest.skip("httptools requires worker-pool composition for body reads")
 
@@ -254,7 +254,7 @@ def test_user_supplied_chunked_te_frames_chunks(serve_backend_in_thread):
     auto-frame branch, so user-supplied TE bypassed framing and the wire
     was malformed.
     """
-    import socket  # noqa: PLC0415
+    import socket
 
     def handler(ctx: HTTPReqCtx) -> None:
         ctx.stream(

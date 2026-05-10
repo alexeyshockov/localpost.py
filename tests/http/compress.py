@@ -409,7 +409,7 @@ class TestGzipBytes:
     """
 
     def test_actual_gzip_bytes_on_wire(self, serve_backend_in_thread):
-        import socket  # noqa: PLC0415
+        import socket
 
         body = b"hello world " * 1024
         h = compress_handler(_make_handler(b"text/plain", body), algorithms=("gzip",))
@@ -625,8 +625,8 @@ class TestStreamingFlush:
     """
 
     def test_first_event_decodes_before_stream_ends(self, serve_backend_in_thread):
-        import socket  # noqa: PLC0415
-        import threading  # noqa: PLC0415
+        import socket
+        import threading
 
         gate = threading.Event()
 

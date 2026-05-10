@@ -170,7 +170,7 @@ def _resolve_handler(handler: AsyncRequestHandler | HttpAsyncApp) -> AsyncReques
     """Accept either a raw :data:`AsyncRequestHandler` or an
     :class:`HttpAsyncApp` (compile its route handler on demand)."""
     # Lazy import — hosting shouldn't pull openapi at import time.
-    from localpost.openapi.aio.app import HttpAsyncApp as _App  # noqa: PLC0415
+    from localpost.openapi.aio.app import HttpAsyncApp as _App
 
     if isinstance(handler, _App):
         return handler._build_async_handler()

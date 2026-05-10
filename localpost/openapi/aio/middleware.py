@@ -102,7 +102,7 @@ class _AsyncFunctionMiddleware:
         return self.root_contribution(doc, registry)
 
     def contribute_operation(self, op: spec.Operation, registry: SchemaRegistry, /) -> spec.Operation:
-        from localpost.openapi._operation_core import build_responses  # noqa: PLC0415
+        from localpost.openapi._operation_core import build_responses
 
         # Parameters / requestBody come from the resolver factories.
         for _name, param, factory in self.arg_factories:
@@ -157,8 +157,8 @@ def async_op_middleware(fn: Callable[..., Awaitable[Any]]) -> _AsyncFunctionMidd
             f"(use @op_middleware for sync middlewares)"
         )
 
-    from localpost.openapi._operation_core import build_arg_resolvers, extract_response_shapes  # noqa: PLC0415
-    from localpost.openapi.aio._ctx import AsyncHTTPReqCtx as _AsyncCtx  # noqa: PLC0415
+    from localpost.openapi._operation_core import build_arg_resolvers, extract_response_shapes
+    from localpost.openapi.aio._ctx import AsyncHTTPReqCtx as _AsyncCtx
 
     call_next_param = _identify_call_next_param(fn)
     sig, runtime, factories = build_arg_resolvers(

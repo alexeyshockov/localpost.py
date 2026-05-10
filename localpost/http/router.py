@@ -324,7 +324,7 @@ class Router:
         is the request-side concurrency layer (``thread_pool_handler``
         does not apply).
         """
-        from localpost.http.wsgi import to_wsgi  # noqa: PLC0415
+        from localpost.http.wsgi import to_wsgi
 
         return to_wsgi(self.as_handler())
 

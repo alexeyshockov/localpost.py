@@ -222,7 +222,7 @@ class TestHandlerResolution:
             await _drive_shutdown(app)
 
     async def test_accepts_http_async_app(self) -> None:
-        from localpost.openapi import HttpAsyncApp  # noqa: PLC0415
+        from localpost.openapi import HttpAsyncApp
 
         oapi_app = HttpAsyncApp(openapi_path=None, docs_path=None)
 

@@ -317,7 +317,7 @@ class TestToWsgiRouter:
 
         @routes.get("/items/{id}")
         def get_item(ctx: HTTPReqCtx):
-            from localpost.http.router import route_match  # noqa: PLC0415
+            from localpost.http.router import route_match
 
             match = route_match(ctx)
             body = match.path_args["id"].encode()

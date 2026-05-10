@@ -77,7 +77,7 @@ def format_data_field(payload: object, adapters: "AdapterRegistry | None" = None
     elif isinstance(payload, (bytes, bytearray, memoryview)):
         text = bytes(payload).decode("utf-8")
     else:
-        from localpost.openapi.adapters import default_registry  # noqa: PLC0415
+        from localpost.openapi.adapters import default_registry
 
         registry = adapters or default_registry()
         body, _ct = registry.for_value(payload).encode(payload)

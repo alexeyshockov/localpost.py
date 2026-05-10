@@ -219,12 +219,12 @@ class HttpAsyncApp:
         """
         asgi_app = self.asgi()
         if server == "uvicorn":
-            from localpost.hosting.services.uvicorn import uvicorn_server  # noqa: PLC0415
+            from localpost.hosting.services.uvicorn import uvicorn_server
 
             config.app = asgi_app
             return uvicorn_server(config)
         if server == "hypercorn":
-            from localpost.hosting.services.hypercorn import hypercorn_server  # noqa: PLC0415
+            from localpost.hosting.services.hypercorn import hypercorn_server
 
             return hypercorn_server(asgi_app, config)
         raise ValueError(f"Unknown ASGI server: {server!r}")
@@ -319,7 +319,7 @@ def _ensure_async_middleware(mw: object) -> None:
     isn't enough — we additionally check that ``__call__`` is a
     coroutine function.
     """
-    import inspect  # noqa: PLC0415
+    import inspect
 
     call = getattr(type(mw), "__call__", None)  # noqa: B004 — inspecting unbound method, not testing callability
     if not inspect.iscoroutinefunction(call):
