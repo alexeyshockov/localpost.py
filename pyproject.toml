@@ -10,7 +10,7 @@ Docs = 'https://alexeyshockov.github.io/localpost.py/'
 
 [project]
 name = "localpost"
-version = "0.6.0.dev0"
+version = "0.6.0.b1"
 description = "Service hosting, in-process task scheduler, and a lightweight HTTP/1.1 server for long-running async Python processes"
 requires-python = ">=3.12"
 readme = "pypi_readme.md"
