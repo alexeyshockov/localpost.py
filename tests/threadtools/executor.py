@@ -74,34 +74,26 @@ def test_spawn_on_demand_per_pending_task():
         futs = [ex.submit(hold) for _ in range(n)]
         for f in futs:
             f.result(timeout=5)
+        assert ex.worker_count == n
     assert len(seen) == n
 
 
 def test_idle_workers_are_reused():
-    """Workers stay around when idle and pick up subsequent submissions."""
+    """Sequential submits with no concurrency reuse the single idle worker."""
     with WorkerExecutor() as ex:
-        ex.submit(lambda: None).result(timeout=5)
-        spawned = list(ex.workers)
-        assert len(spawned) == 1
-        # Idle stretch — workers must still be alive (no idle-timeout self-exit).
-        time.sleep(0.05)
-        assert ex.workers == spawned
-        assert all(t.is_alive() for t in spawned)
-        # Sequential submits reuse the single idle worker.
-        for _ in range(20):
-            ex.submit(lambda: None).result(timeout=5)
-        assert len(ex.workers) == 1
+        idents = [ex.submit(threading.get_ident).result(timeout=5) for _ in range(20)]
+        assert ex.worker_count == 1
+    assert len(set(idents)) == 1
 
 
-def test_workers_persist_until_close():
-    """Workers live for the executor's lifetime; once spawned they don't self-exit."""
+def test_workers_persist_through_idle():
+    """Workers don't self-exit during idle stretches."""
     with WorkerExecutor() as ex:
-        ex.submit(lambda: None).result(timeout=5)
-        spawned = list(ex.workers)
-        assert len(spawned) >= 1
-        time.sleep(0.2)
-        assert ex.workers == spawned
-        assert all(t.is_alive() for t in spawned)
+        a = ex.submit(threading.get_ident).result(timeout=5)
+        time.sleep(0.2)  # idle stretch — must not self-exit
+        b = ex.submit(threading.get_ident).result(timeout=5)
+        assert ex.worker_count == 1
+    assert a == b
 
 
 def test_submit_after_close_raises():
@@ -119,6 +111,38 @@ def test_executor_cannot_be_reused():
     with pytest.raises(RuntimeError, match="cannot be reused"):
         with ex:
             pass
+
+
+# ---------------------------------------------------------------------------
+# stop()
+# ---------------------------------------------------------------------------
+
+
+def test_stop_makes_subsequent_submits_raise():
+    with WorkerExecutor() as ex:
+        ex.submit(lambda: None).result(timeout=5)
+        ex.stop()
+        with pytest.raises(RuntimeError):
+            ex.submit(lambda: None)
+
+
+def test_stop_wakes_idle_workers_so_exit_returns_promptly():
+    """After ``stop()``, idle workers must wake — otherwise ``__exit__`` would hang."""
+    ex = WorkerExecutor()
+    with ex:
+        ex.submit(lambda: None).result(timeout=5)
+        # Worker is now idle, blocked in cond.wait.
+        ex.stop()
+        # __exit__ joins the worker; if stop() didn't wake it, this would hang.
+
+
+def test_stop_is_idempotent_and_safe_outside_with():
+    ex = WorkerExecutor()
+    ex.stop()  # not opened — no-op
+    with ex:
+        ex.stop()
+        ex.stop()  # idempotent
+    ex.stop()  # already closed — no-op
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,11 @@ different lifecycle and cancellation properties:
   per-task.
 
 Both propagate :class:`contextvars.Context` to the task, matching
-:func:`asyncio.to_thread` / Trio / AnyIO spawn semantics.
+:func:`asyncio.to_thread` / Trio / AnyIO spawn semantics. Both expose
+:meth:`stop` (safe from any thread) for cooperative shutdown — the sync
+variant only wakes idle workers and rejects new submits; the async
+variant additionally cancels its internal task group so tasks polling
+:func:`anyio.from_thread.check_cancelled` raise.
 
 There is no cap on the number of workers and no backlog — concurrency is
 the caller's concern (a Cloud Run-like upstream gate, a consumer-level
@@ -23,8 +27,7 @@ with no idle worker available, and live until the executor closes; see
 ``docs/adr/0005-no-idle-timeout-for-worker-pools.md`` for the rationale.
 
 The async variant takes a caller-owned :class:`localpost.Portal` and runs
-its internal :class:`anyio.abc.TaskGroup` on its loop. It exposes
-:meth:`stop` (safe from any thread) for cooperative cancellation.
+its internal :class:`anyio.abc.TaskGroup` on its loop.
 """
 
 from __future__ import annotations
@@ -86,33 +89,110 @@ class Task:
 
 
 # --------------------------------------------------------------------------
-# WorkerExecutor — deque + Condition, plain threads
+# Shared queue + spawn-on-demand protocol
 # --------------------------------------------------------------------------
 
 
-@final
-class WorkerExecutor:
-    """Spawn-on-demand pool of plain ``threading.Thread`` workers.
+class _WorkerPoolBase:
+    """Internal base: deque + condition queue protocol shared by the
+    executors. Subclasses provide :meth:`_spawn_worker` and own their
+    own context-manager lifecycle.
 
-    ``submit`` enqueues onto a shared :class:`collections.deque` under a
-    :class:`threading.Condition`; if no worker is idle, a new one is
-    spawned. There is no cap and no backlog — concurrency is the caller's
-    concern. Once spawned, a worker lives until the executor closes. See
-    ``docs/adr/0005-no-idle-timeout-for-worker-pools.md``.
+    The protocol is: ``submit`` enqueues onto ``_queue`` under ``_cond``;
+    if no worker is idle, it asks the subclass to spawn one.
+    ``_run_worker`` is the worker's loop — wait for work, pop, run,
+    repeat. ``stop`` marks the pool closed and wakes idle workers; busy
+    workers exit on their next loop iteration.
     """
 
-    def __init__(self, *, thread_name_prefix: str = "lp-worker") -> None:
-        self._thread_name_prefix = thread_name_prefix
+    def __init__(self) -> None:
         self._cond = threading.Condition()
         self._queue: deque[Task] = deque()
-        self._workers: list[threading.Thread] = []
         self._idle = 0
+        self._worker_count = 0
         self._opened = False
         self._closed = False
 
     @property
-    def workers(self) -> list[threading.Thread]:
-        return self._workers
+    def worker_count(self) -> int:
+        return self._worker_count
+
+    def submit[**P, R](
+        self,
+        fn: Callable[P, R],
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Future[R]:
+        task = Task(fn, args, kwargs)
+        with self._cond:
+            if not self._opened or self._closed:
+                raise RuntimeError(f"{type(self).__name__} is not open")
+            self._queue.append(task)
+            if self._idle == 0:
+                self._spawn_worker()
+                self._worker_count += 1
+            self._cond.notify()
+        return task.future
+
+    def stop(self) -> None:
+        """Cooperatively shut down: mark closed and wake idle workers.
+        Safe from any thread. Idempotent.
+
+        Idle workers wake from the condition and exit; busy workers
+        finish their current task and exit on the next loop iteration.
+        Subsequent ``submit`` calls raise :class:`RuntimeError`.
+        """
+        if not self._opened:
+            return
+        self._mark_closed()
+
+    def _mark_closed(self) -> bool:
+        """Mark closed under the condition; notify all waiters. Returns True
+        iff this call was the one that closed the pool.
+        """
+        with self._cond:
+            if self._closed:
+                return False
+            self._closed = True
+            self._cond.notify_all()
+            return True
+
+    def _spawn_worker(self) -> None:
+        raise NotImplementedError
+
+    def _run_worker(self) -> None:
+        while True:
+            with self._cond:
+                self._idle += 1
+                while not self._queue and not self._closed:
+                    self._cond.wait()
+                self._idle -= 1
+                if not self._queue:
+                    return  # closed and drained
+                task = self._queue.popleft()
+            task.run()
+
+
+# --------------------------------------------------------------------------
+# WorkerExecutor — sync, plain threads
+# --------------------------------------------------------------------------
+
+
+@final
+class WorkerExecutor(_WorkerPoolBase):
+    """Spawn-on-demand pool of plain ``threading.Thread`` workers.
+
+    No event loop required. There is no cap and no backlog —
+    concurrency is the caller's concern. Once spawned, a worker lives
+    until the executor closes (via ``__exit__`` or :meth:`stop`); see
+    ``docs/adr/0005-no-idle-timeout-for-worker-pools.md``.
+    """
+
+    def __init__(self, *, thread_name_prefix: str = "lp-worker") -> None:
+        super().__init__()
+        self._thread_name_prefix = thread_name_prefix
+        self._workers: list[threading.Thread] = []
 
     def __enter__(self) -> Self:
         if self._closed:
@@ -127,33 +207,13 @@ class WorkerExecutor:
         tb: TracebackType | None,
     ) -> None:
         del exc_type, exc, tb
-        with self._cond:
-            if self._closed:
-                return
-            self._closed = True
-            self._cond.notify_all()
+        self._mark_closed()
         for t in list(self._workers):
             t.join()
 
-    def submit[**P, R](
-        self,
-        fn: Callable[P, R],
-        /,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> Future[R]:
-        task = Task(fn, args, kwargs)
-        with self._cond:
-            if not self._opened or self._closed:
-                raise RuntimeError("WorkerExecutor is not open")
-            self._queue.append(task)
-            if self._idle == 0:
-                self._spawn_worker()
-            self._cond.notify()
-        return task.future
-
     def _spawn_worker(self) -> None:
-        wid = len(self._workers)
+        # ``_worker_count`` is the about-to-be index — base increments after we return.
+        wid = self._worker_count
         t = threading.Thread(
             target=self._run_worker,
             name=f"{self._thread_name_prefix}-{wid}",
@@ -162,26 +222,14 @@ class WorkerExecutor:
         self._workers.append(t)
         t.start()
 
-    def _run_worker(self) -> None:
-        while True:
-            with self._cond:
-                self._idle += 1
-                while not self._queue and not self._closed:
-                    self._cond.wait()
-                self._idle -= 1
-                if not self._queue:
-                    return  # closed and drained
-                task = self._queue.popleft()
-            task.run()
-
 
 # --------------------------------------------------------------------------
-# AsyncWorkerExecutor — deque + Condition, AnyIO-backed worker threads
+# AsyncWorkerExecutor — AnyIO-backed worker threads
 # --------------------------------------------------------------------------
 
 
 @final
-class AsyncWorkerExecutor:
+class AsyncWorkerExecutor(_WorkerPoolBase):
     """Like :class:`WorkerExecutor`, but workers run via
     ``anyio.to_thread.run_sync`` so user code can call
     :func:`anyio.from_thread.check_cancelled`.
@@ -191,31 +239,22 @@ class AsyncWorkerExecutor:
     ``host_task``. ``portal`` is required and caller-owned.
 
     Cancel granularity is per-worker (cancel scope spans the worker's whole
-    lifetime, which serves many tasks). Use :meth:`stop` for fast cooperative
-    shutdown — it cancels the internal task group and notifies idle workers
-    so they wake immediately and active tasks' next ``check_cancelled`` raises.
+    lifetime, which serves many tasks). :meth:`stop` cancels the internal
+    task group and wakes idle workers; active tasks see their next
+    ``check_cancelled`` raise.
     """
 
     def __init__(self, *, portal: Portal) -> None:
+        super().__init__()
         self._portal = portal
-        self._cond = threading.Condition()
-        self._queue: deque[Task] = deque()
-        self._worker_count = 0
-        self._idle = 0
         # Constructed eagerly: callers always instantiate inside ``async with`` on the
         # portal's loop (the only loop ``tg.start_soon`` can target via ``portal``), so
         # ``get_async_backend()`` is satisfied. Loop-affinity is set by ``__aenter__``.
         self._tg = create_task_group()
-        self._opened = False
-        self._closed = False
 
     @property
     def portal(self) -> Portal:
         return self._portal
-
-    @property
-    def worker_count(self) -> int:
-        return self._worker_count
 
     async def __aenter__(self) -> Self:
         if self._closed:
@@ -230,17 +269,14 @@ class AsyncWorkerExecutor:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        with self._cond:
-            if not self._closed:
-                self._closed = True
-                self._cond.notify_all()
+        self._mark_closed()
         # Exit the task group: on clean body it waits for host tasks to finish;
         # on exception AnyIO cancels children automatically.
         await self._tg.__aexit__(exc_type, exc, tb)
 
     def stop(self) -> None:
-        """Cooperatively shut down: wake idle workers and cancel the internal
-        task group. Safe from any thread. Idempotent.
+        """Cooperatively shut down: cancel the internal task group and wake
+        idle workers. Safe from any thread. Idempotent.
 
         Idle workers wake from the condition; active tasks see their next
         :func:`anyio.from_thread.check_cancelled` raise. Tasks that don't poll
@@ -248,29 +284,8 @@ class AsyncWorkerExecutor:
         """
         if not self._opened:
             return
-        with self._cond:
-            if self._closed:
-                return
-            self._closed = True
-            self._cond.notify_all()
-        self._portal.run_sync(self._tg.cancel_scope.cancel)
-
-    def submit[**P, R](
-        self,
-        fn: Callable[P, R],
-        /,
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> Future[R]:
-        task = Task(fn, args, kwargs)
-        with self._cond:
-            if not self._opened or self._closed:
-                raise RuntimeError("AsyncWorkerExecutor is not open")
-            self._queue.append(task)
-            if self._idle == 0:
-                self._spawn_worker()
-            self._cond.notify()
-        return task.future
+        if self._mark_closed():
+            self._portal.run_sync(self._tg.cancel_scope.cancel)
 
     def _spawn_worker(self) -> None:
         async def host_task() -> None:
@@ -278,16 +293,3 @@ class AsyncWorkerExecutor:
 
         # Schedule the host task into our internal task group from any thread.
         self._portal.run_sync(self._tg.start_soon, host_task)
-        self._worker_count += 1
-
-    def _run_worker(self) -> None:
-        while True:
-            with self._cond:
-                self._idle += 1
-                while not self._queue and not self._closed:
-                    self._cond.wait()
-                self._idle -= 1
-                if not self._queue:
-                    return  # closed and drained
-                task = self._queue.popleft()
-            task.run()

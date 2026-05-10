@@ -25,12 +25,12 @@ got = rx.get_nowait()            # raises WouldBlock / EndOfStream
 
 ## Executors
 
-Two implementations share the same `submit(fn, *args, **kwargs) -> Future` contract. Both are spawn-on-demand pools with no cap and no backlog — concurrency is the caller's concern (a Cloud Run-like upstream gate, a consumer-level `Semaphore`, etc.). Lifecycle and cancellation differ:
+Two implementations share the same `submit(fn, *args, **kwargs) -> Future` contract. Both are spawn-on-demand pools with no cap and no backlog — concurrency is the caller's concern (a Cloud Run-like upstream gate, a consumer-level `Semaphore`, etc.). Both expose `worker_count: int` and a `stop()` method that's safe to call from any thread. Lifecycle and the effect of `stop()` differ:
 
-| Executor                | CM           | Cancellation                        | Loop required |
-|-------------------------|--------------|-------------------------------------|---------------|
-| `WorkerExecutor`        | `with`       | None — workers finish naturally     | No            |
-| `AsyncWorkerExecutor`   | `async with` | Per-worker (`stop()` / scope cancel)| Yes           |
+| Executor                | CM           | `stop()`                                                              | Loop required |
+|-------------------------|--------------|-----------------------------------------------------------------------|---------------|
+| `WorkerExecutor`        | `with`       | Soft close — idle workers exit, busy workers finish their current task| No            |
+| `AsyncWorkerExecutor`   | `async with` | Soft close + cancel scope (per-worker `check_cancelled`)              | Yes           |
 
 Both propagate `contextvars.Context` to the task, matching `asyncio.to_thread` / Trio / AnyIO spawn semantics.
 
@@ -45,6 +45,8 @@ with WorkerExecutor() as ex:
     fut = ex.submit(work, x)
     result = fut.result()
 ```
+
+`stop()` is safe to call from any thread (e.g. a signal handler): it marks the pool closed and wakes idle workers so they exit; busy workers finish their current task and then exit on the next loop iteration. Subsequent `submit` calls raise `RuntimeError`.
 
 ### `AsyncWorkerExecutor` — deque + AnyIO threadlocals
 
