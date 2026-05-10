@@ -3,12 +3,12 @@
 Thread-friendly building blocks for moving work off the event loop:
 
 - [`Channel`](#channel) — a typed, thread-safe queue with `timeout` on `put` / `get` and broadcast-on-close.
-- [`Executor`](#executors) — three implementations, one `submit` contract.
+- [`Executor`](#executors) — two implementations, one `submit` contract.
 - [`Portal`](#portal) — thread-aware view over `anyio.from_thread.BlockingPortal`.
 - [`TaskGroup`](#taskgroup) — Trio-style structured concurrency over an `Executor`.
 - [`run_async`](#run_async) — sync→async bridge: dispatch a coroutine onto the current service's loop from a worker thread.
 
-`localpost.threadtools` is built on plain locks; the AnyIO loop is needed only for the `Async…Executor` variants.
+`localpost.threadtools` is built on plain locks; the AnyIO loop is needed only for the `AsyncWorkerExecutor`.
 
 ## Channel
 
@@ -25,33 +25,30 @@ got = rx.get_nowait()            # raises WouldBlock / EndOfStream
 
 ## Executors
 
-Three implementations share the same `submit(fn, *args, **kwargs) -> Future` contract. Lifecycle and cancellation differ:
+Two implementations share the same `submit(fn, *args, **kwargs) -> Future` contract. Both are spawn-on-demand pools with no cap and no backlog — concurrency is the caller's concern (a Cloud Run-like upstream gate, a consumer-level `Semaphore`, etc.). Lifecycle and cancellation differ:
 
 | Executor                | CM           | Cancellation                        | Loop required |
 |-------------------------|--------------|-------------------------------------|---------------|
 | `WorkerExecutor`        | `with`       | None — workers finish naturally     | No            |
 | `AsyncWorkerExecutor`   | `async with` | Per-worker (`stop()` / scope cancel)| Yes           |
-| `AsyncExecutor`         | `async with` | Per-task (`Future.cancel()`)        | Yes           |
 
-All three propagate `contextvars.Context` to the task, matching `asyncio.to_thread` / Trio / AnyIO spawn semantics.
+Both propagate `contextvars.Context` to the task, matching `asyncio.to_thread` / Trio / AnyIO spawn semantics.
 
-### `WorkerExecutor` — sync, channel-backed
+### `WorkerExecutor` — sync, deque + Condition
 
-Plain `threading.Thread` workers. Lazy spawn; workers live until the executor closes (no idle-timeout self-exit — see [ADR-0005](../../docs/adr/0005-no-idle-timeout-for-worker-pools.md)). No event loop.
+Plain `threading.Thread` workers. Lazy spawn: `submit` enqueues onto a shared `deque` under a `threading.Condition`; if no worker is idle, a new one is spawned. Workers live until the executor closes (no idle-timeout self-exit — see [ADR-0005](../../docs/adr/0005-no-idle-timeout-for-worker-pools.md)). No event loop.
 
 ```python
 from localpost.threadtools import WorkerExecutor
 
-with WorkerExecutor(max_concurrency=8) as ex:
+with WorkerExecutor() as ex:
     fut = ex.submit(work, x)
     result = fut.result()
 ```
 
-`submit` tries `put_nowait` first; on `WouldBlock` it spawns a new worker (up to `max_concurrency`) and falls through to a blocking `put` (which is what backpressures the caller when at the cap). All workers pull from a single shared receiver.
+### `AsyncWorkerExecutor` — deque + AnyIO threadlocals
 
-### `AsyncWorkerExecutor` — channel + AnyIO threadlocals
-
-Same channel / lazy-spawn shape as `WorkerExecutor`, but workers run inside `anyio.to_thread.run_sync(..., abandon_on_cancel=False)` so user code can call `anyio.from_thread.check_cancelled`.
+Same shape as `WorkerExecutor`, but workers run inside `anyio.to_thread.run_sync(..., abandon_on_cancel=False)` so user code can call `anyio.from_thread.check_cancelled`.
 
 The worker's cancel scope spans its whole lifetime (one worker handles many tasks), so cancellation granularity is **per-worker**, not per-task. Use `stop()` for fast cooperative shutdown.
 
@@ -68,21 +65,6 @@ async with anyio.from_thread.BlockingPortal() as raw_portal:
 
 `submit` and `stop` are safe to call from any thread — the wrapping `Portal` does the on-loop / off-loop dispatch internally.
 
-### `AsyncExecutor` — fresh AnyIO task per submit
-
-Every `submit` schedules a fresh AnyIO task on the executor's internal task group; concurrency is gated by an `anyio.CapacityLimiter` (`math.inf` = no cap). Cancellation is **per-task**: `Future.cancel()` propagates to the underlying task's `check_cancelled`.
-
-```python
-from localpost import Portal
-
-async with anyio.from_thread.BlockingPortal() as raw_portal:
-    portal = Portal(raw_portal)
-    async with AsyncExecutor(portal=portal, max_concurrency=4) as ex:
-        fut = await anyio.to_thread.run_sync(ex.submit, work, x)
-        # cancel just this task:
-        fut.cancel()
-```
-
 ## TaskGroup
 
 A thin sync bookkeeping layer over an `Executor`. Tracks `Future`s; on `__exit__` waits for every submitted task and re-raises failures as a `BaseExceptionGroup` (Trio `strict_exception_groups=True` semantics — body and task exceptions are merged into one group).
@@ -97,7 +79,7 @@ with WorkerExecutor() as ex:
     # On exit: drain in-flight tasks; raise BaseExceptionGroup if any failed.
 ```
 
-`TaskGroup` is **collect-and-raise only** — running tasks are not interrupted on the first failure. If you want cooperative cancel, give it an `AsyncWorkerExecutor` / `AsyncExecutor` so tasks can poll `check_cancelled`.
+`TaskGroup` is **collect-and-raise only** — running tasks are not interrupted on the first failure. If you want cooperative cancel, give it an `AsyncWorkerExecutor` so tasks can poll `check_cancelled`.
 
 ## `run_async`
 
@@ -120,7 +102,7 @@ Resolves the portal via `localpost.hosting.current_service`, so the calling thre
 
 ## Portal
 
-`Portal` wraps `anyio.from_thread.BlockingPortal` with loop-thread awareness. Construct it on the loop thread (it snapshots `threading.get_ident()` at creation), then pass it to `AsyncWorkerExecutor` / `AsyncExecutor` or any code that needs to schedule onto the loop without caring about the calling thread.
+`Portal` wraps `anyio.from_thread.BlockingPortal` with loop-thread awareness. Construct it on the loop thread (it snapshots `threading.get_ident()` at creation), then pass it to `AsyncWorkerExecutor` or any code that needs to schedule onto the loop without caring about the calling thread.
 
 ```python
 from localpost import Portal

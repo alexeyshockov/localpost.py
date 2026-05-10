@@ -7,9 +7,9 @@ exits. Failures are collected and surfaced as a :class:`BaseExceptionGroup`.
 
 There is no cancel signal — running tasks are not interrupted on the first
 failure. Use an executor that propagates AnyIO cancellation
-(:class:`AnyIOWorkerExecutor`, :class:`AnyIOExecutor`) and have your tasks
-poll :func:`anyio.from_thread.check_cancelled` if cooperative cancel is
-needed in your application.
+(:class:`AsyncWorkerExecutor`) and have your tasks poll
+:func:`anyio.from_thread.check_cancelled` if cooperative cancel is needed
+in your application.
 """
 
 from __future__ import annotations

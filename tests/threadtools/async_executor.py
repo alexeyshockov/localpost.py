@@ -1,8 +1,7 @@
-"""Tests for the AnyIO-backed executors.
+"""Tests for :class:`localpost.threadtools.AsyncWorkerExecutor`.
 
-Both :class:`AsyncWorkerExecutor` and :class:`AsyncExecutor` are async
-context managers and require a caller-owned :class:`localpost.Portal`
-running on the test's loop.
+It's an async context manager and requires a caller-owned
+:class:`localpost.Portal` running on the test's loop.
 
 We pin both backends (``asyncio`` and ``trio``) for the cross-backend
 ``check_cancelled`` story; ``stop()`` must work the same on each.
@@ -21,7 +20,7 @@ import anyio.to_thread
 import pytest
 
 from localpost import Portal
-from localpost.threadtools import AsyncExecutor, AsyncWorkerExecutor
+from localpost.threadtools import AsyncWorkerExecutor
 
 # Both backends, on every test in this module.
 pytestmark = pytest.mark.parametrize("anyio_backend", ["asyncio", "trio"])
@@ -38,11 +37,6 @@ async def portal() -> AsyncIterator[Portal]:
     """
     async with anyio.from_thread.BlockingPortal() as raw:
         yield Portal(raw)
-
-
-# ---------------------------------------------------------------------------
-# AsyncWorkerExecutor
-# ---------------------------------------------------------------------------
 
 
 async def test_async_worker_executor_basic_submit(anyio_backend, portal: Portal):
@@ -97,81 +91,3 @@ async def test_async_worker_executor_stop_propagates_to_running_task(anyio_backe
     # The future ends up with a cancellation exception (backend-specific type).
     assert fut.done()
     assert fut.exception() is not None
-
-
-# ---------------------------------------------------------------------------
-# AsyncExecutor
-# ---------------------------------------------------------------------------
-
-
-async def test_async_executor_basic_submit(anyio_backend, portal: Portal):
-    async with AsyncExecutor(portal=portal) as ex:
-        fut: Future[int] = await anyio.to_thread.run_sync(ex.submit, lambda: 7 * 6)
-        result = await anyio.to_thread.run_sync(fut.result, 5)
-        assert result == 42
-
-
-async def test_async_executor_propagates_exception(anyio_backend, portal: Portal):
-    class Boom(Exception):
-        pass
-
-    def bad() -> None:
-        raise Boom("nope")
-
-    async with AsyncExecutor(portal=portal) as ex:
-        fut = await anyio.to_thread.run_sync(ex.submit, bad)
-
-        def get_result() -> object:
-            return fut.result(timeout=5)
-
-        with pytest.raises(Boom):
-            await anyio.to_thread.run_sync(get_result)
-
-
-async def test_async_executor_capacity_limiter(anyio_backend, portal: Portal):
-    """``max_concurrency`` is enforced via :class:`anyio.CapacityLimiter`."""
-    n_concurrent = 0
-    max_seen = 0
-    lock = threading.Lock()
-
-    def hold() -> None:
-        nonlocal n_concurrent, max_seen
-        with lock:
-            n_concurrent += 1
-            max_seen = max(max_seen, n_concurrent)
-        time.sleep(0.05)
-        with lock:
-            n_concurrent -= 1
-
-    async with AsyncExecutor(portal=portal, max_concurrency=2) as ex:
-        futs = [await anyio.to_thread.run_sync(ex.submit, hold) for _ in range(8)]
-        for f in futs:
-            await anyio.to_thread.run_sync(f.result, 5)
-    assert max_seen <= 2
-
-
-async def test_async_executor_stop_cancels_all_inflight(anyio_backend, portal: Portal):
-    cancelled_count = 0
-    cancelled_lock = threading.Lock()
-    started = threading.Event()
-    n = 4
-
-    def slow_task() -> None:
-        nonlocal cancelled_count
-        started.set()
-        try:
-            for _ in range(500):
-                anyio.from_thread.check_cancelled()
-                time.sleep(0.005)
-        except BaseException:
-            with cancelled_lock:
-                cancelled_count += 1
-            raise
-
-    async with AsyncExecutor(portal=portal, max_concurrency=n) as ex:
-        for _ in range(n):
-            await anyio.to_thread.run_sync(ex.submit, slow_task)
-        await anyio.to_thread.run_sync(started.wait, 2.0)
-        await anyio.to_thread.run_sync(ex.stop)
-
-    assert cancelled_count == n

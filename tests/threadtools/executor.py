@@ -1,21 +1,18 @@
 """Tests for :class:`localpost.threadtools.WorkerExecutor` (sync, no AnyIO).
 
-The Async variants (``AsyncWorkerExecutor`` / ``AsyncExecutor``) live in
-``async_executor.py`` since they're async context managers and need a
-:class:`localpost.Portal`.
+The Async variant (``AsyncWorkerExecutor``) lives in ``async_executor.py``
+since it's an async context manager and needs a :class:`localpost.Portal`.
 """
 
 from __future__ import annotations
 
 import contextvars
-import math
 import threading
 import time
 
 import pytest
 
 from localpost.threadtools import WorkerExecutor
-
 
 # ---------------------------------------------------------------------------
 # Submit / result
@@ -56,29 +53,12 @@ def test_submit_propagates_exception_to_future(executor: WorkerExecutor):
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle / lazy spawn / max_concurrency
+# Lifecycle / spawn-on-demand
 # ---------------------------------------------------------------------------
 
 
-def test_lazy_worker_spawn_under_max_concurrency():
-    """Workers are spawned on demand — never more than ``max_concurrency``."""
-    seen: set[int] = set()
-    seen_lock = threading.Lock()
-
-    def record():
-        with seen_lock:
-            seen.add(threading.get_ident())
-        time.sleep(0.005)
-
-    with WorkerExecutor(max_concurrency=3) as ex:
-        futs = [ex.submit(record) for _ in range(40)]
-        for f in futs:
-            f.result(timeout=5)
-    assert len(seen) <= 3
-
-
-def test_unlimited_concurrency_spawns_per_pending_task():
-    """Default (math.inf) → every concurrent submission gets its own worker thread."""
+def test_spawn_on_demand_per_pending_task():
+    """Concurrent submissions with no idle worker each get a fresh worker."""
     n = 8
     seen: set[int] = set()
     barrier = threading.Barrier(n)
@@ -91,28 +71,37 @@ def test_unlimited_concurrency_spawns_per_pending_task():
             seen.add(threading.get_ident())
 
     with WorkerExecutor() as ex:
-        # Default max_concurrency is math.inf.
-        assert math.isinf(ex._max_concurrency)
         futs = [ex.submit(hold) for _ in range(n)]
         for f in futs:
             f.result(timeout=5)
     assert len(seen) == n
 
 
+def test_idle_workers_are_reused():
+    """Workers stay around when idle and pick up subsequent submissions."""
+    with WorkerExecutor() as ex:
+        ex.submit(lambda: None).result(timeout=5)
+        spawned = list(ex.workers)
+        assert len(spawned) == 1
+        # Idle stretch — workers must still be alive (no idle-timeout self-exit).
+        time.sleep(0.05)
+        assert ex.workers == spawned
+        assert all(t.is_alive() for t in spawned)
+        # Sequential submits reuse the single idle worker.
+        for _ in range(20):
+            ex.submit(lambda: None).result(timeout=5)
+        assert len(ex.workers) == 1
+
+
 def test_workers_persist_until_close():
     """Workers live for the executor's lifetime; once spawned they don't self-exit."""
-    with WorkerExecutor(max_concurrency=2) as ex:
+    with WorkerExecutor() as ex:
         ex.submit(lambda: None).result(timeout=5)
         spawned = list(ex.workers)
         assert len(spawned) >= 1
-        # Idle stretch — workers must still be alive (no idle-timeout self-exit).
         time.sleep(0.2)
         assert ex.workers == spawned
         assert all(t.is_alive() for t in spawned)
-        # Subsequent submits reuse the same workers, never exceed the cap.
-        for _ in range(20):
-            ex.submit(lambda: None).result(timeout=5)
-        assert len(ex.workers) <= 2
 
 
 def test_submit_after_close_raises():
@@ -130,11 +119,6 @@ def test_executor_cannot_be_reused():
     with pytest.raises(RuntimeError, match="cannot be reused"):
         with ex:
             pass
-
-
-def test_max_concurrency_must_be_positive():
-    with pytest.raises(ValueError, match="max_concurrency"):
-        WorkerExecutor(max_concurrency=0)
 
 
 # ---------------------------------------------------------------------------

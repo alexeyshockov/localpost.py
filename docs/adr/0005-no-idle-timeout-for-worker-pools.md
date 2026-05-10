@@ -5,12 +5,11 @@
 
 ## Context
 
-`localpost.threadtools.WorkerExecutor` and `AsyncWorkerExecutor` are
-channel-backed worker pools with lazy spawn (driven by
-`put_nowait` / `WouldBlock`) up to `max_concurrency`. The original
-design also had **idle-timeout self-exit**: a worker that saw no work
-for `idle_timeout` seconds would close its receiver clone and exit,
-shrinking the live worker count.
+`localpost.threadtools.WorkerExecutor` and `AsyncWorkerExecutor` were
+originally channel-backed worker pools with lazy spawn (driven by
+`put_nowait` / `WouldBlock`) up to `max_concurrency`, and **idle-timeout
+self-exit**: a worker that saw no work for `idle_timeout` seconds would
+close its receiver clone and exit, shrinking the live worker count.
 
 That feature interacted badly with the rest of the design:
 
@@ -74,36 +73,36 @@ Workers in `WorkerExecutor` and `AsyncWorkerExecutor` live for the
 `idle_timeout=` parameter on either constructor. The
 `DEFAULT_IDLE_TIMEOUT` module constant is removed.
 
-Two structural simplifications follow naturally and are also part of
-this decision:
-
-1. **One shared receiver** instead of per-worker `rx.clone()`. Workers
-   all pull from the executor's single `self._rx`; the channel's state
-   lock already serializes concurrent `get` calls correctly. This
-   matches Tokio's blocking pool design.
-2. **No `_rx_template` placeholder.** With workers staying alive until
-   close, there is no inter-worker generation gap to bridge. The
-   executor holds `tx` and `rx` directly for its whole lifetime.
-
-The worker loop reduces to:
+With the lifetime guarantee in place, the storage layer was further
+simplified from a `Channel` (capacity / clones / broadcast-on-close
+machinery, all unused once `max_concurrency` and `backlog` were also
+dropped — see follow-on entry below) to a plain
+`collections.deque` + `threading.Condition`. The worker loop becomes:
 
 ```python
 def _run_worker(self) -> None:
-    for task in self._rx:
+    while True:
+        with self._cond:
+            self._idle += 1
+            while not self._queue and not self._closed:
+                self._cond.wait()
+            self._idle -= 1
+            if not self._queue:
+                return  # closed and drained
+            task = self._queue.popleft()
         task.run()
 ```
 
-Submit keeps its existing two-phase shape (`put_nowait` → spawn →
-blocking `put`), but the cap check uses `len(self._workers)` /
-`self._worker_count` and the spawn path no longer manages cloned
-receivers.
+`submit` enqueues under the same condition; if `self._idle == 0` it
+spawns a new worker before notifying. There is no cap and no backlog —
+concurrency control is the caller's concern.
 
 Alternatives considered:
 
 - **Keep idle timeout, keep the lock dance.** Correct, in good company
   with Java / Tokio. Rejected because the savings don't justify the
-  ongoing cost — the duplicated race-handling sits across two classes
-  and is the easiest part of the file to break in a refactor without
+  ongoing cost — the duplicated race-handling sat across two classes
+  and was the easiest part of the file to break in a refactor without
   noticing.
 - **Push the race resolution into the channel API** (e.g. a
   `BrokenChannel` signal when the last receiver dies, paired with a
@@ -116,32 +115,32 @@ Alternatives considered:
 ## Consequences
 
 - `WorkerExecutor(...)` and `AsyncWorkerExecutor(...)` no longer
-  accept `idle_timeout=`. This is a **breaking API change**; given
-  v-next is pre-1.0 and the parameter never had a non-default use in
-  this repo, no deprecation path is provided.
+  accept `idle_timeout=`, `max_concurrency=`, or `backlog=`. This is a
+  **breaking API change**; given v-next is pre-1.0 and these
+  parameters had no non-default use in this repo, no deprecation path
+  is provided. Callers that need a cap should apply a
+  `threading.Semaphore` / `anyio.CapacityLimiter` upstream of
+  `submit`.
+- `AsyncExecutor` (per-task spawn gated by `CapacityLimiter`) is
+  removed — it had no in-tree callers, and "control concurrency at the
+  call site" makes per-task `Future.cancel()` propagation unnecessary.
 - `localpost.threadtools.DEFAULT_IDLE_TIMEOUT` is removed from the
   module's public surface.
-- `WorkerExecutor.open_receivers` and `AsyncWorkerExecutor.open_receivers`
-  are replaced by `WorkerExecutor.workers` (the `Thread` list) and
-  `AsyncWorkerExecutor.worker_count` (an int). These were primarily
-  used by tests; downstream code that introspected them needs to
-  switch.
-- The `_run_worker` method on both executors collapses to a 2-line
-  `for task in self._rx: task.run()` loop. The `_open_receivers` list,
-  the per-worker `rx.clone()` / `rx.close()` bookkeeping, and the
-  `_rx_template` placeholder are gone.
-- The producer-vs-worker-timeout race no longer exists, so the
-  `get_nowait` recheck under `self._lock` in the worker's
-  `TimeoutError` handler is gone too. The submit-side lock still
-  guards the cap check + spawn (cap accounting is the executor's
-  concern; the channel doesn't track that).
+- The executors no longer depend on `Channel`. `Channel` itself stays
+  in the public API for users who want a thread-safe queue with
+  capacity / timeouts / broadcast-on-close.
+- `WorkerExecutor.workers` (the `Thread` list) and
+  `AsyncWorkerExecutor.worker_count` (an int) replace the prior
+  `open_receivers` introspection. These were primarily used by tests;
+  downstream code that introspected them needs to switch.
+- The producer-vs-worker-timeout race is gone with the idle timeout.
+  The submit-side lock (now the condition's lock) guards enqueue +
+  idle-count check + spawn under one critical section.
 - Once at the high-water mark, the pool keeps that many threads alive
   until `__exit__`. For a long-running hosted service this is the
   intended behavior — the pool sizes itself to peak concurrency and
-  stays there. Callers that need bursty work without a sticky pool
-  should use `AsyncExecutor` (per-task spawn gated by a
-  `CapacityLimiter`), which already exists for exactly this case.
+  stays there.
 - Memory expectation in production: ~100 KB RSS per parked worker.
-  At a `max_concurrency` of, say, 64, that's ~6 MB held — noise next
-  to the Python interpreter and cheaper than re-paying
+  At a peak of, say, 64 concurrent submissions that's ~6 MB held —
+  noise next to the Python interpreter and cheaper than re-paying
   `pthread_create` on every burst.
