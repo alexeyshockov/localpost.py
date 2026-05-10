@@ -65,6 +65,27 @@ async def test_async_worker_executor_check_cancelled_callable_in_task(anyio_back
     assert polled.is_set()
 
 
+async def test_async_worker_executor_cancel_unblocks_idle_workers(anyio_backend, portal: Portal):
+    """Outer-scope cancellation must unblock idle workers stuck in ``cond.wait``.
+
+    Correctness depends on a sync ordering invariant inside ``__aexit__``:
+    ``_mark_closed()`` (which wakes workers via ``notify_all``) runs *before*
+    any ``await``. If a future refactor sneaks an await between the close and
+    the ``await self._tg.__aexit__(...)``, this test will hang and
+    ``fail_after`` will surface it.
+    """
+    with anyio.fail_after(2.0):
+        with anyio.move_on_after(0.1) as scope:
+            async with AsyncWorkerExecutor(portal=portal) as ex:
+                # Spawn a worker via a quick submit; let it return to cond.wait.
+                fut = await anyio.to_thread.run_sync(ex.submit, lambda: None)
+                await anyio.to_thread.run_sync(fut.result, 5)
+                assert ex.worker_count == 1
+                # Worker is now idle in cond.wait. Sleep past the deadline.
+                await anyio.sleep(60)
+        assert scope.cancelled_caught
+
+
 async def test_async_worker_executor_stop_propagates_to_running_task(anyio_backend, portal: Portal):
     """:meth:`stop` cancels the internal task group; running tasks polling
     ``check_cancelled`` raise on their next checkpoint."""

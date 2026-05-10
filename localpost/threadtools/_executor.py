@@ -269,9 +269,14 @@ class AsyncWorkerExecutor(_WorkerPoolBase):
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
+        # Invariant: ``_mark_closed`` must run synchronously before any await.
+        # It wakes idle workers (via ``cond.notify_all``) so their ``to_thread``
+        # awaits can resolve. If an await sneaks in before this, an outer-scope
+        # cancellation hitting that await would leave workers stuck in
+        # ``cond.wait`` forever (``abandon_on_cancel=False`` waits for the
+        # thread to return naturally). Guarded by
+        # ``test_async_worker_executor_cancel_unblocks_idle_workers``.
         self._mark_closed()
-        # Exit the task group: on clean body it waits for host tasks to finish;
-        # on exception AnyIO cancels children automatically.
         await self._tg.__aexit__(exc_type, exc, tb)
 
     def stop(self) -> None:
