@@ -49,3 +49,4 @@ title in the filename: `0001-anyio-as-async-runtime.md`.
 | 0002 | [h11 and httptools coexist](0002-h11-httptools-coexist.md)   | Accepted |
 | 0003 | [Sync-only native HTTP server](0003-sync-native-http-server.md) | Accepted |
 | 0004 | [Pull-based client-disconnect detection](0004-pull-based-disconnect-detection.md) | Accepted |
+| 0005 | [No idle-timeout self-exit in worker pools](0005-no-idle-timeout-for-worker-pools.md) | Accepted |

@@ -76,8 +76,8 @@ Python 3.12+ is now required (was 3.10+).
   - `Executor` protocol — single `submit(fn, *args, **kwargs) -> Future`
     contract. Three implementations:
     - `WorkerExecutor` — sync `with`, channel-backed pool of plain
-      `threading.Thread` workers, lazy spawn with idle-timeout
-      self-exit, no event loop needed.
+      `threading.Thread` workers, lazy spawn; workers live until the
+      executor closes (see ADR-0005). No event loop needed.
     - `AsyncWorkerExecutor` — `async with`, same channel/lazy-spawn
       shape but workers run via `anyio.to_thread.run_sync(...,
       abandon_on_cancel=False)` so user code can call

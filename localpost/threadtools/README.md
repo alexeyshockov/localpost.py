@@ -37,7 +37,7 @@ All three propagate `contextvars.Context` to the task, matching `asyncio.to_thre
 
 ### `WorkerExecutor` — sync, channel-backed
 
-Plain `threading.Thread` workers. Lazy spawn, idle-timeout self-exit. No event loop.
+Plain `threading.Thread` workers. Lazy spawn; workers live until the executor closes (no idle-timeout self-exit — see [ADR-0005](../../docs/adr/0005-no-idle-timeout-for-worker-pools.md)). No event loop.
 
 ```python
 from localpost.threadtools import WorkerExecutor
@@ -47,7 +47,7 @@ with WorkerExecutor(max_concurrency=8) as ex:
     result = fut.result()
 ```
 
-`submit` tries `put_nowait` first; on `WouldBlock` it spawns a new worker (up to `max_concurrency`) and falls through to a blocking `put` (which is what backpressures the caller when at the cap).
+`submit` tries `put_nowait` first; on `WouldBlock` it spawns a new worker (up to `max_concurrency`) and falls through to a blocking `put` (which is what backpressures the caller when at the cap). All workers pull from a single shared receiver.
 
 ### `AsyncWorkerExecutor` — channel + AnyIO threadlocals
 

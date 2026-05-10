@@ -15,14 +15,6 @@ import time
 import pytest
 
 from localpost.threadtools import WorkerExecutor
-from localpost.threadtools import _executor as _ex
-
-
-@pytest.fixture
-def fast_idle_timeout(monkeypatch: pytest.MonkeyPatch) -> float:
-    """Make idle-timeout tests fast: 100 ms instead of 60 s."""
-    monkeypatch.setattr(_ex, "DEFAULT_IDLE_TIMEOUT", 0.1)
-    return 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +99,20 @@ def test_unlimited_concurrency_spawns_per_pending_task():
     assert len(seen) == n
 
 
-def test_idle_workers_self_exit_on_timeout(fast_idle_timeout: float):
-    """A worker that sees no work for ``idle_timeout`` should retire."""
-    with WorkerExecutor(idle_timeout=fast_idle_timeout) as ex:
+def test_workers_persist_until_close():
+    """Workers live for the executor's lifetime; once spawned they don't self-exit."""
+    with WorkerExecutor(max_concurrency=2) as ex:
         ex.submit(lambda: None).result(timeout=5)
-        time.sleep(fast_idle_timeout * 5)
-        # Workers self-exit and remove themselves from open_receivers.
-        assert ex.open_receivers == []
-        # Submitting again still works — a fresh worker spawns.
-        ex.submit(lambda: None).result(timeout=5)
+        spawned = list(ex.workers)
+        assert len(spawned) >= 1
+        # Idle stretch — workers must still be alive (no idle-timeout self-exit).
+        time.sleep(0.2)
+        assert ex.workers == spawned
+        assert all(t.is_alive() for t in spawned)
+        # Subsequent submits reuse the same workers, never exceed the cap.
+        for _ in range(20):
+            ex.submit(lambda: None).result(timeout=5)
+        assert len(ex.workers) <= 2
 
 
 def test_submit_after_close_raises():
