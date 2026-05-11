@@ -93,8 +93,6 @@ dev = [
     "icecream ~=2.1",
     "structlog ~=25.0",
     "trio ~=0.32",
-
-    "vulture ~=2.14",
 ]
 dev-tools = [
     # Linters / type checkers used by ``just check``, ``just format``, and CI.
