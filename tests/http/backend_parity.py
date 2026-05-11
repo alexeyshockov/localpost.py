@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 
 import httpx
+import pytest
 
 from localpost.http import HTTPReqCtx, Response, ServerConfig, read_body
 from tests.http._helpers import drain_socket, read_http_response, read_until
@@ -39,9 +40,7 @@ def test_buffered_post_body_handler(serve_backend_in_thread, http_backend):
         # ``parser.feed_data`` callback chain — only safe via a worker
         # pool. The pooled equivalent lives in ``tests/http/service.py``;
         # here we just exercise the h11 path.
-        import pytest as _pytest
-
-        _pytest.skip("httptools requires worker-pool composition for body reads")
+        pytest.skip("httptools requires worker-pool composition for body reads")
 
     received: list[bytes] = []
 
@@ -113,9 +112,7 @@ def test_malformed_request_returns_400(serve_backend_in_thread):
 
 def test_expect_100_continue(serve_backend_in_thread, http_backend):
     if http_backend == "httptools":
-        import pytest as _pytest
-
-        _pytest.skip("httptools requires worker-pool composition for body reads")
+        pytest.skip("httptools requires worker-pool composition for body reads")
 
     def handler(ctx: HTTPReqCtx) -> None:
         # ``read_body`` drives the body recv loop, which sends 100 Continue

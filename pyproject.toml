@@ -311,6 +311,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "examples/*" = ["T201"]
 "benchmarks/*" = ["T201"]
+# Tests legitimately use lazy/conditional imports inside test bodies (optional
+# extras, internals under test). Top-of-file imports are not always feasible.
+"tests/*" = ["PLC0415"]
 # Not a Python package; just a hook file mkdocs loads by path.
 "docs/*" = ["INP001"]
 
