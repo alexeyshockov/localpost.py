@@ -1,7 +1,8 @@
 #!/usr/bin/env -S just --justfile
 
 doctor:
-    brew install uv oha ty
+    brew install uv oha ty pre-commit vulture actionslint
+    uv tool install griffe
 
 deps:
     uv sync --all-groups --all-extras
@@ -24,7 +25,7 @@ types-all: types
 
 [doc("Check that the public API is correctly typed")]
 type-coverage:
-    basedpyright --pythonpath $(which python) --verifytypes localpost localpost/*
+    -basedpyright --pythonpath "$(which python)" --verifytypes localpost --ignoreexternal localpost/*
 
 format:
     ruff check --fix localpost
@@ -100,6 +101,35 @@ docs-build:
 [doc("Find unused code with vulture (config in pyproject.toml). Pass extra args to override.")]
 deadcode *args:
     vulture {{ args }}
+
+# ---------------------------------------------------------------------------
+# Release pre-flight
+#
+# Workflow:
+#   just release-check           # current type coverage + API BC vs previous stable tag
+#   <eyeball the report, update CHANGELOG.md if needed>
+#   just release X.Y.Z           # (see below)
+# ---------------------------------------------------------------------------
+
+# Latest tag matching strictly ``vX.Y.Z`` (no ``b1`` / ``rc1`` / ``.dev0`` suffix).
+previous_stable_tag := `git tag --sort=-v:refname --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1`
+
+[doc("Show API breaking changes vs [base] (default: previous stable tag) using griffe")]
+api-diff base=previous_stable_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "{{ base }}" ]; then
+        echo "no previous stable tag found; pass [base] explicitly" >&2
+        exit 1
+    fi
+    echo "▸ Public API vs {{ base }} (griffe check, breaking changes only)"
+    griffe check localpost -a "{{ base }}" -s . || true
+
+[doc("Pre-release report: current type coverage + API BC vs [base]")]
+release-check base=previous_stable_tag:
+    @just type-coverage
+    @echo
+    @just api-diff {{ base }}
 
 # ---------------------------------------------------------------------------
 # Release automation
