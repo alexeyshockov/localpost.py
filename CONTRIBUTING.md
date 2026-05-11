@@ -20,11 +20,16 @@ Requirements: Python 3.12+ and [`uv`](https://docs.astral.sh/uv/) (which manages
 the virtualenv, and dependencies). [`just`](https://github.com/casey/just) is used to wrap the
 common workflows.
 
+The project keeps **tools at user level** (Homebrew + `uv tool install`), separate from the project
+venv. `just doctor` installs everything you need:
+
 ```bash
 git clone https://github.com/alexeyshockov/localpost.py.git
 cd localpost.py
-just deps         # uv sync --all-groups --all-extras
-just unit-tests   # confirm the toolchain is healthy
+just doctor        # user-level toolchain: uv, ty, basedpyright, ruff, griffe, pre-commit, ...
+just deps          # sync the project venv (uv sync --all-groups --all-extras)
+pre-commit install # wire the repo-local commit hooks (one-time per clone)
+just unit-tests    # confirm the toolchain is healthy
 ```
 
 The full list of recipes is in `justfile` (run `just --list`). The most common ones:
@@ -107,9 +112,10 @@ Other rules:
 
 Before opening:
 
-- [ ] `just format` is clean
-- [ ] `just types` passes
-- [ ] `just type-coverage` passes (public API stays fully typed)
+- [ ] `just format` is clean (pre-commit hooks enforce this too)
+- [ ] `just types` is clean
+- [ ] `just type-coverage` reviewed — no regressions on public API you touched
+      (basedpyright reports an overall score; treat it as informational)
 - [ ] `just unit-tests` passes
 - [ ] You added or updated tests for the change
 - [ ] You added a CHANGELOG entry under `## [Unreleased]` (Added / Changed / Fixed / Removed,
@@ -155,11 +161,24 @@ The release pipeline is automated via two `just` recipes plus a GitHub Actions w
 
 ### Cutting a release
 
-1. **Land the release notes.** On a feature branch, replace `## [Unreleased]` in `CHANGELOG.md`
+1. **Pre-flight: review type coverage and public-API breakages** since the previous stable
+   release:
+
+   ```bash
+   just release-check
+   ```
+
+   This prints (a) the current `basedpyright --verifytypes` score and (b) `griffe check`'s
+   breaking-change report against the previous stable tag (latest `vX.Y.Z` with no
+   `b1`/`rc1`/`.devN` suffix). Use it to sanity-check the CHANGELOG and the version bump:
+   any breaking change must be called out in the CHANGELOG and should bump the minor (pre-1.0)
+   or major (post-1.0). The report is informational — exit code is always 0.
+
+2. **Land the release notes.** On a feature branch, replace `## [Unreleased]` in `CHANGELOG.md`
    with a `## [X.Y.Z] - YYYY-MM-DD` heading and finalise the entries. Open a PR, get it merged
    to `main`.
 
-2. **Run the release recipe** from a clean `main`:
+3. **Run the release recipe** from a clean `main`:
 
    ```bash
    just release 0.6.0
@@ -175,14 +194,14 @@ The release pipeline is automated via two `just` recipes plus a GitHub Actions w
    Guards: aborts if the working tree is dirty, you're not on `main`, or the matching CHANGELOG
    section is missing.
 
-3. **Review and publish the release** on GitHub. Edit notes if needed and click **Publish
+4. **Review and publish the release** on GitHub. Edit notes if needed and click **Publish
    release**. This:
    - creates the `v0.6.0` git tag at the release commit,
    - fires the `release: published` event, which triggers
      [`pypi-publish.yaml`](.github/workflows/pypi-publish.yaml),
    - the workflow runs `uv build` then `uv publish` with PyPI trusted publishing.
 
-4. **Open the next dev cycle:**
+5. **Open the next dev cycle:**
 
    ```bash
    just release-post 0.7.0
