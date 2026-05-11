@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Final, Literal, final
+
+__all__ = [
+    "LOGGER_NAME",
+    "ServerConfig",
+]
+
+DEFAULT_BUFFER_SIZE: Final = 64 * 1024  # 64 KiB
+
+LOGGER_NAME: Final = "localpost.http"
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class ServerConfig:
+    host: str = "0.0.0.0"  # noqa: S104 — listen on all interfaces by default; explicit choice for a server lib
+    port: int = 8000
+    backend: Literal["h11", "httptools"] = "h11"
+    """HTTP parser backend. ``"h11"`` (default) is pure-Python and ships with
+    the core install. ``"httptools"`` is the C-based llhttp wrapper; requires
+    the ``[http-fast]`` extra."""
+    backlog: int = 1024
+    """Maximum number of queued (in the kernel) connections."""
+    rw_timeout: float = 1.0
+    """Timeout (seconds) for receive/send operations on a borrowed client connection,
+    and for the keep-alive read deadline extended after each chunk arrives."""
+    select_timeout: float = 1.0
+    """Default upper bound (seconds) on ``selector.select`` per ``Server.run`` iteration.
+    Caps how long the loop blocks before returning to the caller for a cancellation /
+    shutdown check. Callers may override per-iteration via ``Server.run(timeout=…)``."""
+    keep_alive_timeout: float = 15.0
+    """Timeout (seconds) for idle connections. Advertised to HTTP/1.1 clients
+    via the ``Keep-Alive: timeout=N`` response header so they can size their
+    keep-alive pool to match."""
+    max_body_size: int = 10 * 1024 * 1024  # 10 MiB
+    """Maximum request body size (bytes)."""

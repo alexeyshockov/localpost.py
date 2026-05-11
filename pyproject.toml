@@ -1,6 +1,6 @@
 [build-system]
-requires = ["pdm-backend", "pdm-build-locked"]
-build-backend = "pdm.backend"
+requires = ["uv_build>=0.9.10,<0.13"]
+build-backend = "uv_build"
 
 # See also https://daniel.feldroy.com/posts/2023-08-pypi-project-urls-cheatsheet
 [project.urls]
@@ -10,24 +10,24 @@ Docs = 'https://alexeyshockov.github.io/localpost.py/'
 
 [project]
 name = "localpost"
-description = "Consumers framework for different message brokers & simple in-process task scheduler"
-requires-python = ">=3.10"
-dynamic = ["version"]
+version = "0.6.0.b1"
+description = "Service hosting, in-process task scheduler, and a lightweight HTTP/1.1 server for long-running async Python processes"
+requires-python = ">=3.12"
 readme = "pypi_readme.md"
 license = "MIT" # https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#pep-639-license-declaration
 authors = [
     { name = "Alexey Shokov" },
 ]
 keywords = [
-    "scheduler", "cron",
-    "message brokers", "sqs", "kafka", "nats", "rabbitmq",
+    "hosting", "scheduler", "cron",
+    "http", "wsgi", "anyio",
+    "free-threading", "no-gil",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
     "Framework :: AsyncIO",
     "Framework :: AnyIO",
@@ -42,94 +42,197 @@ classifiers = [
     "Intended Audience :: System Administrators",
 ]
 dependencies = [
-    "typing_extensions ~=4.10",
-    "anyio >=3.6,<5.0",
+#    "typing_extensions ~=4.10",
+    "anyio ~=4.12",
 ]
 
 [project.optional-dependencies]
-http = [  # Hosting service
-    "uvicorn ~=0.30",
-]
-grpc = [  # Hosting service
-    "grpcio ~=1.68",
-]
 cron = [
     "croniter >=2.0,<4.0",
 ]
-scheduler = [  # TODO Better name
+scheduler = [
 #    "localpost[cron]",
     "humanize >=3.0,<5.0",
     "pytimeparse2 ~=1.6",
 ]
-sqs = [
-    "aiobotocore ~=2.15",
-#    "aws-lambda-powertools",  # To migrate from Lambda
+http = [
+    "h11 ~=0.16",
+#    "click ~=8.0",  # HTTP Server CLI
 ]
-kafka = [
-    "confluent-kafka ~=2.4",
-#    "confluent-kafka[schemaregistry,protobuf] ~=2.4",
+http-fast = [
+    # C-based HTTP/1.1 parser (llhttp)
+    # NOTE! Under free-threaded CPython, 0.7.1 and below auto-re-enables the GIL on import.
+    "httptools @ git+https://github.com/MagicStack/httptools.git",
 ]
-nats = [
-    "nats-py ~=2.8",
+http-compress = [
+    # Brotli compression for compress_handler. Gzip is stdlib and always available.
+    "brotli ~=1.1",
 ]
-rabbitmq = [
-    "aio-pika >=9.1,<10.0",
+rsgi = [
+    # Granian's RSGI bridge — pulled in by users who deploy under Granian
+    # via ``localpost.http.to_rsgi`` or ``localpost.hosting.HostRSGIApp``.
+    "granian ~=2.7",
+]
+click = [
+    "click ~=8.0",
+]
+openapi = [
+#    "localpost[http]",
+    "msgspec ~=0.19",
+]
+openapi-attrs = [
+    # attrs handlers + cattrs for structuring/unstructuring. Schema generation walks
+    # ``attrs.fields(cls)`` directly. Both libraries are user-installed; not a runtime
+    # dep of the base ``openapi`` extra.
+    "attrs >=23",
+    "cattrs >=24",
 ]
 
-# Yay, https://peps.python.org/pep-0735/ is finally here!
-#[tool.pdm.dev-dependencies]
 [dependency-groups]
 dev = [
     "icecream ~=2.1",
     "structlog ~=25.0",
+    "trio ~=0.32",
 ]
-dev-consumers = [
-    "aws-lambda-powertools",
-    "confluent-kafka[schemaregistry,protobuf]",
-    "grpcio-tools ~=1.68",
-    "protobuf ~=5.0",
+dev-tools = [
+    # Linters / type checkers used by ``just check``, ``just format``, and CI.
+    "ruff ~=0.15",
+    "ty ~=0.0.34",
+    "basedpyright ~=1.39",
+]
+dev-hosting-services = [
+    "uvicorn ~=0.30",
+    "hypercorn ~=0.17",
+    "grpcio ~=1.68",
+    "click ~=8.0",
+]
+dev-http = [
+    "flask ~=3.1",
+    "httpx",
+]
+dev-openapi = [
+    # Pydantic is supported via localpost.openapi.pydantic but is NOT a runtime
+    # dep of the openapi extra — end users install pydantic themselves. We pull
+    # it in here so our own examples and tests can exercise that path.
+    "pydantic ~=2.7",
+    # Same posture for attrs/cattrs (see the ``openapi-attrs`` extra).
+    "attrs >=23",
+    "cattrs >=24",
+]
+dev-sentry = [
+    "sentry-sdk ~=2.51",
 ]
 dev-otel = [
     "opentelemetry-exporter-otlp",  # Both gRPC and HTTP
-    "opentelemetry-instrumentation-confluent-kafka >=0.50b0",
 ]
 dev-types = [
     "types-croniter",
-#    "types-confluent-kafka",  # Many signatures do not match to the actual implementation
-    "types-protobuf",
-#    "grpc-stubs",  # Hasn't been updated for 2+ years...
-    "types-boto3[sqs]",
-    "types-aiobotocore[sqs] ~=2.15",
+    "types-grpcio",  # Replaces grpc-stubs, see: https://github.com/python/typeshed/pull/11204
 ]
 examples = [
-    "fast-depends ~=2.4",
-    "fastapi-slim ~=0.111",
-    'psycopg[binary,pool] ~=3.2',
+    "fastapi-slim ~=0.128",
 ]
 tests = [
-    "pytest ~=8.1",
-    "anyio[test]",
+    "pytest ~=9.0",
     "pytest-xdist",
+    "pytest-timeout ~=2.3",
+    "setproctitle",  # For pytest-xdist, to have descriptive process names
 ]
-unit-tests = [
+tests-unit = [
     "pytest-mock ~=3.14",
-    "pytest-cov ~=6.0",
+    "pytest-cov ~=7.0",
     "coverage[toml] ~=7.6",
+    "hypothesis ~=6.100",
 ]
-integration-tests = [
-    "boto3 ~=1.38",
-    "testcontainers[kafka,localstack,nats] ~=4.8",
+bench = [
+    # Macro (HTTP load): peer servers + ASGI app stack.
+    "starlette ~=1.0",
+    "uvicorn ~=0.30",
+    "a2wsgi",
+    "cheroot ~=11.1",
+    "gunicorn ~=25.0",
+    "granian ~=2.7",
+    # Micro (pytest-benchmark): regression smoke for router / URI template.
+    "pytest-benchmark ~=5.2",
+]
+bench-openapi = [
+    # Macro (OpenAPI framework comparison): peer typed-API frameworks.
+    "fastapi ~=0.136",
+    # flask-openapi3 was renamed to flask-openapi for the v5 line. v5 is
+    # currently rc; we accept pre-releases here (uv tool flag `--prerelease=allow`
+    # at install time, see benchmarks/_setup.py).
+    "flask-openapi >=5.0.0rc1,<6",
+    # Pydantic v2 is what both peers drive; LocalPost tests its msgspec path.
+    "pydantic ~=2.7",
+]
+docs = [
+    # Pre-1.0; pin to 0.x and accept early-adopter risk. Reads mkdocs.yml
+    # natively. Replaces mkdocs + mkdocs-material.
+    "zensical >=0.0.40,<0.1",
 ]
 
 [tool.coverage.run]
-omit = ["tests/*"]
+source = ["localpost"]
+branch = true
+# Internal-only entry points and dev/debug shims that don't merit coverage tracking.
+omit = [
+    "localpost/_debug.py",
+    "localpost/http/__main__.py",
+]
 
+[tool.coverage.report]
+# Anything below this fails the report. Set a few points under the current
+# total so day-to-day churn doesn't break CI; raise it as the suite grows.
+fail_under = 85
+show_missing = true
+skip_covered = false
+precision = 2
+exclude_also = [
+    # Type-checking-only branches don't run at test time.
+    "if TYPE_CHECKING:",
+    "if typing\\.TYPE_CHECKING:",
+    # Stub / Protocol / abstract method bodies.
+    "@overload",
+    "@(typing\\.)?overload",
+    "@(abc\\.)?abstractmethod",
+    "raise NotImplementedError",
+    "^\\s*\\.\\.\\.\\s*$",
+    # Defensive guards that aren't reachable from tests.
+    "if __name__ == .__main__.:",
+    # Explicit opt-out marker.
+    "pragma: no cover",
+]
 
-[tool.pyright]
-include = ["localpost"]
+[tool.coverage.paths]
+# Map matrix-cell paths back to a single canonical layout so combined coverage
+# from multiple Python versions / runners merges cleanly.
+source = [
+    "localpost/",
+    "*/localpost/",
+]
+
+[tool.vulture]
+# Dead-code finder. Run via ``just deadcode``.
+#
+# ``min_confidence`` is set high (80) so vulture stays a useful signal: the
+# 60-confidence band is dominated by public API surface vulture can't see
+# being used (decorated routes, hosting services, dataclass fields exposed
+# through reflection, etc.). The whitelist below names the 80+ confidence
+# false positives explicitly.
+paths = ["localpost"]
+min_confidence = 80
+sort_by_size = true
+ignore_names = [
+    # Overload signature parameters — present for type-checker consumption only,
+    # implementation uses ``_=None``.
+    "ret_t",
+    # Bound-method protocol parameters that ARE used in other implementations
+    # of the same protocol; vulture sees only this file.
+    "this_task",
+]
 
 [[tool.mypy.overrides]]
-module = ["grpc.*", "pytimeparse2.*", "confluent_kafka.*"]
+module = ["grpc.*", "pytimeparse2.*"]
 follow_untyped_imports = true
 
 [tool.ruff]
@@ -137,32 +240,89 @@ line-length = 120
 format.docstring-code-format = true
 
 [tool.ruff.lint]
+pyupgrade.keep-runtime-typing = true
+pydocstyle.convention = "google"
+# For the reference, check https://docs.astral.sh/ruff/rules/
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
     "F",  # pyflakes
+    "E", "W",  # pycodestyle
     "I",  # isort
-    "C",  # flake8-comprehensions
-    "B",  # flake8-bugbear
     "Q",  # flake8-quotes
+    "UP",  # pyupgrade
+    "YTT",  # flake8-2020
+    # TODO Uncomment after adding annotations to all modules
+    # All "ANN" rules are covered by mypy, except "ANN204"
+#    "ANN204",  # Missing return type annotation for special method ...
+    "ASYNC",  # flake8-async
+    "S",  # flake8-bandit
+    "BLE",  # flake8-blind-except
+    "B",  # flake8-bugbear
+    "A",  # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "DTZ",  # flake8-datetimez
+    "T10",  # flake8-debugger
+    "EXE",  # flake8-executable
+    "FA",  # flake8-future-annotations
+    # XXX Causes warning https://github.com/astral-sh/ruff/issues/8272
+    "ISC",  # flake8-implicit-str-concat
+    "G",  # flake8-logging-format
+    "INP",  # flake8-no-pep420
+    "PIE",  # flake8-pie
+    "T20",  # flake8-print
+    "PT",  # flake8-pytest-style
+    # The rest of RET rules don't improve code and may even worsen readability
+    "RET501", "RET502", "RET503",  # flake8-return
+    "SLOT",  # flake8-slots
+    "SIM",  # flake8-simplify
+    "TID",  # flake8-tidy-imports
+    "PTH",  # flake8-use-pathlib
+#    "FIX",  # flake8-fixme
+    "PGH",  # pygrep-hooks
+    "PL",  # Pylint
+    "TRY",  # tryceratops
+    "PERF",  # Perflint
+    "LOG",  # flake8-logging
+    "RUF",  # Ruff-specific
 ]
-[tool.ruff.lint.pydocstyle]
-convention = "google"
+ignore = [
+    "ASYNC109",  # Async function definition with a `timeout` parameter
+    "RUF022",  # `__all__` is not sorted
+    "PGH003", "PGH004",  # Use specific rule codes when ignoring type issues
+    "RUF005",
+    "PERF203",  # ``try``/``except`` in a loop — kept off; readability >> the micro-cost on 3.12+ "zero-cost" exception handling
+    "TID252",  # Prefer absolute imports over relative imports from parent modules
+    "S101",  # Use of `assert` detected
+    "S311",  # Standard pseudo-random generators are not suitable for cryptographic purposes
+    "B011",  # Do not `assert False`
+    "SIM105",  # Use `contextlib.suppress(GeneratorExit)` instead of `try`-`except`-`pass`
+    "SIM117",  # Use a single ``with`` statement with multiple contexts — wide-cast nesting reads cleaner with separate ``with``s
+    "PLR0913",  # Too many arguments in function definition
+    "PLR2004",  # Magic value used in comparison
+    # TODO Reduce complexity
+    "PLR0911", "PLR0912", "PLR0915",  # Too many ...
+    # Too many false positives
+    "PLW2901",  # ... loop variable ... overwritten by assignment target
+    "TRY003",  # Avoid specifying long messages outside the exception class
+    "TRY400",  # Use `logging.exception` instead of `logging.error`
+    "RUF012",  # Mutable class attributes should be annotated with `typing.ClassVar`
+]
+[tool.ruff.lint.per-file-ignores]
+"examples/*" = ["T201"]
+"benchmarks/*" = ["T201"]
+# Tests legitimately use lazy/conditional imports inside test bodies (optional
+# extras, internals under test). Top-of-file imports are not always feasible.
+"tests/*" = ["PLC0415"]
+# Not a Python package; just a hook file mkdocs loads by path.
+"docs/*" = ["INP001"]
 
-[tool.pdm]
-distribution = true
-
-[tool.pdm.version]
-source = "scm"
-write_to = "localpost/__meta__.py"
-write_template = "version = '{}'"
-
-[tool.pdm.build]
-excludes = ["./**/.git", "tests", "examples"]
+[tool.uv]
+build-backend.module-root = ""
+build-backend.module-name = "localpost"
 
 [tool.pytest.ini_options]
-minversion = "8.0"
+anyio_mode = "auto"
 #addopts = "-q -m 'not integration'"
+timeout = 30
 testpaths = [
     "tests",
 ]
@@ -170,5 +330,10 @@ python_files = [
     "*.py",
 ]
 markers = [
-    "integration: Consumers (SQS, Kafka, NATS, RabbitMQ) integration tests",
+    "integration: Consumers (SQS, Kafka,..) integration tests",
+    "no_ambient_pool: opt out of the autouse threadtools ambient pool fixture",
 ]
+
+[tool.typos.default.extend-words]
+# ``ANDs`` (verb) — selector group spec ANDs with filter spec.
+ands = "ands"

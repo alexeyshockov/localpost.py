@@ -2,80 +2,113 @@
 
 [![PyPI package version](https://img.shields.io/pypi/v/localpost)](https://pypi.org/project/localpost/)
 ![Python versions](https://img.shields.io/pypi/pyversions/localpost)
-<br>
 [![Code coverage](https://img.shields.io/sonar/coverage/alexeyshockov_localpost.py?server=https%3A%2F%2Fsonarcloud.io)](https://sonarcloud.io/project/overview?id=alexeyshockov_localpost.py)
 
-Simple in-process task scheduler & consumers framework for different message brokers.
+A small async Python framework for long-running processes: service hosting,
+in-process task scheduling, and a lightweight HTTP server — all built on
+[AnyIO](https://anyio.readthedocs.io/) (runs on asyncio **and** Trio).
 
-## Scheduler
+LocalPost is not a monolith. Each module is usable on its own; pick what you
+need.
 
-TBD
+## Features
 
-### Tasks
+- **Service hosting** with a structured lifecycle (`Starting → Running →
+  ShuttingDown → Stopped`), signal handling, and composable middleware.
+- **Scheduler** with declarative triggers (`every`, `after`, `cron`) and
+  operator-based composition (`every("1m") // delay((0, 10))`).
+- **HTTP server** — sync, h11-based, ~400 LOC; wrap any WSGI app.
+- **IoC container** — `.NET`-style, scoped, with Flask integration.
 
-TBD, including:
-- can accept 0 or 1 argument (trigger's value)
-- return values will be available in a stream
+## Install
 
-#### Concurrency
+```bash
+pip install localpost
+```
 
-Solely depends on the trigger.
+Optional extras:
 
-### Triggers & decorators
+| Extra             | Adds                                                        |
+| ----------------- | ----------------------------------------------------------- |
+| `[cron]`          | `croniter` — cron-expression trigger                        |
+| `[scheduler]`     | `humanize`, `pytimeparse2` — string durations               |
+| `[http]`          | `h11` — the HTTP server                                     |
+| `[http-fast]`     | `httptools` — alternative C-based parser                    |
 
-TBD
+## Quick start — scheduler
 
-### Built-in triggers & decorators
+```python
+import random
 
-TBD, including:
-- every()
-- delay()
-- skip_first()
+from localpost.hosting import run_app
+from localpost.scheduler import after, delay, every, scheduled_task, take_first
 
-### Custom triggers & decorators
 
-TBD
+@scheduled_task(every("3s") // delay((0, 1)))
+async def task1():
+    return random.randint(1, 22)
 
-## Consumers
 
-TBD, including basic Kafka & SQS examples.
+@scheduled_task(after(task1) // take_first(3))
+async def task2(task1_result: int):
+    print(f"task1 emitted: {task1_result}")
 
-## Flow & flow ops
 
-TBD
+if __name__ == "__main__":
+    run_app(task1, task2)
+```
 
-### Handlers & handler managers
+`run_app` wires signal handling (SIGINT / SIGTERM), starts every service in
+parallel, exits cleanly when they all stop, and raises ``SystemExit`` with
+the resulting status code — no ``sys.exit(...)`` wrapper needed.
 
-TBD
+## Modules
 
-### Decorators (middlewares & wrappers)
+| Module                              | Purpose                                                    |
+| ----------------------------------- | ---------------------------------------------------------- |
+| [`hosting`](localpost/hosting/)     | Service lifecycle, signals, middleware, ASGI/gRPC adapters |
+| [`scheduler`](localpost/scheduler/) | Composable in-process task scheduler                       |
+| [`di`](localpost/di/)               | Scoped IoC container                                       |
+| [`http`](localpost/http/)           | Small h11-based HTTP/1.1 server                            |
 
-TBD
+All four modules have stable public APIs and are not expected to break in
+patch or minor releases.
 
-## Hosting
+Each subdirectory has its own README with a quickstart, key concepts, and
+extension points.
 
-TBD
+## Why localpost?
 
-### Hosted services
+- **Type-safe** — public API is checked with `ty` and `basedpyright
+  --verifytypes`.
+- **FastAPI-style ergonomics** — decorators for tasks, services, and HTTP
+  operations; declarative middleware.
+- **Async-first** — built on AnyIO, so structured concurrency is the default,
+  and you get Trio support for free.
+- **Handle-both** — the scheduler accepts sync or async callables; sync ones
+  are offloaded to a thread pool.
+- **Small** — each module is focused and independently usable; take just the
+  scheduler, just the hosting, or the full stack.
 
-TBD
+## Status
 
-### Running multiple services
+Beta — actively developed. Python 3.12+ required. See
+[CHANGELOG.md](CHANGELOG.md) for history.
 
-TBD, including:
-- combining multiple services, using host's `+` operator
-- wrapping a service (or a set of services) with another one, using host's `>>` operator
+Examples for every module live under [`examples/`](examples/).
 
-### AppHost
+## License
 
-TBD
+MIT — see [LICENSE](LICENSE).
 
-## Motivation
+## Contributing
 
-TBD, including:
-- type safety
-- FastAPI-like
-  - decorators to create scheduled tasks & hosted services
-  - middlewares
-- Async first
-  - AnyIO backed (mainly for structured concurrency, compatibility with Trio as a bonus)
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, code style, commit conventions, the
+pull-request checklist, and (for maintainers) the release process.
+
+Quick start:
+
+```bash
+just deps    # uv sync --all-groups --all-extras
+just tests
+```

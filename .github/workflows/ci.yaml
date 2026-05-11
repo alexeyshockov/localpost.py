@@ -2,27 +2,101 @@ name: CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [main]
   pull_request:
-    branches: [ master, main ]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # 3.15 is still beta and ``granian``'s PyO3 0.27 doesn't support it yet;
+    # the entry is kept as an early-signal channel until PyO3 catches up.
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+          - python: "3.13"
+          - python: "3.14"
+          - python: "3.15"
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --python ${{ matrix.python }} --all-groups --all-extras
+      - name: pytest (unit only)
+        timeout-minutes: 5
+        run: uv run --python ${{ matrix.python }} pytest -m "not integration" -v
+
+  tests-ft:
+    runs-on: ubuntu-latest
+    # 3.15t is still beta (uv ships ``cpython-3.15.0b1+freethreaded``).
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.14t"
+          - python: "3.15t"
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+      - name: Install dependencies (FT-clean subset)
+        # --no-default-groups + narrow opt-in: avoid C extensions that
+        # re-enable the GIL on free-threaded builds (httptools 0.7.x,
+        # grpcio, granian, setproctitle). Covers the pure-Python core
+        # that the FT marking actually claims. ``dev-http`` (httpx,
+        # flask), ``dev-sentry`` (sentry-sdk), and the ``click`` extra
+        # are pure Python — pulled in so tests/http and
+        # tests/hosting/services collect cleanly.
+        run: >
+          uv sync --python ${{ matrix.python }} --no-default-groups
+          --group tests --group tests-unit
+          --group dev-http --group dev-sentry
+          --extra http --extra scheduler --extra cron --extra click
+      - name: pytest
+        timeout-minutes: 5
+        env:
+          PYTHON_GIL: "0"  # fail loudly if any imported C ext re-enables the GIL
+        # Skip ``tests/openapi`` (msgspec C ext) and ``tests/hosting/rsgi.py``
+        # (exercises Granian hooks; granian C ext not in the FT subset).
+        run: >
+          uv run --python ${{ matrix.python }} pytest -v -m "not integration"
+          --ignore=tests/openapi
+          --ignore=tests/hosting/rsgi.py
+
   sonarcloud:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Disable shallow clone (required for SonarQube to work properly)
-          fetch-depth: 0
-      - uses: pdm-project/setup-pdm@v4
+          fetch-depth: 0  # Sonar needs full history
+      - uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version-file: ".python-version"
-          cache: true
-      - name: pdm install
-        run: pdm install --frozen-lockfile --no-editable
-      - name: pytest
+      - run: uv sync --all-groups --all-extras
+      - name: pytest with coverage
         timeout-minutes: 5
-        run: pdm run pytest --cov-report=term --cov-report=xml --cov-branch --cov -v
+        run: >
+          uv run pytest -m "not integration" -v
+          --cov-report=term --cov-report=xml --cov
       - uses: SonarSource/sonarqube-scan-action@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

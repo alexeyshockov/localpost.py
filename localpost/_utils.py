@@ -9,38 +9,32 @@ import signal
 import sys
 import typing
 from collections.abc import Awaitable, Callable, Coroutine, Generator, Iterable
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from datetime import timedelta
 from functools import wraps
 from typing import (
     Any,
     Final,
-    Generic,
-    ParamSpec,
+    NotRequired,
     Protocol,
-    TypeAlias,
+    Self,
     TypedDict,
-    Union,
+    TypeGuard,
     cast,
     final,
     overload,
 )
 
 import anyio
-from anyio import CancelScope, WouldBlock, create_task_group, from_thread, to_thread
-from anyio.abc import TaskGroup, TaskStatus
-from anyio.lowlevel import checkpoint
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream, MemoryObjectStreamState
-from typing_extensions import NotRequired, Self, TypeGuard, TypeVar
-
-if sys.version_info >= (3, 11):
-    from builtins import ExceptionGroup  # noqa
-else:
-    from exceptiongroup import ExceptionGroup
-
-T = TypeVar("T", default=Any)
-P = ParamSpec("P")
-R = TypeVar("R")
+from anyio import (
+    CancelScope,
+    CapacityLimiter,
+    create_task_group,
+    from_thread,
+    to_thread,
+)
+from anyio.abc import TaskGroup
 
 # Sentinel object, to indicate that a value is not set (see https://python-patterns.guide/python/sentinel-object)
 NOT_SET: Final = object()
@@ -52,63 +46,73 @@ HANDLED_SIGNALS = (
     signal.SIGTERM,  # Unix signal 15. Sent by `kill <pid>`.
 )
 if sys.platform == "win32":
-    HANDLED_SIGNALS += (signal.SIGBREAK,)  # Windows signal 21. Sent by Ctrl+Break.
-
-
-class _IgnoredTaskStatus(TaskStatus[Any]):
-    def started(self, value: Any = None) -> None:
-        pass
-
-
-NO_OP_TS: Final = _IgnoredTaskStatus()
+    # Windows signal 21. Sent by Ctrl+Break.
+    HANDLED_SIGNALS += (signal.SIGBREAK,)  # pyright: ignore[reportConstantRedefinition]
 
 
 # PyCharm has a bug when calling a TypeVarTuple-parameterized function with 0 arguments,
 # see https://youtrack.jetbrains.com/issue/PY-63820
 def start_task_soon(tg: TaskGroup, func: Callable[[], Awaitable[Any]], name: object = None) -> None:
-    tg.start_soon(func, name=name)  # type: ignore
+    tg.start_soon(func, name=name)
 
 
-def unwrap_exc(exc: Exception) -> Exception:
+def unwrap_exc(exc: BaseException) -> BaseException:
     if isinstance(exc, ExceptionGroup) and len(exc.exceptions) == 1:
         return unwrap_exc(exc.exceptions[0])
     return exc
 
 
 class _SupportsClose(Protocol):
-    def close(self) -> object: ...
+    def close(self) -> Any: ...
 
 
 class _SupportsAsyncClose(Protocol):
-    async def aclose(self) -> object: ...
+    def aclose(self) -> Awaitable[Any]: ...
 
 
-class ClosingContext(Generic[T], AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
-    def __init__(self, enter_result: T):
-        self.enter_result = enter_result
-
-    def __enter__(self) -> T:
-        return self.enter_result
-
-    async def __aenter__(self) -> T:
-        return self.enter_result
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        if hasattr(t := self.enter_result, "close"):
-            cast(_SupportsClose, t).close()
-
-    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
-        t = self.enter_result
-        if hasattr(t, "aclose"):
-            await cast(_SupportsAsyncClose, t).aclose()
-        elif hasattr(t, "close"):
-            cast(_SupportsClose, t).close()
+@contextmanager
+def set_cvar[T](cvar: ContextVar[T], value: T) -> Generator[T]:
+    """To emulate what Python 3.14 cvar.set() does by default."""
+    old_value = cvar.set(value)
+    try:
+        yield value
+    finally:
+        cvar.reset(old_value)
 
 
 @final
-# Actually immutable, but frozen=True has noticeable performance impact
+class maybe_closing[T](AbstractContextManager[T, None], AbstractAsyncContextManager[T, None]):
+    def __init__(self, enter_result: T):
+        self._enter_result = enter_result
+
+    def __enter__(self) -> T:
+        return self._enter_result
+
+    async def __aenter__(self) -> T:
+        return self._enter_result
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        getattr(self._enter_result, "close", lambda: None)()
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        target = self._enter_result
+        close = getattr(target, "aclose", getattr(target, "close", lambda: None))
+        if inspect.isawaitable(result := close()):
+            await result
+
+
+def ensure_int_or_inf(value: int | float, *, min_value: int = 0, name: str = "Value") -> int | float:
+    if math.isinf(value):
+        return value
+    if isinstance(value, int) and value >= min_value:
+        return value
+    raise ValueError(f"{name} must be an integer (>={min_value}) or infinity, got {value!r}")
+
+
+@final
+# Actually immutable, but frozen=True has a noticeable performance impact
 @dc.dataclass(slots=True, eq=True, unsafe_hash=True)
-class Result(Generic[T]):
+class Result[T]:
     value: T  # | NOT_SET
     error: BaseException  # | None
 
@@ -130,7 +134,7 @@ def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
         desc = typing.get_type_hints(func, globalns=getattr(func, "__globals__", None))
     except (TypeError, NameError):
         try:
-            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, "__globals__", None))
+            desc = typing.get_type_hints(func.__call__, globalns=getattr(func.__call__, "__globals__", None))  # type: ignore[operator]
         except (TypeError, NameError, AttributeError):
             return type(None)
 
@@ -140,11 +144,11 @@ def get_callable_return_type(func: Callable[..., Any], /) -> type[Any]:
 
 
 @overload
-def is_async_callable(obj: Callable[P, Any], /) -> TypeGuard[Callable[P, Awaitable[Any]]]: ...
+def is_async_callable[**P](obj: Callable[P, Any], /) -> TypeGuard[Callable[P, Awaitable[Any]]]: ...
 
 
 @overload
-def is_async_callable(obj: Callable[P, Any], ret_t: type[R], /) -> TypeGuard[Callable[P, Awaitable[R]]]: ...
+def is_async_callable[**P, R](obj: Callable[P, Any], ret_t: type[R], /) -> TypeGuard[Callable[P, Awaitable[R]]]: ...
 
 
 # See also: https://docs.python.org/3/library/inspect.html#inspect.markcoroutinefunction
@@ -155,25 +159,29 @@ def is_async_callable(obj: Callable[..., Any] | object, _=None, /) -> TypeGuard[
         return False
     return (
         inspect.iscoroutinefunction(obj)
-        or inspect.iscoroutinefunction(obj.__call__)  # type: ignore
+        or inspect.iscoroutinefunction(obj.__call__)
         or issubclass(get_callable_return_type(obj), Awaitable)
     )
 
 
-def ensure_async_callable(
-    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
+def ensure_async_callable[**P, T](
+    func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T],
+    /,
+    *,
+    max_threads: int | float | CapacityLimiter | None = None,
 ) -> Callable[P, Awaitable[T]]:
     if is_async_callable(func):
         return func
-    return functools.partial(to_thread.run_sync, func)  # type: ignore[return-value]
+    limiter = CapacityLimiter(max_threads) if isinstance(max_threads, int | float) else max_threads
+    return cast("Callable[P, Awaitable[T]]", functools.partial(to_thread.run_sync, func, limiter=limiter))
 
 
-def ensure_sync_callable(
+def ensure_sync_callable[**P, T](
     func: Callable[P, Awaitable[T]] | Callable[P, T] | Callable[P, Awaitable[T] | T], /
 ) -> Callable[P, T]:
     if is_async_callable(func):
-        return functools.partial(from_thread.run, func)
-    return func  # type: ignore[return-value]
+        return cast("Callable[P, T]", functools.partial(from_thread.run, func))
+    return cast("Callable[P, T]", func)
 
 
 def def_full_name(func: Any, /) -> str:
@@ -192,16 +200,18 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
         return value
     if isinstance(value, str):
         try:
-            import pytimeparse2
+            import pytimeparse2  # noqa: PLC0415
 
             use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
             try:
                 # Make sure to get timedelta, not relativedelta from dateutil
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = False
-                result = pytimeparse2.parse(value, as_timedelta=True)
+                # ``as_timedelta=True`` makes ``parse`` return ``timedelta``
+                # exclusively, but the stubs still expose ``int | float | timedelta``.
+                result = cast("timedelta | None", pytimeparse2.parse(value, as_timedelta=True))
                 if result is None:
                     raise ValueError(f"Invalid time period: {value!r}")
-                return result  # type: ignore[return-value]
+                return result
             finally:
                 pytimeparse2.HAS_RELITIVE_TIMEDELTA = use_dateutil
         except ImportError:
@@ -211,7 +221,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
 
 def td_str(td: timedelta, /) -> str:
     try:
-        from humanize import precisedelta
+        from humanize import precisedelta  # noqa: PLC0415
 
         # 23 seconds or 0.24 seconds
         return precisedelta(td)
@@ -221,9 +231,7 @@ def td_str(td: timedelta, /) -> str:
 
 
 # TODO Rename to DurationFactory
-DelayFactory: TypeAlias = Union[
-    Callable[[], timedelta], tuple[int, int], tuple[float, float], int, float, timedelta, None
-]
+type DelayFactory = Callable[[], timedelta] | tuple[int | float, int | float] | int | float | timedelta | None
 
 
 @final
@@ -249,7 +257,7 @@ class FixedDelay:
     def create(cls, value: int | float | timedelta | None) -> Self:
         if value is None or value == 0:
             delay = TD_ZERO
-        elif isinstance(value, (int, float)):
+        elif isinstance(value, int | float):
             delay = timedelta(seconds=value)
         elif isinstance(value, timedelta):
             delay = value
@@ -268,46 +276,17 @@ class FixedDelay:
 # TODO Rename to ensure_duration_factory()
 def ensure_delay_factory(delay: DelayFactory, /) -> Callable[[], timedelta]:
     if isinstance(delay, tuple):  # tuple[int, int] | tuple[float, float]
-        return RandomDelay(delay)  # type: ignore
-    elif callable(delay):
-        return delay
-    else:  # int | float | timedelta | None
-        return FixedDelay.create(delay)
+        return RandomDelay(cast("tuple[int, int] | tuple[float, float]", delay))
+    if callable(delay):
+        return cast("Callable[[], timedelta]", delay)
+    # int | float | timedelta | None
+    return FixedDelay.create(cast("int | float | timedelta | None", delay))
 
 
 # sleep(0) is used to return control to the event loop (in both Trio and AsyncIO)
 def sleep(i: timedelta | int | float | None, /) -> Coroutine[Any, Any, None]:
     interval_sec: float = i.total_seconds() if isinstance(i, timedelta) else 0 if i is None else i
     return anyio.sleep(interval_sec)
-
-
-@final
-@dc.dataclass(eq=False)
-class MemorySendStream(Generic[T], MemoryObjectSendStream[T]):
-    def send_or_drop(self, item: T) -> None:
-        try:
-            self.send_nowait(item)
-        except WouldBlock:
-            pass
-
-    async def send_or_drop_async(self, item: T) -> None:
-        await checkpoint()
-        try:
-            self.send_nowait(item)
-        except WouldBlock:
-            pass
-
-
-class MemoryStream(Generic[T]):
-    @staticmethod
-    def create(max_buffer_size: float = 0) -> tuple[MemorySendStream[T], MemoryObjectReceiveStream[T]]:
-        if max_buffer_size != math.inf and not isinstance(max_buffer_size, int):
-            raise ValueError("max_buffer_size must be either an integer or math.inf")
-        if max_buffer_size < 0:
-            raise ValueError("max_buffer_size cannot be negative")
-
-        state = MemoryObjectStreamState[T](max_buffer_size)
-        return MemorySendStream(state), MemoryObjectReceiveStream(state)
 
 
 class AsyncBackendConfig(TypedDict):
@@ -344,10 +323,7 @@ class EventView(AnyEventView, Protocol):
 
 @dc.dataclass(frozen=True, slots=True)
 class Event(EventView):
-    _source: anyio.Event
-
-    def __init__(self) -> None:
-        object.__setattr__(self, "_source", anyio.Event())
+    _source: anyio.Event = dc.field(default_factory=anyio.Event)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(is_set={self._source.is_set()})"
@@ -385,15 +361,18 @@ class EventViewProxy(EventView):
 
 
 async def _cancel_when(trigger: AnyEventView | Callable[[], Awaitable[Any]], scope: CancelScope) -> None:
-    await (trigger() if callable(trigger) else trigger.wait())
+    if callable(trigger):
+        await cast("Callable[[], Awaitable[Any]]", trigger)()
+    else:
+        await trigger.wait()
     scope.cancel()
 
 
 def cancellable_from(*events: AnyEventView):
-    def _decorator(func: Callable[P, Awaitable[Any]]) -> Callable[P, Awaitable[None]]:
+    def _decorator[**P](func: Callable[P, Awaitable[Any]]) -> Callable[P, Awaitable[None]]:
         @wraps(func)
         async def _wrapper(*args, **kwargs):
-            # await wait_any(lambda: func(*args, **kwargs), *[e.wait for e in events])
+            # Short version: await wait_any(lambda: func(*args, **kwargs), *[e.wait for e in events])
             async with create_task_group() as exec_tg:
                 exec_scope = exec_tg.cancel_scope
                 for e in events:
@@ -413,6 +392,21 @@ async def wait_all(events: Iterable[EventView]) -> None:
 
 
 async def wait_any(*targets: EventView | Callable[[], Awaitable[Any]]) -> None:
-    async with create_task_group() as tg:
-        for t in targets:
-            tg.start_soon(_cancel_when, t, tg.cancel_scope)
+    try:
+        async with create_task_group() as tg:
+            for t in targets:
+                tg.start_soon(_cancel_when, t, tg.cancel_scope)
+    except ExceptionGroup as exc_group:
+        exc = unwrap_exc(exc_group)
+        raise exc from exc.__cause__
+
+
+class NullSemaphore(AbstractContextManager):
+    def __exit__(self, exc_type, exc_value, traceback, /):
+        pass
+
+    async def acquire(self) -> None:
+        pass
+
+    def release(self) -> None:
+        pass

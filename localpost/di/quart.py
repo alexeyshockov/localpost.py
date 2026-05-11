@@ -1,0 +1,1 @@
+"""Quart (async Flask) integration"""

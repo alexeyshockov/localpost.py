@@ -1,0 +1,95 @@
+# LocalPost benchmarks
+
+Two top-level groups:
+
+- **[`micro/`](micro/)** — `pytest-benchmark` micro-benchmarks for
+  `URITemplate` and `Router`. Catches perf regressions in the
+  deterministic core.
+- **[`macro/`](macro/)** — load benchmarks driven by
+  [`oha`](https://github.com/hatoo/oha) against a spawned subprocess.
+  Two suites:
+  - **[`macro/http/`](macro/http/README.md)** — compares LocalPost's
+    HTTP server against peer servers (Gunicorn, Cheroot, Granian,
+    Uvicorn) on a fixed Flask / Starlette workload. Measures **HTTP
+    server** overhead.
+  - **[`macro/openapi/`](macro/openapi/README.md)** — compares
+    `localpost.openapi` against peer typed/OpenAPI frameworks (FastAPI,
+    flask-openapi v5) on a shared workload — typed handlers, schema
+    validation, response serialization. Measures **framework** overhead.
+
+The two macro suites share the runner, types, filter language, and
+report writers via [`macro/_core/`](macro/_core/). Each defines its own
+scenarios, stacks, and `apps/`.
+
+All three are kept out of the default test run (`just tests`).
+
+## Quick start
+
+```bash
+brew install oha   # one-time prereq for macro suites
+just bench-deps    # provision .venv-bench/<py>/ for every interpreter
+
+# Macro HTTP server bench
+just bench-http
+just bench-http --duration 5 --stacks localpost_h11,flask_gunicorn
+
+# Macro OpenAPI framework bench
+just bench-openapi
+just bench-openapi --duration 5 --stacks fastapi,localpost_openapi
+
+# Micro (pytest-benchmark)
+just bench-micro
+```
+
+Per-suite docs: [`macro/http/README.md`](macro/http/README.md),
+[`macro/openapi/README.md`](macro/openapi/README.md).
+
+## Shared CLI surface
+
+Both macro runners share these flags via
+[`benchmarks/macro/_core/cli.py`](macro/_core/cli.py):
+
+- `--duration N`            — seconds per cell (default 20).
+- `--stacks a,b`            — verbatim stack name list (escape hatch).
+- `--group <name>`          — named preset (e.g. `quick`, `localpost`).
+- `--filter key=val`        — dim filter (repeatable, AND together).
+  Supports glob (`backend=lp-*`), comma (`app=flask,starlette`),
+  negation (`app!=starlette`).
+- `--scenarios a,b`         — restrict to specific scenarios.
+- `--pythons name=path,...` — override the bench Python matrix
+  (default: every entry in
+  [`benchmarks.macro._core.pythons.PYTHONS`](macro/_core/pythons.py)).
+
+## Micro suite
+
+`pytest-benchmark`-driven, runs in-process:
+
+- `bench_uri_template.py` — `URITemplate.parse`, `.match` (hit / miss /
+  multi-var).
+- `bench_router.py` — `Routes.build`, `Router.wsgi` dispatch (literal
+  hit, parameterised hit, 404, 405).
+
+```bash
+# Save a baseline before changing code
+just bench-micro --benchmark-autosave
+
+# Then later, compare
+just bench-micro --benchmark-compare --benchmark-compare-fail=mean:10%
+```
+
+Micro-benchmarks are **not** wired to a CI check. If you want CI-stable
+regression gates later, swap `pytest-benchmark` for
+[`pytest-codspeed`](https://docs.codspeed.io/) — it runs the same
+fixtures under deterministic instrumentation on Codspeed's infra. No
+code changes beyond the dependency.
+
+## Caveats (macro)
+
+- **Single-host noise.** Numbers are sensitive to CPU thermals, kernel
+  scheduling, other processes. Re-run if a cell looks anomalous. The
+  relative ordering on the *same* run is what matters; absolute RPS
+  will shift run-to-run.
+- **Not for CI gates.** GitHub Actions runners are too noisy for HTTP
+  throughput regression gates. Run macro benchmarks locally.
+- **Single process by design.** Real deployments multiply by N
+  workers; the relative ordering still holds.

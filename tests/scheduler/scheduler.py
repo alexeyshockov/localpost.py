@@ -1,0 +1,210 @@
+import random
+import time
+from datetime import timedelta
+
+import anyio
+import pytest
+from anyio import fail_after
+
+from localpost.hosting import serve
+from localpost.scheduler import Scheduler, Task, after, delay, every, scheduled_task, take_first
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_task_decorator():
+    results = []
+    scheduler = Scheduler()
+
+    @scheduler.task(every(timedelta(seconds=1)))
+    def sample_task():
+        results.append(random.randint(0, 10))
+
+    assert callable(sample_task)
+
+    async with serve(scheduler) as lt:
+        await anyio.sleep(0.5)  # "App is working"
+        lt.shutdown()
+
+    assert len(results) == 1  # Only one initial run
+
+
+async def test_scheduler_tasks():
+    results = []
+    scheduler = Scheduler()
+
+    @scheduler.task(every(timedelta(seconds=1)))
+    def sample_task1():
+        results.append("task1 result")
+
+    @scheduler.task(every(timedelta(seconds=1)))
+    def sample_task2():
+        results.append("task2 result")
+
+    assert callable(sample_task1)
+
+    async with serve(scheduler) as lt:
+        await anyio.sleep(0.5)  # "App is working"
+        lt.shutdown()
+
+    assert len(results) == 2  # Only one initial run for each task
+    assert "task1 result" in results
+    assert "task2 result" in results
+
+
+# An empty scheduler (without any tasks) should complete immediately without errors
+async def test_empty_scheduler():
+    scheduler = Scheduler()
+
+    with fail_after(1):
+        async with serve(scheduler):
+            pass
+
+
+async def test_single_scheduled_task():
+    """A single ``@scheduled_task``-decorated function is itself a ServiceF."""
+    results = []
+
+    @scheduled_task(every(timedelta(seconds=1)))
+    def sample_task():
+        results.append(1)
+
+    async with serve(sample_task) as lt:
+        await anyio.sleep(0.5)
+        lt.shutdown()
+
+    assert len(results) == 1
+
+
+async def test_handler_failure_does_not_kill_loop():
+    """A raising handler must be logged and published as Result.failure, but the schedule loop must keep firing."""
+    runs = 0
+
+    @scheduled_task(every(timedelta(seconds=0.05)) // take_first(3))
+    def flaky():
+        nonlocal runs
+        runs += 1
+        raise RuntimeError("boom")
+
+    with fail_after(2):
+        async with serve(flaky) as lt:
+            await lt.stopped  # ``take_first(3)`` makes the service stop on its own
+
+    assert runs == 3
+
+
+async def test_after_trigger_chains_results():
+    """``after(task1)`` fires task2 with task1's return value on every successful run."""
+    scheduler = Scheduler()
+    seen: list[int] = []
+
+    @scheduler.task(every(timedelta(seconds=0.05)) // take_first(3))
+    def producer() -> int:
+        return 42
+
+    @scheduler.task(after(producer))
+    def _consumer(value: int) -> None:
+        seen.append(value)
+
+    with fail_after(2):
+        async with serve(scheduler) as lt:
+            await lt.stopped  # producer stops after 3 firings → consumer sees EndOfStream → scheduler stops
+
+    assert seen == [42, 42, 42]
+
+
+async def test_after_trigger_skips_failures():
+    """``after(task1)`` only fires when task1 succeeds; failures are dropped (``after_all`` would see them)."""
+    scheduler = Scheduler()
+    seen: list[int] = []
+    n = 0
+
+    @scheduler.task(every(timedelta(seconds=0.05)) // take_first(4))
+    def flaky() -> int:
+        nonlocal n
+        n += 1
+        if n % 2 == 0:
+            raise RuntimeError("even runs fail")
+        return n
+
+    @scheduler.task(after(flaky))
+    def _consumer(value: int) -> None:
+        seen.append(value)
+
+    with fail_after(2):
+        async with serve(scheduler) as lt:
+            await lt.stopped
+
+    # n = 1, 3 succeed; n = 2, 4 raise. Only odd values reach ``after``.
+    assert seen == [1, 3]
+
+
+async def test_delay_inserts_wait_between_events():
+    """``delay(D)`` sleeps ``D`` between receiving an event and forwarding it. With ``every`` emitting
+    fast and ``take_first(N)`` capping the run, total elapsed time must be at least ``N * D``."""
+    timestamps: list[float] = []
+
+    # ``every(1ms)`` keeps the source emitting fast enough that ``delay`` is the bottleneck;
+    # the actual cadence between handler firings is the delay duration.
+    @scheduled_task(every(timedelta(seconds=0.001)) // delay(timedelta(seconds=0.05)) // take_first(3))
+    def tick():
+        timestamps.append(time.monotonic())
+
+    with fail_after(2):
+        async with serve(tick) as lt:
+            await lt.stopped
+
+    assert len(timestamps) == 3
+    # Each consecutive event spent ~50ms inside ``delay``; allow generous slack for CI scheduling jitter.
+    intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
+    for interval in intervals:
+        assert interval >= 0.04, f"delay too short: {interval:.3f}s (expected >=0.04s)"
+
+
+async def test_subscribe_after_task_finishes_raises():
+    """``Task`` is one-shot: once the last user has exited, subscribers can't be added (the underlying
+    ExitStack is closed). The previous code raised a cryptic ``cannot reenter context`` deep in the
+    ExitStack; ``subscribe()`` now raises a clear ``RuntimeError`` up-front."""
+
+    def my_task() -> int:
+        return 7
+
+    task: Task[None, int] = Task(my_task)
+    # Drive the task through one full lifecycle.
+    async with task:
+        pass
+
+    with pytest.raises(RuntimeError, match="already finished"):
+        task.subscribe()
+
+
+async def test_shutdown_during_handler_lets_handler_finish():
+    """When shutdown fires while a handler is in flight, the handler completes naturally, no further
+    events are dispatched, and the service stops cleanly. Locks in the current graceful-shutdown
+    behavior (forced cancellation requires ``lt.stop()``, not ``lt.shutdown()``)."""
+    handler_started = anyio.Event()
+    handler_can_finish = anyio.Event()
+    runs = 0
+
+    @scheduled_task(every(timedelta(seconds=0.02)))
+    async def slow():
+        nonlocal runs
+        runs += 1
+        if runs == 1:
+            handler_started.set()
+            await handler_can_finish.wait()
+
+    with fail_after(2):
+        async with serve(slow) as lt:
+            await handler_started.wait()
+            lt.shutdown()
+            # Handler is blocked inside ``handler_can_finish.wait()``; the service must NOT be stopped
+            # yet — graceful shutdown waits for the in-flight handler to return.
+            await anyio.sleep(0.1)
+            assert not lt.stopped, "service stopped while handler was still running"
+            handler_can_finish.set()
+            await lt.stopped
+
+    # Only the first event was dispatched; subsequent ``every`` ticks were dropped (consumer busy)
+    # and after shutdown the trigger closes without firing the handler again.
+    assert runs == 1, f"Expected exactly 1 handler invocation, got {runs}"

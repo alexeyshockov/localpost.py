@@ -2,6 +2,7 @@
 
 import logging
 
+from localpost.hosting import run_app
 from localpost.scheduler import delay, scheduled_task
 from localpost.scheduler.cond.cron import cron
 
@@ -13,10 +14,8 @@ async def cron_job():
 
 
 if __name__ == "__main__":
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(cron_job))
+    run_app(cron_job)

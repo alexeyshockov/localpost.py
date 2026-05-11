@@ -2,39 +2,38 @@
 
 import anyio
 
-from localpost.hosting import Host, hosted_service
-from localpost.scheduler import delay, every, scheduled_task, take_first
-
-channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
+from localpost.hosting import ServiceLifetime, run_app, service
 
 
-@hosted_service
-async def print_channel():
-    """
-    A hosted service, to read the channel in the background.
-    """
-    async with channel_reader as channel:
-        async for message in channel:
-            print(f"Message received: {message}")
+@service
+def channel_example():
+    channel_writer, channel_reader = anyio.create_memory_object_stream[str]()
 
+    async def svc(lt: ServiceLifetime):
+        async def reader():
+            async with channel_reader as ch:
+                async for message in ch:
+                    print(f"Message received: {message}")
 
-@scheduled_task(every("3s") // delay((1, 3)) // take_first(3))
-async def scheduled_background_task():
-    print("Scheduled work here, writing to the channel...")
-    await channel_writer.send("hello from the background task!")
+        async def writer():
+            for i in range(5):
+                await anyio.sleep(1)
+                await channel_writer.send(f"hello #{i}")
+            await channel_writer.aclose()
 
+        lt.tg.start_soon(reader)
+        lt.tg.start_soon(writer)
+        lt.set_started()
+        await lt.shutting_down.wait()
 
-# Stop printing after the scheduler is done
-host = Host(print_channel >> scheduled_background_task)
+    return svc
 
 
 if __name__ == "__main__":
     import logging
 
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(host))
+    run_app(channel_example())

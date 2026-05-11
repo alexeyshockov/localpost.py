@@ -6,23 +6,24 @@ import logging
 from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Generic, TypeVar, final
+from typing import Any, final
 
 from anyio import (
     BrokenResourceError,
     EndOfStream,
     WouldBlock,
+    create_memory_object_stream,
     create_task_group,
     get_cancelled_exc_class,
 )
 
 from localpost._utils import (
     TD_ZERO,
-    ClosingContext,
     EventView,
-    MemoryStream,
+    Result,
     cancellable_from,
     ensure_td,
+    maybe_closing,
     sleep,
     start_task_soon,
     td_str,
@@ -30,15 +31,12 @@ from localpost._utils import (
 
 from ._scheduler import ScheduledTask, ScheduledTaskTemplate, Task, Trigger
 
-T = TypeVar("T")
-ResT = TypeVar("ResT")
-
 logger = logging.getLogger("localpost.scheduler.cond")
 
 
 @asynccontextmanager
 async def wait_trigger(time_spans: Iterable[timedelta], shutting_down: EventView):
-    events, events_reader = MemoryStream[None].create(0)
+    events, events_reader = create_memory_object_stream[None](0)
 
     @cancellable_from(shutting_down)  # DO NOT cancel the main task group
     async def generate():
@@ -89,13 +87,12 @@ def every(period: timedelta | str, /) -> ScheduledTaskTemplate[None]:
     """
     Trigger an event every `period`.
     """
-    # return ScheduledTaskTemplate(Every(ensure_td(period))) >> buffer(0, full_mode="drop")
     return ScheduledTaskTemplate(Every(ensure_td(period)))
 
 
 @final
 @dc.dataclass(frozen=True, slots=True)
-class After(Generic[ResT]):
+class After[ResT]:
     target: Task[Any, ResT]
 
     def __repr__(self):
@@ -117,11 +114,41 @@ class After(Generic[ResT]):
             finally:
                 task_exec_results.close()
 
-        return ClosingContext(run())
+        return maybe_closing(run())
 
 
-def after(target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[T]:
+def after[T](target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[T]:
     """
     Trigger an event every time the target task completes successfully.
     """
     return ScheduledTaskTemplate(After(target if isinstance(target, Task) else target.task))
+
+
+@final
+@dc.dataclass(frozen=True, slots=True)
+class AfterAll[ResT]:
+    target: Task[Any, ResT]
+
+    def __repr__(self):
+        return f"after_all({self.target!r})"
+
+    def __call__(self, this_task: ScheduledTask) -> Trigger[Result[ResT]]:
+        task_exec_results = self.target.subscribe()
+
+        async def run():
+            try:
+                while True:
+                    yield await task_exec_results.receive()
+            except EndOfStream:
+                logger.info("Target task completed, stopping")
+            finally:
+                task_exec_results.close()
+
+        return maybe_closing(run())
+
+
+def after_all[T](target: ScheduledTask[Any, T] | Task[Any, T], /) -> ScheduledTaskTemplate[Result[T]]:
+    """
+    Trigger an event every time the target task completes (successfully or not).
+    """
+    return ScheduledTaskTemplate(AfterAll(target if isinstance(target, Task) else target.task))

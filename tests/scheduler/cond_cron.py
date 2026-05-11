@@ -1,4 +1,4 @@
-from datetime import datetime
+import datetime
 from unittest.mock import AsyncMock, Mock, patch
 
 import anyio
@@ -16,7 +16,7 @@ _real_anyio_sleep = anyio.sleep
 
 
 async def test_cron_trigger():
-    base = datetime(2022, 1, 1)
+    base = datetime.datetime(2022, 1, 1, tzinfo=datetime.UTC)
     schedule = croniter("*/5 * * * *", base)
     scheduled_task_tpl = cron(schedule)
 

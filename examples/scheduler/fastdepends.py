@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from fast_depends import Depends, inject
 
+from localpost.hosting import run_app
 from localpost.scheduler import delay, every, scheduled_task
 
 
@@ -24,10 +25,8 @@ def print_task(
 
 
 if __name__ == "__main__":
-    import localpost
-
     logging.basicConfig()
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("localpost").setLevel(logging.DEBUG)
 
-    exit(localpost.run(print_task))
+    run_app(print_task)

@@ -4,23 +4,31 @@ on:
   release:
     types: [ published ]
 
+permissions:
+  contents: read
+
 jobs:
-  # https://pdm-project.org/latest/usage/publish/#publish-with-trusted-publishers
   publish:
     runs-on: ubuntu-latest
     permissions:
-      # Required for PyPI trusted publishing
+      contents: read
+      # Required for PyPI trusted publishing + Sigstore-signed PEP 740 attestations
       id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # Just "fetch-tags: true" does not work, probably because of
-          #
           fetch-depth: 0
-      - uses: pdm-project/setup-pdm@v4
+      - uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version-file: ".python-version"
-          cache: true
-      - run: pdm install --no-lock --no-editable
-      - run: pdm build
-      - run: pdm publish --no-build
+      - run: uv build
+      # uv publish (as of 0.11) only uploads pre-existing attestations; it does
+      # not generate them. Use the official PyPA action, which generates PEP 740
+      # PyPI Publish Attestations via Sigstore and uploads them alongside the
+      # distributions. Track astral-sh/uv#15618 — once landed we can swap back
+      # to a single `uv publish` step.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true

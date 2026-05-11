@@ -1,16 +1,134 @@
+import threading
+
 import pytest
 
-from localpost.hosting import HostedService, hosted_service
+from localpost.hosting import ServiceLifetime, serve, service
 
 pytestmark = pytest.mark.anyio
 
 
-async def test_decorator():
-    @hosted_service
-    def simple_sync_service():
-        pass
+async def test_service_decorator_async():
+    @service
+    def my_service():
+        async def svc(lt: ServiceLifetime):
+            lt.set_started()
+            await lt.shutting_down.wait()
 
-    assert isinstance(simple_sync_service, HostedService)
+        return svc
+
+    resolved = my_service()
+    async with serve(resolved) as lt:
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert lt.exit_code == 0
 
 
-# TODO Test attributes (name especially, separately)
+async def test_service_decorator_direct_async():
+    stopped = False
+
+    @service
+    async def direct(lt: ServiceLifetime):
+        nonlocal stopped
+        lt.set_started()
+        await lt.shutting_down.wait()
+        stopped = True
+
+    resolved = direct()
+    async with serve(resolved) as lt:
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert stopped
+    assert lt.exit_code == 0
+
+
+async def test_service_decorator_sync():
+    work_done = False
+
+    @service
+    def my_sync_service():
+        def svc(lt: ServiceLifetime):
+            nonlocal work_done
+            lt.set_started()
+            lt.view.wait_shutting_down()
+            work_done = True
+
+        return svc
+
+    resolved = my_sync_service()
+    async with serve(resolved) as lt:
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert work_done
+
+
+async def test_service_decorator_direct_sync():
+    worker_thread_id = None
+
+    @service
+    def direct_sync(lt: ServiceLifetime):
+        nonlocal worker_thread_id
+        worker_thread_id = threading.get_ident()
+        lt.set_started()
+        lt.view.wait_shutting_down()
+
+    resolved = direct_sync()
+    async with serve(resolved) as lt:
+        host_thread_id = threading.get_ident()
+        await lt.started
+        lt.shutdown()
+        await lt.stopped
+
+    assert worker_thread_id is not None
+    assert worker_thread_id != host_thread_id
+
+
+async def test_service_decorator_context_manager():
+    entered = False
+    exited = False
+
+    @service
+    async def my_cm_service():
+        nonlocal entered, exited
+        entered = True
+        yield
+        exited = True
+
+    resolved = my_cm_service()
+    async with serve(resolved) as lt:
+        await lt.started
+        assert entered
+        lt.shutdown()
+        await lt.stopped
+
+    assert exited
+
+
+async def test_service_as_context_manager():
+    """_ResolvedService can be used as an async context manager directly."""
+
+    @service
+    def my_service():
+        async def svc(lt: ServiceLifetime):
+            lt.set_started()
+            await lt.shutting_down.wait()
+
+        return svc
+
+    # When used inside another service context
+    async def parent(lt: ServiceLifetime):
+        async with my_service() as child_lt:
+            lt.set_started()
+            await lt.shutting_down.wait()
+            child_lt.shutdown()
+            await child_lt.stopped
+
+    async with serve(parent) as lt:
+        await lt.started
+        lt.shutdown()
+        await lt.stopped

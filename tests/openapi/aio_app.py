@@ -1,0 +1,586 @@
+"""Tests for ``localpost.openapi.HttpAsyncApp`` registration + ASGI dispatch.
+
+Two layers of coverage:
+
+1. **Operation-level**: feed an :class:`AsyncOperation` a fake
+   :class:`AsyncHTTPReqCtx`, run it, inspect the captured response.
+   Mirrors ``tests/openapi/app.py``'s sync ``run_op`` harness.
+2. **ASGI-level**: drive the ASGI 3 callable from
+   :meth:`HttpAsyncApp.asgi` via :class:`httpx.ASGITransport` — same
+   surface a real ASGI server would call against, but in-process and
+   without binding sockets. End-to-end tests under a real uvicorn live
+   in :mod:`tests.openapi.aio_integration` (marked ``integration``).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from http import HTTPMethod
+from typing import Annotated, Any
+
+import httpx
+import pytest
+
+from localpost.http import RouteMatch, URITemplate
+from localpost.http._types import Request, Response
+from localpost.openapi import (
+    AsyncHttpBearerAuth,
+    AsyncHTTPReqCtx,
+    AsyncOpMiddleware,
+    BadRequest,
+    Created,
+    FromHeader,
+    HttpApp,
+    HttpAsyncApp,
+    NotFound,
+    OpResult,
+    async_op_middleware,
+)
+from localpost.openapi.aio.middleware import AsyncApiOperation
+from localpost.openapi.aio.operation import AsyncOperation
+
+# --- Fakes ---------------------------------------------------------------
+
+
+@dataclass(slots=True, eq=False)
+class FakeAsyncCtx:
+    """Minimal async ctx for unit tests — captures the response."""
+
+    request: Request
+    _body_chunks: list[bytes] = field(default_factory=list)
+    response_status: int | None = None
+    attrs: dict[Any, Any] = field(default_factory=dict)
+    completed: tuple[Response, bytes] | None = None
+    streamed: tuple[Response, list[bytes]] | None = None
+
+    @property
+    def remote_addr(self) -> str | None:
+        return None
+
+    @property
+    def local_addr(self) -> str:
+        return "127.0.0.1:0"
+
+    @property
+    def scheme(self) -> str:
+        return "http"
+
+    @property
+    def disconnected(self) -> bool:
+        return False
+
+    async def complete(self, response: Response, body: bytes | None = None) -> None:
+        self.completed = (response, body or b"")
+        self.response_status = response.status_code
+
+    async def stream(self, response: Response, chunks: AsyncIterator[bytes], /) -> None:
+        captured: list[bytes] = [bytes(chunk) async for chunk in chunks]
+        self.streamed = (response, captured)
+        self.response_status = response.status_code
+
+    async def receive(self, _size: int = 65536, /) -> bytes:
+        if not self._body_chunks:
+            return b""
+        return self._body_chunks.pop(0)
+
+    async def sendfile(self, response: Response, file, offset: int, count: int) -> None:
+        # Test fake — sendfile isn't exercised in this suite.
+        raise NotImplementedError
+
+
+def make_async_ctx(
+    method: str = "GET",
+    path: str = "/",
+    query: bytes = b"",
+    headers: list[tuple[bytes, bytes]] | None = None,
+    body: bytes = b"",
+    path_args: dict[str, str] | None = None,
+    template: URITemplate | None = None,
+) -> FakeAsyncCtx:
+    request = Request(
+        method=method.encode(),
+        target=path.encode(),
+        path=path.encode(),
+        query_string=query,
+        headers=headers or [],
+        http_version=b"1.1",
+    )
+    ctx = FakeAsyncCtx(request=request, _body_chunks=[body] if body else [])
+    if path_args is not None:
+        ctx.attrs[RouteMatch] = RouteMatch(
+            method=HTTPMethod(method),
+            matched_template=template or URITemplate.parse(path),
+            path_args=dict(path_args),
+        )
+    return ctx
+
+
+async def run_async_op(op: AsyncOperation, ctx: FakeAsyncCtx) -> tuple[int, bytes, dict[str, str]]:
+    await op.run(ctx)
+    assert ctx.completed is not None, "handler did not complete the response"
+    response, body = ctx.completed
+    headers = {k.decode(): v.decode("iso-8859-1") for k, v in response.headers}
+    return response.status_code, body, headers
+
+
+# --- Sample types --------------------------------------------------------
+
+
+@dataclass
+class Book:
+    id: str
+    title: str
+
+
+# --- Registration & basic dispatch --------------------------------------
+
+
+class TestRegistration:
+    def test_async_handler_records_operation(self):
+        app = HttpAsyncApp()
+
+        @app.get("/foo")
+        async def foo() -> str:
+            return "ok"
+
+        assert len(app.operations) == 1
+        op = app.operations[0]
+        assert op.method is HTTPMethod.GET
+        assert op.path == "/foo"
+
+    def test_sync_handler_rejected(self):
+        app = HttpAsyncApp()
+
+        with pytest.raises(TypeError, match="must be ``async def``"):
+
+            @app.get("/foo")
+            def foo() -> str:
+                return "ok"
+
+    def test_sync_middleware_rejected_at_construction(self):
+        from localpost.openapi import OpMiddleware
+        from localpost.openapi.middleware import _FunctionMiddleware, op_middleware
+
+        @op_middleware
+        def sync_mw(ctx, call_next) -> OpResult:  # type: ignore[no-untyped-def]
+            return call_next(ctx)
+
+        assert isinstance(sync_mw, _FunctionMiddleware)
+        assert isinstance(sync_mw, OpMiddleware)
+
+        with pytest.raises(TypeError, match="not an AsyncOpMiddleware"):
+            HttpAsyncApp(middlewares=[sync_mw])  # ty: ignore[invalid-argument-type]
+
+    def test_async_middleware_accepted(self):
+        @async_op_middleware
+        async def mw(ctx: AsyncHTTPReqCtx, call_next: AsyncApiOperation) -> OpResult:
+            return await call_next(ctx)
+
+        assert isinstance(mw, AsyncOpMiddleware)
+        app = HttpAsyncApp(middlewares=[mw])
+        assert len(app._middlewares) == 1
+
+
+# --- Operation runtime --------------------------------------------------
+
+
+class TestRuntime:
+    @pytest.mark.anyio
+    async def test_str_return_emits_text(self):
+        app = HttpAsyncApp()
+
+        @app.get("/hi")
+        async def hi() -> str:
+            return "hello"
+
+        op = app.operations[0]
+        status, body, headers = await run_async_op(op, make_async_ctx(path="/hi"))
+        assert status == 200
+        assert body == b"hello"
+        assert headers["content-type"].startswith("text/plain")
+
+    @pytest.mark.anyio
+    async def test_dataclass_return_emits_json(self):
+        app = HttpAsyncApp()
+
+        @app.get("/b")
+        async def get() -> Book:
+            return Book(id="1", title="t")
+
+        op = app.operations[0]
+        status, body, headers = await run_async_op(op, make_async_ctx(path="/b"))
+        assert status == 200
+        assert body == b'{"id":"1","title":"t"}'
+        assert headers["content-type"].startswith("application/json")
+
+    @pytest.mark.anyio
+    async def test_path_var_implicit(self):
+        app = HttpAsyncApp()
+
+        @app.get("/items/{item_id}")
+        async def get_item(item_id: str) -> str:
+            return item_id
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/items/abc", path_args={"item_id": "abc"})
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 200
+        assert body == b"abc"
+
+    @pytest.mark.anyio
+    async def test_query_param_typed(self):
+        app = HttpAsyncApp()
+
+        @app.get("/items/{item_id}")
+        async def get_item(item_id: str, page: int = 1) -> str:
+            return f"{item_id}/{page}"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/items/x", query=b"page=3", path_args={"item_id": "x"})
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 200
+        assert body == b"x/3"
+
+    @pytest.mark.anyio
+    async def test_body_decode_dataclass(self):
+        app = HttpAsyncApp()
+
+        @app.post("/b")
+        async def create(book: Book) -> Created[Book]:
+            return Created(book)
+
+        op = app.operations[0]
+        ctx = make_async_ctx(method="POST", path="/b", body=b'{"id":"1","title":"t"}')
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 201
+        assert body == b'{"id":"1","title":"t"}'
+
+    @pytest.mark.anyio
+    async def test_op_result_short_circuit(self):
+        app = HttpAsyncApp()
+
+        @app.get("/items/{item_id}")
+        async def get_item(item_id: str) -> Book | NotFound[str]:
+            return NotFound(f"missing {item_id}")
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/items/x", path_args={"item_id": "x"})
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 404
+        assert body == b"missing x"
+
+    @pytest.mark.anyio
+    async def test_resolver_validation_error_short_circuits(self):
+        app = HttpAsyncApp()
+
+        @app.get("/items/{item_id}")
+        async def get_item(item_id: int) -> str:
+            return str(item_id)
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/items/x", path_args={"item_id": "x"})
+        status, _, _ = await run_async_op(op, ctx)
+        assert status == 400
+
+    @pytest.mark.anyio
+    async def test_async_middleware_short_circuits(self):
+        @async_op_middleware
+        async def block(
+            ctx: AsyncHTTPReqCtx,
+            call_next: AsyncApiOperation,
+            x_block: Annotated[str, FromHeader("X-Block")] = "",
+        ) -> BadRequest[str] | OpResult:
+            if x_block == "yes":
+                return BadRequest("blocked by mw")
+            return await call_next(ctx)
+
+        app = HttpAsyncApp(middlewares=[block])
+
+        @app.get("/x")
+        async def x() -> str:
+            return "ok"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/x", headers=[(b"x-block", b"yes")])
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 400
+        assert body == b"blocked by mw"
+
+    @pytest.mark.anyio
+    async def test_async_middleware_passthrough(self):
+        @async_op_middleware
+        async def passthrough(ctx: AsyncHTTPReqCtx, call_next: AsyncApiOperation) -> OpResult:
+            return await call_next(ctx)
+
+        app = HttpAsyncApp(middlewares=[passthrough])
+
+        @app.get("/x")
+        async def x() -> str:
+            return "ok"
+
+        op = app.operations[0]
+        status, body, _ = await run_async_op(op, make_async_ctx(path="/x"))
+        assert status == 200
+        assert body == b"ok"
+
+
+# --- SSE -----------------------------------------------------------------
+
+
+class TestSSE:
+    @pytest.mark.anyio
+    async def test_async_generator_streams_events(self):
+        app = HttpAsyncApp()
+
+        @app.get("/events")
+        async def events() -> AsyncIterator[str]:
+            for i in range(3):
+                yield f"tick-{i}"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/events")
+        await op.run(ctx)
+        assert ctx.streamed is not None
+        response, chunks = ctx.streamed
+        assert response.status_code == 200
+        ct = next(v for k, v in response.headers if k == b"content-type")
+        assert ct.startswith(b"text/event-stream")
+        wire = b"".join(chunks)
+        assert b"data: tick-0\n\n" in wire
+        assert b"data: tick-2\n\n" in wire
+
+    @pytest.mark.anyio
+    async def test_sync_generator_rejected(self):
+        app = HttpAsyncApp()
+
+        @app.get("/bad")
+        async def bad():
+            def sync_gen():
+                yield "x"
+
+            return sync_gen()
+
+        op = app.operations[0]
+        with pytest.raises(TypeError, match="sync iterator/generator"):
+            await op.run(make_async_ctx(path="/bad"))
+
+
+# --- OpenAPI doc parity --------------------------------------------------
+
+
+class TestSpecParity:
+    def test_async_app_doc_matches_sync_for_same_routes(self):
+        # Same routes registered on both flavours should produce the same
+        # operationId / responses / parameters in the OpenAPI doc.
+        sync_app = HttpApp()
+        async_app = HttpAsyncApp()
+
+        @sync_app.get("/items/{item_id}")
+        def get_item_sync(item_id: str) -> Book | NotFound[str]:
+            return NotFound("nope")
+
+        @async_app.get("/items/{item_id}")
+        async def get_item_async(item_id: str) -> Book | NotFound[str]:
+            return NotFound("nope")
+
+        sync_doc = sync_app.openapi_doc
+        async_doc = async_app.openapi_doc
+        s_op = sync_doc.paths["/items/{item_id}"].operations["get"]
+        a_op = async_doc.paths["/items/{item_id}"].operations["get"]
+        assert sorted(s_op.responses) == sorted(a_op.responses)
+        # ``parameters`` may contain ``Reference`` per OpenAPI; the test only
+        # uses inline ``Parameter`` instances, so a getattr fallback is safe.
+        assert [getattr(p, "name", "") for p in s_op.parameters] == [getattr(p, "name", "") for p in a_op.parameters]
+
+
+# --- ASGI dispatch -------------------------------------------------------
+
+
+def _asgi_client(app: HttpAsyncApp) -> httpx.AsyncClient:
+    """Build an httpx AsyncClient bound to ``app``'s ASGI callable.
+
+    ``ASGITransport`` drives the app in-process — no socket, no event loop
+    bridge. Wraps the same surface a real ASGI server would call against,
+    so this is closer to "real" than the mocked-scope helper that lived
+    here before.
+    """
+    asgi_app: Any = app.asgi()
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi_app), base_url="http://testserver")
+
+
+class TestAsgiDispatch:
+    @pytest.mark.anyio
+    async def test_simple_get(self):
+        app = HttpAsyncApp()
+
+        @app.get("/hello/{name}")
+        async def hello(name: str) -> str:
+            return f"hi {name}"
+
+        async with _asgi_client(app) as client:
+            resp = await client.get("/hello/world")
+        assert resp.status_code == 200
+        assert resp.text == "hi world"
+
+    @pytest.mark.anyio
+    async def test_404(self):
+        app = HttpAsyncApp()
+
+        async with _asgi_client(app) as client:
+            resp = await client.get("/nope")
+        assert resp.status_code == 404
+        assert resp.text == "Not Found"
+
+    @pytest.mark.anyio
+    async def test_405_method_not_allowed(self):
+        app = HttpAsyncApp()
+
+        @app.get("/foo")
+        async def foo() -> str:
+            return "ok"
+
+        async with _asgi_client(app) as client:
+            resp = await client.post("/foo")
+        assert resp.status_code == 405
+        assert "GET" in resp.headers["allow"]
+
+    @pytest.mark.anyio
+    async def test_post_with_body(self):
+        app = HttpAsyncApp()
+
+        @app.post("/b")
+        async def create(book: Book) -> Created[Book]:
+            return Created(book)
+
+        async with _asgi_client(app) as client:
+            resp = await client.post("/b", content=b'{"id":"1","title":"t"}')
+        assert resp.status_code == 201
+        assert resp.content == b'{"id":"1","title":"t"}'
+
+    @pytest.mark.anyio
+    async def test_openapi_endpoint(self):
+        app = HttpAsyncApp()
+
+        @app.get("/x")
+        async def x() -> str:
+            return "ok"
+
+        async with _asgi_client(app) as client:
+            resp = await client.get("/openapi.json")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/json"
+        assert '"openapi"' in resp.text
+
+    @pytest.mark.anyio
+    async def test_docs_endpoint(self):
+        app = HttpAsyncApp()
+        async with _asgi_client(app) as client:
+            resp = await client.get("/docs")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "swagger" in resp.text.lower()
+
+    @pytest.mark.anyio
+    async def test_payload_too_large(self):
+        app = HttpAsyncApp(max_body_size=8)
+
+        @app.post("/b")
+        async def create(book: Book) -> Created[Book]:
+            return Created(book)
+
+        async with _asgi_client(app) as client:
+            resp = await client.post("/b", content=b'{"id":"1","title":"way-too-long"}')
+        assert resp.status_code == 413
+
+    @pytest.mark.anyio
+    async def test_sse_round_trip(self):
+        """Real httpx round-trip over an SSE stream — the mocked helper
+        could only inspect the captured chunks, this drives the actual
+        chunked-response machinery in httpx."""
+        app = HttpAsyncApp()
+
+        @app.get("/events")
+        async def events() -> AsyncIterator[str]:
+            for i in range(3):
+                yield f"tick-{i}"
+
+        async with _asgi_client(app) as client:
+            async with client.stream("GET", "/events") as resp:
+                assert resp.status_code == 200
+                assert resp.headers["content-type"].startswith("text/event-stream")
+                wire = b""
+                async for chunk in resp.aiter_bytes():
+                    wire += chunk
+        # Each event is "data: <payload>\n\n" — three of them.
+        assert wire.count(b"\n\n") == 3
+        assert b"data: tick-0\n\n" in wire
+        assert b"data: tick-2\n\n" in wire
+
+
+# --- Async auth ---------------------------------------------------------
+
+
+class TestAsyncAuth:
+    @pytest.mark.anyio
+    async def test_bearer_valid_token(self):
+        bearer = AsyncHttpBearerAuth(validator=lambda t: {"sub": t} if t == "good" else None)
+        app = HttpAsyncApp(middlewares=[bearer])
+
+        @app.get("/me")
+        async def me() -> str:
+            return "hello"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/me", headers=[(b"authorization", b"Bearer good")])
+        status, body, _ = await run_async_op(op, ctx)
+        assert status == 200
+        assert body == b"hello"
+
+    @pytest.mark.anyio
+    async def test_bearer_invalid_token(self):
+        bearer = AsyncHttpBearerAuth(validator=lambda _t: None)
+        app = HttpAsyncApp(middlewares=[bearer])
+
+        @app.get("/me")
+        async def me() -> str:
+            return "hello"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/me", headers=[(b"authorization", b"Bearer bad")])
+        status, _, _ = await run_async_op(op, ctx)
+        assert status == 401
+
+    @pytest.mark.anyio
+    async def test_bearer_async_validator(self):
+        async def validate(t: str) -> dict[str, str] | None:
+            return {"sub": t} if t == "good" else None
+
+        bearer = AsyncHttpBearerAuth(validator=validate)
+        app = HttpAsyncApp(middlewares=[bearer])
+
+        @app.get("/me")
+        async def me() -> str:
+            return "hello"
+
+        op = app.operations[0]
+        ctx = make_async_ctx(path="/me", headers=[(b"authorization", b"Bearer good")])
+        status, _, _ = await run_async_op(op, ctx)
+        assert status == 200
+
+    def test_bearer_registers_security_scheme(self):
+        bearer = AsyncHttpBearerAuth(validator=lambda _t: None)
+        app = HttpAsyncApp(middlewares=[bearer])
+
+        @app.get("/me")
+        async def me() -> str:
+            return "hi"
+
+        doc = app.openapi_doc
+        assert "bearerAuth" in doc.components.security_schemes
+        op_spec = doc.paths["/me"].operations["get"]
+        assert {"bearerAuth": ()} in op_spec.security
+
+
+# Ctx-level unit tests live in tests/http/asgi.py — that's where the
+# ``_ASGIReqCtx`` implementation lives now (moved out of localpost.openapi.aio).
