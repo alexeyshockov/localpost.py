@@ -2,7 +2,7 @@ site_name: LocalPost
 site_description: >-
   A small async Python framework for long-running processes: service hosting,
   in-process task scheduling, and a lightweight HTTP server.
-site_url: https://localpost.dev/
+site_url: https://alexeyshockov.github.io/localpost.py/
 repo_url: https://github.com/alexeyshockov/localpost.py
 repo_name: alexeyshockov/localpost.py
 edit_uri: edit/main/docs/
