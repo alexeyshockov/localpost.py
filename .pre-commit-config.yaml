@@ -18,11 +18,10 @@ repos:
         # Floor tracks current coverage; ratchet up as docstrings land.
         args: [--fail-under=24, localpost]
 
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.2
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.46.1
     hooks:
-      - id: codespell
-        args: [-L, alog, -L, abl]
+      - id: typos
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

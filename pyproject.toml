@@ -332,3 +332,7 @@ markers = [
     "integration: Consumers (SQS, Kafka,..) integration tests",
     "no_ambient_pool: opt out of the autouse threadtools ambient pool fixture",
 ]
+
+[tool.typos.default.extend-words]
+# ``ANDs`` (verb) — selector group spec ANDs with filter spec.
+ands = "ands"
