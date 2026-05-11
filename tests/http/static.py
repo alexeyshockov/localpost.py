@@ -150,7 +150,7 @@ class TestParseRange:
         # Multi-range → 200 fallback (we don't speak multipart/byteranges).
         assert _parse_range(b"bytes=0-99,200-299", 1000) is None
 
-    def test_unparseable(self):
+    def test_unparsable(self):
         assert _parse_range(b"bytes=abc-def", 1000) is None
         assert _parse_range(b"bytes=", 1000) is None
         assert _parse_range(b"items=0-99", 1000) is None

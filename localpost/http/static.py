@@ -134,7 +134,7 @@ def static_handler(
             _send_not_modified(ctx, etag, last_modified, cc_bytes)
             return
 
-        # Range — single byte-range only. Multi-range / unparseable falls back to 200.
+        # Range — single byte-range only. Multi-range / unparsable falls back to 200.
         offset = 0
         length = size
         status = 200
@@ -254,7 +254,7 @@ def _parse_range(header: bytes, size: int) -> tuple[int, int] | Literal["unsatis
     """Parse a ``Range:`` header. Returns ``(offset, length)`` for a
     satisfiable single byte-range, ``"unsatisfiable"`` for a syntactically
     valid but out-of-bounds range (→ 416), or ``None`` for absent /
-    unparseable / multi-range (→ fall back to full body).
+    unparsable / multi-range (→ fall back to full body).
     """
     unit, _, spec = header.strip().partition(b"=")
     if unit.lower() != b"bytes" or not spec:

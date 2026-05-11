@@ -238,7 +238,7 @@ Behaviour:
   `If-Modified-Since` short-circuit to 304 inline on the selector — no
   worker hop, no file open.
 - **Range**: single byte-range only (`bytes=N-M`, `bytes=N-`, `bytes=-K`).
-  Multi-range / unparseable falls back to 200 (RFC 7233 §3.1 compliant).
+  Multi-range / unparsable falls back to 200 (RFC 7233 §3.1 compliant).
   Out-of-bounds → 416 with `Content-Range: bytes */<size>`.
 - **Body**: 200 / 206 GET opens the file and calls `ctx.sendfile(...)`
   — wrap in `thread_pool_handler` to dispatch the syscall to a worker.

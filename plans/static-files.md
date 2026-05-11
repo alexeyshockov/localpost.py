@@ -98,7 +98,7 @@ No new method on `HTTPReqCtx` Protocol.
 - `_if_none_match(header: bytes, etag: bytes) -> bool` — comma-split,
   trim whitespace, weak-prefix-aware compare.
 - `_parse_range(header: bytes, size: int) -> tuple[int, int] | None | "unsatisfiable"`
-  — `(start, length)`, `None` for absent / multi-range / unparseable
+  — `(start, length)`, `None` for absent / multi-range / unparsable
   (200 fallback per RFC 7233 §3.1), unsatisfiable sentinel for 416.
 - `_content_type(path: Path) -> bytes` — `mimetypes.guess_type`,
   `application/octet-stream` fallback.
@@ -146,7 +146,7 @@ API workers.
 `tests/http/test_static.py`:
 - Path traversal (`/static/../etc/passwd` → 404).
 - Range: full, `0-99`, `100-199`, suffix `-50`, beyond-EOF (416),
-  unparseable (200 fallback), multi-range (200 fallback).
+  unparsable (200 fallback), multi-range (200 fallback).
 - Conditionals: `If-None-Match` hit/miss; `If-Modified-Since` before /
   equal / after mtime.
 - HEAD parity: same headers, no body.
