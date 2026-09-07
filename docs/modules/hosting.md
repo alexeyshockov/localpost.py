@@ -20,6 +20,7 @@ def a_sync_service():
         print("Service running")
         time.sleep(5)
         print("Service is done")  # host stops when all services stop
+
     return svc
 
 
@@ -76,7 +77,9 @@ def my_middleware(arg) -> Callable[[ServiceF], ServiceF]:
         def wrapper(lt: ServiceLifetime) -> Awaitable[None]:
             lt.tg.start_soon(my_background_task, lt.view)
             return func(lt)
+
         return wrapper
+
     return decorator
 ```
 

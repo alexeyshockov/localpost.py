@@ -269,6 +269,7 @@ to be explicit; otherwise just return the generator directly.
 ```python
 from localpost.openapi import HttpApp, HttpBearerAuth, HttpBasicAuth
 
+
 def validate_token(token: str) -> dict | None:
     # Return any truthy principal on success, None on failure.
     # The principal is stashed on ctx.attrs[<middleware>] for handlers to read.
@@ -328,7 +329,7 @@ app = HttpAsyncApp()
 
 @app.get("/books/{book_id}")
 async def get_book(book_id: str) -> Book | NotFound[str]:
-    book = await fetch_book(book_id)   # your async DB call, etc.
+    book = await fetch_book(book_id)  # your async DB call, etc.
     if book is None:
         return NotFound(f"Book not found: {book_id}")
     return book
@@ -359,8 +360,12 @@ verbatim: see [`examples/openapi/async_app.py`](https://github.com/alexeyshockov
   from typing import Annotated
 
   from localpost.openapi import (
-      AsyncApiOperation, AsyncHTTPReqCtx, FromHeader,
-      OpResult, Unauthorized, async_op_middleware,
+      AsyncApiOperation,
+      AsyncHTTPReqCtx,
+      FromHeader,
+      OpResult,
+      Unauthorized,
+      async_op_middleware,
   )
 
 
@@ -433,6 +438,7 @@ full hosting lifecycle inside each Granian worker:
 ```python
 from localpost.hosting.rsgi import HostRSGIApp
 from localpost.scheduler import every, scheduled_task
+
 
 @scheduled_task(every(seconds=5))
 async def heartbeat(): ...

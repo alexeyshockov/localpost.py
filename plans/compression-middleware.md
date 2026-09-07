@@ -24,7 +24,7 @@ are at odds. Cleanest split:
 def compress_handler(
     inner: RequestHandler,
     *,
-    algorithms: Sequence[str] = ("br", "gzip"),   # server preference order
+    algorithms: Sequence[str] = ("br", "gzip"),  # server preference order
     min_size: int = 1024,
     compressible_types: frozenset[bytes] = DEFAULT_COMPRESSIBLE_TYPES,
 ) -> RequestHandler: ...
@@ -110,14 +110,25 @@ This same helper will back precompressed-sidecar negotiation in
 ### Default compressible types
 
 ```python
-DEFAULT_COMPRESSIBLE_TYPES = frozenset({
-    b"text/html", b"text/plain", b"text/css", b"text/xml", b"text/csv",
-    b"text/javascript",
-    b"application/json", b"application/javascript", b"application/xml",
-    b"application/xhtml+xml", b"application/manifest+json",
-    b"application/x-yaml", b"application/rss+xml", b"application/atom+xml",
-    b"image/svg+xml",
-})
+DEFAULT_COMPRESSIBLE_TYPES = frozenset(
+    {
+        b"text/html",
+        b"text/plain",
+        b"text/css",
+        b"text/xml",
+        b"text/csv",
+        b"text/javascript",
+        b"application/json",
+        b"application/javascript",
+        b"application/xml",
+        b"application/xhtml+xml",
+        b"application/manifest+json",
+        b"application/x-yaml",
+        b"application/rss+xml",
+        b"application/atom+xml",
+        b"image/svg+xml",
+    }
+)
 ```
 
 Exact main-type match: split `Content-Type` on `;`, lowercase, lookup.

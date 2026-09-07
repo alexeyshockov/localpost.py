@@ -11,11 +11,14 @@ from localpost.di._services import ServiceRegistry
 
 
 @dataclass
-class Config: host: str; port: int
+class Config:
+    host: str
+    port: int
 
 
 class Server:
-    def __init__(self, config: Config): self.config = config
+    def __init__(self, config: Config):
+        self.config = config
 
 
 services = ServiceRegistry()

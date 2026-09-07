@@ -15,6 +15,7 @@ def my_service():
     def svc(lt: ServiceLifetime):
         lt.set_started()
         time.sleep(5)
+
     return svc
 
 

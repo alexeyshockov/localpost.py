@@ -16,9 +16,9 @@ Thread-friendly building blocks for moving work off the event loop:
 from localpost.threadtools import Channel
 
 tx, rx = Channel.create(capacity=8)
-tx.put(item, timeout=1.0)        # raises TimeoutError on expiry
+tx.put(item, timeout=1.0)  # raises TimeoutError on expiry
 got = rx.get(timeout=1.0)
-got = rx.get_nowait()            # raises WouldBlock / EndOfStream
+got = rx.get_nowait()  # raises WouldBlock / EndOfStream
 ```
 
 `capacity=None` is unbounded; `0` is rendezvous (put waits until a receiver consumes); `N>0` is bounded. Both ends can be cloned (`tx.clone()`, `rx.clone()`); closing either side broadcasts to every waiter so cloned receivers all observe `EndOfStream` / `ClosedResourceError`.
@@ -62,7 +62,7 @@ async with anyio.from_thread.BlockingPortal() as raw_portal:
     async with AsyncWorkerExecutor(portal=portal) as ex:
         fut = await anyio.to_thread.run_sync(ex.submit, work, x)
         # …
-        ex.stop()                                  # safe from any thread
+        ex.stop()  # safe from any thread
 ```
 
 `submit` and `stop` are safe to call from any thread — the wrapping `Portal` does the on-loop / off-loop dispatch internally.
@@ -76,8 +76,8 @@ from localpost.threadtools import TaskGroup, WorkerExecutor
 
 with WorkerExecutor() as ex:
     with TaskGroup(ex) as tg:
-        tg.start_soon(do_work, arg)         # fire-and-forget
-        fut = tg.create_task(other_work)    # observe via Future
+        tg.start_soon(do_work, arg)  # fire-and-forget
+        fut = tg.create_task(other_work)  # observe via Future
     # On exit: drain in-flight tasks; raise BaseExceptionGroup if any failed.
 ```
 
@@ -91,8 +91,7 @@ The reverse of `anyio.to_thread.run_sync` — call from a worker thread to dispa
 from localpost.threadtools import run_async
 
 
-async def fetch_user(user_id: int) -> User:
-    ...
+async def fetch_user(user_id: int) -> User: ...
 
 
 def worker(user_id: int) -> str:
@@ -109,10 +108,10 @@ Resolves the portal via `localpost.hosting.current_service`, so the calling thre
 ```python
 from localpost import Portal
 
-portal.same_thread             # is the current thread the loop thread?
-portal.run_sync(fn, *args)     # call sync fn on the loop, return its result
+portal.same_thread  # is the current thread the loop thread?
+portal.run_sync(fn, *args)  # call sync fn on the loop, return its result
 portal.run_async(coro, *args)  # await coro on the loop, off-loop only
-portal.raw                     # underlying BlockingPortal (escape hatch)
+portal.raw  # underlying BlockingPortal (escape hatch)
 ```
 
 `run_sync` does the right thing in either direction: direct call on-loop, `BlockingPortal.call` off-loop. `run_async` raises `RuntimeError` on the loop thread instead of deadlocking.
@@ -124,6 +123,7 @@ portal.raw                     # underlying BlockingPortal (escape hatch)
 ```python
 from localpost import hosting
 from localpost.threadtools import AsyncWorkerExecutor
+
 
 @hosting.service
 async def my_service():

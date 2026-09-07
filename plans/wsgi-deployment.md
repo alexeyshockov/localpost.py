@@ -47,8 +47,9 @@ class HTTPReqCtx(Protocol):
     attrs: dict[Any, Any]
     remote_addr: str | None
     local_addr: str | None
-    scheme: str                # "http" | "https"
+    scheme: str  # "http" | "https"
     borrowed: bool
+
     def borrow(self) -> AbstractContextManager[HTTPReqCtx]: ...
     def receive(self, size: int = ..., /) -> bytes: ...
     def start_response(self, r: Response | InformationalResponse, /) -> None: ...
@@ -106,8 +107,10 @@ def stream(self, response, chunks):
     self.start_response(response)
     try:
         for chunk in chunks:
-            try: check_cancelled()
-            except LookupError: pass
+            try:
+                check_cancelled()
+            except LookupError:
+                pass
             self.send(chunk)
     except RequestCancelled:
         return
@@ -137,6 +140,7 @@ def to_wsgi(handler: RequestHandler) -> WSGIApplication:
         if body_handler is not None:
             body_handler(ctx)
         return ctx._respond(start_response)
+
     return wsgi_app
 ```
 

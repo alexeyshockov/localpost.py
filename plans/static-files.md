@@ -71,11 +71,11 @@ pattern (`_base.py:275`) and `_maybe_give_back` non-blocking reset
 ```python
 sock = ctx.conn.sock
 sock.settimeout(ctx.selector.config.rw_timeout)
-ctx.start_response(Response(status, headers))   # buffers header bytes
-ctx.send(b"")                                    # flushes header bytes
+ctx.start_response(Response(status, headers))  # buffers header bytes
+ctx.send(b"")  # flushes header bytes
 with open(path, "rb") as f:
     sock.sendfile(f, offset=range_start, count=range_len)
-ctx.finish_response()                            # empty EOM under fixed CL
+ctx.finish_response()  # empty EOM under fixed CL
 # give-back path resets timeout to non-blocking
 ```
 
@@ -110,15 +110,17 @@ No new method on `HTTPReqCtx` Protocol.
 Documented in the README, not built-in:
 
 ```python
-api    = thread_pool_handler(routes.build().as_handler(), max_concurrency=8)
+api = thread_pool_handler(routes.build().as_handler(), max_concurrency=8)
 static = thread_pool_handler(
-    static_handler("/var/www", prefix=b"/static/",
-                   cache_control="public, max-age=31536000, immutable"),
-    max_concurrency=128, backlog=64,
+    static_handler("/var/www", prefix=b"/static/", cache_control="public, max-age=31536000, immutable"),
+    max_concurrency=128,
+    backlog=64,
 )
+
 
 def root(ctx):
     return (static if ctx.request.path.startswith(b"/static/") else api)(ctx)
+
 
 async with http_server(config, root):
     ...

@@ -26,7 +26,10 @@ orthogonal concepts that you compose explicitly:
 ```python
 from localpost.hosting import run_app, service
 from localpost.http import (
-    Routes, ServerConfig, http_server, thread_pool_handler,
+    Routes,
+    ServerConfig,
+    http_server,
+    thread_pool_handler,
 )
 
 
@@ -35,7 +38,7 @@ async def app():
     routes = Routes()
 
     @routes.get("/hello/{name}")
-    def hello(ctx): ...   # plain RequestCtx → Response handler
+    def hello(ctx): ...  # plain RequestCtx → Response handler
 
     config = ServerConfig(host="127.0.0.1", port=8000)
     async with thread_pool_handler(routes.build().as_handler()) as h:

@@ -20,7 +20,8 @@ from localpost.openapi import HttpApp, NotFound
 
 @dataclass
 class Book:
-    id: str; title: str
+    id: str
+    title: str
 
 
 app = HttpApp()
