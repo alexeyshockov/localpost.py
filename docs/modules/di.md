@@ -29,7 +29,7 @@ class Server:
 
 services = ServiceRegistry()
 services.register_instance(Config(host="127.0.0.1", port=8080))
-services.register(Server)                  # auto-wires Config via __init__
+services.register(Server)  # auto-wires Config via __init__
 
 with services.app_scope() as sp:
     server = sp.resolve(Server)
@@ -107,7 +107,9 @@ adapter (`localpost/di/quart.py`) exists as a stub only.
    @dataclass(frozen=True, eq=False, slots=True)
    class JobContext:
        ctx: ExitStack = field(default_factory=ExitStack)
-       def enter[T](self, cm): return self.ctx.enter_context(cm)
+
+       def enter[T](self, cm):
+           return self.ctx.enter_context(cm)
    ```
 
 2. Register services under it: `services.register(JobRepo, scope=JobContext)`.
@@ -116,6 +118,7 @@ adapter (`localpost/di/quart.py`) exists as a stub only.
 
    ```python
    from localpost.di._services import DefaultServiceProvider, scope
+
    job_ctx = JobContext()
    provider = DefaultServiceProvider(parent_provider, registry, job_ctx, JobContext)
    with job_ctx.ctx, scope(provider):

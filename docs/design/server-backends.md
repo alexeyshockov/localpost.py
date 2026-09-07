@@ -17,9 +17,7 @@ parser is selected via `ServerConfig.backend`:
 ```python
 from localpost.http import ServerConfig, start_http_server
 
-with start_http_server(
-    ServerConfig(backend="httptools"), my_handler
-) as server:
+with start_http_server(ServerConfig(backend="httptools"), my_handler) as server:
     while True:
         server.run()
 ```

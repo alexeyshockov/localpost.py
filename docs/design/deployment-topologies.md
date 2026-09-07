@@ -33,11 +33,13 @@ other hosted service.
 API:
 
 ```python
-hosting.run_app([
-    scheduler.service(),
-    app.service(uvicorn.Config(...)),     # server="uvicorn" (default)
-    app.service(hypercorn.Config(...), server="hypercorn"),
-])
+hosting.run_app(
+    [
+        scheduler.service(),
+        app.service(uvicorn.Config(...)),  # server="uvicorn" (default)
+        app.service(hypercorn.Config(...), server="hypercorn"),
+    ]
+)
 ```
 
 Same pattern as gRPC / any other adapter in `localpost.hosting.services/`.
@@ -76,7 +78,7 @@ from localpost.hosting.rsgi import HostRSGIApp
 
 rsgi_app = HostRSGIApp(
     services=[scheduler.service(), other_service.service()],
-    rsgi_handler=app,                  # HttpAsyncApp or AsyncRequestHandler
+    rsgi_handler=app,  # HttpAsyncApp or AsyncRequestHandler
 )
 # granian --interface rsgi --workers 4 myapp:rsgi_app
 ```

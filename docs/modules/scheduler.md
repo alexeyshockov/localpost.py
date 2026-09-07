@@ -86,6 +86,7 @@ A trigger is a frozen dataclass / callable that, given a `TaskGroup` and a
 from dataclasses import dataclass, replace
 from contextlib import asynccontextmanager
 
+
 @dataclass(frozen=True, slots=True)
 class MyTrigger[T]:
     middlewares: tuple[TriggerMiddleware, ...] = ()
@@ -109,6 +110,7 @@ A middleware is a regular async generator:
 from collections.abc import AsyncIterator
 from localpost._utils import maybe_closing
 
+
 def skip_every_other():
     async def middleware[T](events: AsyncIterator[T]) -> AsyncIterator[T]:
         async with maybe_closing(events):
@@ -117,6 +119,7 @@ def skip_every_other():
                 if i % 2 == 0:
                     yield event
                 i += 1
+
     return middleware
 ```
 

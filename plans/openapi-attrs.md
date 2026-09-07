@@ -68,13 +68,14 @@ implementers):
 # adapters/__init__.py
 SchemaFor = Callable[[Any], dict[str, Any]]  # ref or inline
 
+
 class TypeAdapter(Protocol):
     ...
-    def schema(self, t: Any, /, *, ref_template: str,
-               schema_for: SchemaFor | None = None) -> dict[str, Any]: ...
-    def components(self, types: Sequence[Any], /, *, ref_template: str,
-                   schema_for: SchemaFor | None = None
-                   ) -> dict[str, dict[str, Any]]: ...
+
+    def schema(self, t: Any, /, *, ref_template: str, schema_for: SchemaFor | None = None) -> dict[str, Any]: ...
+    def components(
+        self, types: Sequence[Any], /, *, ref_template: str, schema_for: SchemaFor | None = None
+    ) -> dict[str, dict[str, Any]]: ...
 ```
 
 - Existing implementations (`MsgspecAdapter`, `PydanticAdapter`) accept
@@ -130,9 +131,7 @@ class AttrsAdapter:
     def components(self, types, /, *, ref_template, schema_for=None):
         out: dict[str, dict[str, Any]] = {}
         for t in types:
-            out[t.__name__] = self._build_object_schema(
-                t, ref_template=ref_template, schema_for=schema_for
-            )
+            out[t.__name__] = self._build_object_schema(t, ref_template=ref_template, schema_for=schema_for)
         return out
 
     def decode(self, body, t, /, *, content_type):
@@ -147,9 +146,7 @@ class AttrsAdapter:
         properties: dict[str, dict[str, Any]] = {}
         required: list[str] = []
         for f in attrs.fields(t):
-            field_schema = self._field_schema(
-                f.type, ref_template=ref_template, schema_for=schema_for
-            )
+            field_schema = self._field_schema(f.type, ref_template=ref_template, schema_for=schema_for)
             properties[f.name] = field_schema
             if f.default is attrs.NOTHING:
                 required.append(f.name)
@@ -200,14 +197,17 @@ Key points:
 @functools.cache
 def default_registry() -> AdapterRegistry:
     from localpost.openapi.adapters._msgspec import MsgspecAdapter
+
     adapters: list[TypeAdapter] = []
     try:
         from localpost.openapi.adapters._pydantic import PydanticAdapter
+
         adapters.append(PydanticAdapter())
     except ImportError:
         pass
     try:
         from localpost.openapi.adapters._attrs import AttrsAdapter
+
         adapters.append(AttrsAdapter())
     except ImportError:
         pass

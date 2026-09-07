@@ -202,10 +202,10 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
         try:
             import pytimeparse2  # noqa: PLC0415
 
-            use_dateutil = pytimeparse2.HAS_RELITIVE_TIMEDELTA
+            use_dateutil = pytimeparse2.HAS_RELATIVE_TIMEDELTA
             try:
                 # Make sure to get timedelta, not relativedelta from dateutil
-                pytimeparse2.HAS_RELITIVE_TIMEDELTA = False
+                pytimeparse2.HAS_RELATIVE_TIMEDELTA = False
                 # ``as_timedelta=True`` makes ``parse`` return ``timedelta``
                 # exclusively, but the stubs still expose ``int | float | timedelta``.
                 result = cast("timedelta | None", pytimeparse2.parse(value, as_timedelta=True))
@@ -213,7 +213,7 @@ def ensure_td(value: timedelta | str, /) -> timedelta:
                     raise ValueError(f"Invalid time period: {value!r}")
                 return result
             finally:
-                pytimeparse2.HAS_RELITIVE_TIMEDELTA = use_dateutil
+                pytimeparse2.HAS_RELATIVE_TIMEDELTA = use_dateutil
         except ImportError:
             raise ValueError("pytimeparse2 package is required to parse a time period string") from None
     raise ValueError(f"Invalid time period: {value!r}")

@@ -16,18 +16,19 @@ router shape, transport adapters) leaves the door open.
 
 ```python
 class WebSocketCtx(Protocol):
-    request: Request                      # initial handshake request
+    request: Request  # initial handshake request
     remote_addr: str | None
     local_addr: str | None
-    scheme: str                           # "ws" | "wss"
+    scheme: str  # "ws" | "wss"
     attrs: dict[Any, Any]
 
     def accept(self, *, subprotocol: str | None = None) -> None: ...
     def reject(self, status: int = 403) -> None: ...
-    def receive(self) -> WSMessage: ...   # blocks; returns text / bytes / Close
+    def receive(self) -> WSMessage: ...  # blocks; returns text / bytes / Close
     def send_bytes(self, data: bytes) -> None: ...
-    def send_str(self,  data: str)  -> None: ...
+    def send_str(self, data: str) -> None: ...
     def close(self, code: int = 1000) -> None: ...
+
 
 WSHandler = Callable[[WebSocketCtx], None]
 ```

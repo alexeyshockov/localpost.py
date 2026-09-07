@@ -60,6 +60,7 @@ def hello(name: str):
 def update_profile(ctx: HTTPReqCtx, name: str):
     import json
     from localpost.http import read_body
+
     profile = json.loads(read_body(ctx))
     return {"updated": name, "profile": profile}
 
@@ -249,21 +250,26 @@ slow downloads can't pin all the API workers:
 
 ```python
 from localpost.http import (
-    Routes, ServerConfig, http_server, static_handler, thread_pool_handler,
+    Routes,
+    ServerConfig,
+    http_server,
+    static_handler,
+    thread_pool_handler,
 )
 
 routes = Routes()
 # ... register API routes ...
 
-api    = thread_pool_handler(routes.build().as_handler())
+api = thread_pool_handler(routes.build().as_handler())
 static = thread_pool_handler(
-    static_handler("/var/www", prefix=b"/static/",
-                   cache_control="public, max-age=31536000, immutable"),
+    static_handler("/var/www", prefix=b"/static/", cache_control="public, max-age=31536000, immutable"),
 )
 
 async with api as api_h, static as static_h:
+
     def root(ctx):
         return (static_h if ctx.request.path.startswith(b"/static/") else api_h)(ctx)
+
     async with http_server(ServerConfig(), root):
         ...
 ```
